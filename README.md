@@ -38,7 +38,7 @@ dsh --profile topic-e2e --no-open --port 8791      # 打印带 token 的 URL
 dsh plugin --profile desktop add "link:$(pwd)"
 ```
 
-仓库为私有;已安装过旧名 `dsh-topic-sidebar` 的 profile 需要先移除旧条目,再添加新名。
+仓库为私有。
 
 ## 数据与文件
 
@@ -50,8 +50,6 @@ dsh plugin --profile desktop add "link:$(pwd)"
 | `localStorage["dsh-better-workspace:prefs:v1"]` | 工作区/主题筛选、折叠、搜索、选择模式 |
 
 写入采用 临时文件 → `fsync` → `rename`,并在覆盖前保留 `.bak`;主文件损坏时自动回退备份并进入**只读模式**(面板顶部横幅提示)。
-
-**从旧名 `dsh-topic-sidebar` 升级**:宿主侧首次启动会把旧目录的 `topics.v1.json` 与 `.bak` 复制到 `dsh-better-workspace/`(旧文件保留,可手动删除);浏览器会回退读取旧 localStorage 键一次。插件 id 已变更,请在 profile 里移除旧插件条目后再安装新名。
 
 主题规则:一个会话最多属于一个主题;主题按工作区隔离;删除主题只清除归属,会话回到「默认」桶;归档/取消归档不改变归属;删除会话时同步清理其归属记录。
 

@@ -8,8 +8,6 @@
 import { api, ApiError } from './api.js';
 
 const PREFS_KEY = 'dsh-better-workspace:prefs:v1';
-/** Pre-rename key; read once so filters and collapse state survive the rename. */
-const LEGACY_PREFS_KEY = 'dsh-topic-sidebar:prefs:v1';
 const DEFAULT_PREFS = {
   workspaceFilter: null,
   topicFilter: null,
@@ -23,7 +21,7 @@ const DEFAULT_PREFS = {
 
 function readPrefs() {
   try {
-    const raw = localStorage.getItem(PREFS_KEY) ?? localStorage.getItem(LEGACY_PREFS_KEY);
+    const raw = localStorage.getItem(PREFS_KEY);
     if (!raw) return { ...DEFAULT_PREFS };
     const parsed = JSON.parse(raw);
     return {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTopicStore, StoreError, validateSessionIds, normalizeTopicName, normalizeTopicEmoji, pickTopicEmoji, TOPIC_EMOJIS } from '../lib/store.js';
@@ -19,32 +19,6 @@ test('a missing file reads as an empty writable state', async () => {
   assert.equal(snapshot.revision, 0);
   assert.equal(snapshot.readOnly, false);
   assert.deepEqual(Object.keys(snapshot.workspaces), []);
-});
-
-test('the pre-rename sidecar folder is copied into the new one once', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-topic-migrate-'));
-  const home = join(root, 'home');
-  const legacy = join(home, 'dsh-topic-sidebar');
-  await mkdir(legacy, { recursive: true });
-  const document = {
-    version: 1,
-    revision: 7,
-    updatedAt: 123,
-    workspaces: {
-      ws_a: { topics: [{ id: 'tp_old', name: '旧分组', emoji: '', order: 0, createdAt: 1 }], assignments: { ses_1: 'tp_old' } },
-    },
-  };
-  await writeFile(join(legacy, 'topics.v1.json'), JSON.stringify(document), 'utf8');
-  await writeFile(join(legacy, 'topics.v1.json.bak'), JSON.stringify({ ...document, revision: 6 }), 'utf8');
-
-  const store = createTopicStore({ home });
-  const snapshot = await store.snapshot();
-  assert.equal(store.dir, join(home, 'dsh-better-workspace'));
-  assert.equal(snapshot.revision, 7);
-  assert.equal(snapshot.workspaces.ws_a.topics[0].name, '旧分组');
-  assert.deepEqual(snapshot.workspaces.ws_a.assignments, { ses_1: 'tp_old' });
-  const migrated = JSON.parse(await readFile(join(home, 'dsh-better-workspace', 'topics.v1.json'), 'utf8'));
-  assert.equal(migrated.revision, 7, 'the new folder holds a copy, not an empty document');
 });
 
 test('creates topics, persists them, rotates emoji markers', async () => {
