@@ -792,6 +792,7 @@ export function OverlayPanel({ actions }) {
           workspaces={options}
           workspaceId={dialog.workspaceId}
           rowsFor={(workspaceId) => rowsInWorkspace(workspaceId).filter((row) => !row.blank)}
+          topicsFor={topicsWithCounts}
           onClose={() => setDialog(null)}
           onSubmit={async (input) => {
             const created = await store.createTopic(input);
@@ -804,6 +805,8 @@ export function OverlayPanel({ actions }) {
       {dialog?.type === 'edit' ? (
         <EditTopicDialog
           topic={dialog.topic}
+          workspaceId={dialog.workspaceId}
+          topicsFor={topicsWithCounts}
           emojis={state.emojis}
           onClose={() => setDialog(null)}
           onSubmit={async (input) => {

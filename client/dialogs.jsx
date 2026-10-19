@@ -9,6 +9,31 @@ import { t } from './i18n.js';
 
 export const FALLBACK_EMOJIS = ['\u{1F4C1}', '\u{1F4A1}', '\u{1F3A8}', '\u{1F6E0}\u{FE0F}', '\u{1F9EA}', '\u{1F41E}', '\u{1F680}', '\u{1F4DD}'];
 
+/** Control characters are the only glyphs the sidecar strips, so they are the illegal set. */
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+
+/**
+ * Why a topic name cannot be used right now, or `null` when it can. The host stays the
+ * authority — this answers before the round trip so the field, not a silent dead button,
+ * explains the problem.
+ */
+function nameProblem({ name, workspaceId, topicsFor, ignoreId }) {
+  const trimmed = name.trim();
+  if (trimmed === '') return 'empty';
+  if (CONTROL_CHARS.test(name)) return 'illegal';
+  const taken = (topicsFor?.(workspaceId) ?? []).some(
+    (topic) => topic.id !== ignoreId && String(topic.name ?? '').trim().toLowerCase() === trimmed.toLowerCase(),
+  );
+  return taken ? 'taken' : null;
+}
+
+function problemText(problem) {
+  if (problem === 'empty') return t('topic.nameRequired');
+  if (problem === 'illegal') return t('topic.nameIllegal');
+  if (problem === 'taken') return t('topic.nameTaken');
+  return null;
+}
+
 /** Marker picker: the host's curated glyphs plus a "no marker" option (rendered as a dash). */
 export function EmojiPicker({ emojis, value, onChange, name }) {
   return (
@@ -73,7 +98,7 @@ function SessionPicker({ rows, selected, onToggle, onSelectAll, query, onQuery }
  * chosen here when the caller could not resolve one, so the flow never dead-ends on a
  * greyed-out control.
  */
-export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, emojis, onSubmit, onClose }) {
+export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, topicsFor, emojis, onSubmit, onClose }) {
   const [name, setName] = React.useState('');
   const [nameTouched, setNameTouched] = React.useState(false);
   const [emoji, setEmoji] = React.useState(emojis?.[0] ?? '');
@@ -82,9 +107,11 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, emoji
   const [error, setError] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
   const rows = chosen ? (rowsFor?.(chosen) ?? []) : [];
-  // The create button greys out on an empty name; the hint explains why instead of leaving
-  // the user guessing.
-  const nameInvalid = nameTouched && name.trim() === '';
+  // The create button greys out on a bad name; the hint explains why instead of leaving the
+  // user guessing.
+  const problem = nameProblem({ name, workspaceId: chosen, topicsFor, ignoreId: null });
+  const problemLabel = problemText(problem);
+  const nameInvalid = Boolean(problem) && (problem !== 'empty' || nameTouched);
 
   const toggle = (id) => {
     setSelected((current) => {
@@ -101,8 +128,8 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, emoji
       setError(t('topic.pickWorkspace'));
       return;
     }
-    if (!trimmed) {
-      setError(t('topic.nameRequired'));
+    if (problem) {
+      setError(problemLabel);
       return;
     }
     setBusy(true);
@@ -125,7 +152,7 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, emoji
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>{t('action.cancel')}</Button>
-          <Button variant="primary" disabled={busy || !name.trim() || !chosen} onClick={submit}>
+          <Button variant="primary" disabled={busy || Boolean(problem) || !chosen} onClick={submit}>
             {busy ? t('state.loading') : t('action.create')}
           </Button>
         </>
@@ -171,7 +198,7 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, emoji
           onBlur={() => setNameTouched(true)}
           invalid={nameInvalid}
         />
-        {nameInvalid ? <span className="dts-field__hint is-error">{t('topic.nameRequired')}</span> : null}
+        {nameInvalid ? <span className="dts-field__hint is-error">{problemLabel}</span> : null}
       </label>
       <div className="dts-field">
         <span className="dts-field__label">{t('topic.icon')}</span>
@@ -195,16 +222,18 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, emoji
   );
 }
 
-export function EditTopicDialog({ topic, emojis, onSubmit, onDelete, onClose }) {
+export function EditTopicDialog({ topic, workspaceId, topicsFor, emojis, onSubmit, onDelete, onClose }) {
   const [name, setName] = React.useState(topic.name);
   const [emoji, setEmoji] = React.useState(topic.emoji ?? '');
   const [error, setError] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
   const dirty = name.trim() !== topic.name || emoji !== topic.emoji;
+  const problem = nameProblem({ name, workspaceId, topicsFor, ignoreId: topic.id });
+  const problemLabel = problemText(problem);
 
   const submit = async () => {
-    if (!name.trim()) {
-      setError(t('topic.nameRequired'));
+    if (problem) {
+      setError(problemLabel);
       return;
     }
     setBusy(true);
@@ -231,7 +260,7 @@ export function EditTopicDialog({ topic, emojis, onSubmit, onDelete, onClose }) 
           ) : null}
           <span className="dts-spacer" />
           <Button onClick={onClose}>{t('action.cancel')}</Button>
-          <Button variant="primary" disabled={busy || !dirty} onClick={submit}>
+          <Button variant="primary" disabled={busy || !dirty || Boolean(problem)} onClick={submit}>
             {t('action.save')}
           </Button>
         </>
@@ -239,7 +268,8 @@ export function EditTopicDialog({ topic, emojis, onSubmit, onDelete, onClose }) 
     >
       <label className="dts-field">
         <span className="dts-field__label">{t('topic.name')}</span>
-        <TextInput autoFocus value={name} onChange={setName} maxLength={40} onEnter={submit} />
+        <TextInput autoFocus value={name} onChange={setName} maxLength={40} onEnter={submit} invalid={Boolean(problem)} />
+        {problem ? <span className="dts-field__hint is-error">{problemLabel}</span> : null}
       </label>
       <label className="dts-field">
         <span className="dts-field__label">{t('topic.icon')}</span>
@@ -333,6 +363,9 @@ export function MoveToTopicDialog({ count, topics, emojis, onMove, onCreate, onC
   const [emoji, setEmoji] = React.useState(emojis?.[0] ?? '');
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(null);
+  // Same rules as the create dialog: the new name has to be unique in this workspace.
+  const problem = nameProblem({ name, workspaceId: null, topicsFor: () => topics, ignoreId: null });
+  const problemLabel = problemText(problem);
 
   const run = async (topicId) => {
     setBusy(true);
@@ -356,8 +389,12 @@ export function MoveToTopicDialog({ count, topics, emojis, onMove, onCreate, onC
             <Button onClick={() => setCreating(false)}>{t('action.cancel')}</Button>
             <Button
               variant="primary"
-              disabled={busy || !name.trim()}
+              disabled={busy || Boolean(problem)}
               onClick={async () => {
+                if (problem) {
+                  setError(problemLabel);
+                  return;
+                }
                 setBusy(true);
                 try {
                   const topic = await onCreate({ name: name.trim(), emoji, sessionIds: [] });
@@ -376,7 +413,8 @@ export function MoveToTopicDialog({ count, topics, emojis, onMove, onCreate, onC
       >
         <label className="dts-field">
           <span className="dts-field__label">{t('topic.name')}</span>
-          <TextInput autoFocus value={name} onChange={setName} maxLength={40} />
+          <TextInput autoFocus value={name} onChange={setName} maxLength={40} invalid={Boolean(problem)} />
+          {problem ? <span className="dts-field__hint is-error">{problemLabel}</span> : null}
         </label>
         <EmojiPicker emojis={emojis ?? FALLBACK_EMOJIS} value={emoji} onChange={setEmoji} name={t('topic.icon')} />
         {error ? <p className="dts-error">{error}</p> : null}

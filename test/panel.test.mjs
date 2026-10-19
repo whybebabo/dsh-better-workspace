@@ -864,6 +864,36 @@ test('an empty topic name explains itself once the field is touched', async () =
   assert.equal(document.querySelector('.dts-dialog .dts-field__hint.is-error'), null, 'typing clears the hint');
 });
 
+test('a name that is taken or illegal is refused in the field', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  await act(async () => {
+    find('.dts-row--group .dts-row__actions .dts-iconbtn').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const input = document.querySelector('.dts-dialog .dts-input');
+  const createButton = () => [...document.querySelectorAll('.dts-dialog .dts-btn')].find((node) => node.textContent.trim() === '创建');
+  const hint = () => document.querySelector('.dts-dialog .dts-field__hint.is-error');
+  const type = (value) => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(input, value);
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  };
+  await act(async () => type('设计'));
+  await tick();
+  assert.equal(hint().textContent, '该工作区已有同名分组', 'a duplicate name is called out in the field');
+  assert.equal(createButton().disabled, true);
+  assert.equal(calls.some((call) => call.url.endsWith('/topics/create')), false, 'nothing is sent');
+  await act(async () => type('非法\u0001字符'));
+  await tick();
+  assert.equal(hint().textContent, '分组名称不能包含控制字符', 'control characters are illegal');
+  assert.equal(createButton().disabled, true);
+  await act(async () => type('真的新分组'));
+  await tick();
+  assert.equal(hint(), null, 'a usable name clears the hint');
+  assert.equal(createButton().disabled, false);
+});
+
 test('the create dialog offers the host emoji list and submits the chosen glyph', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   responseOverrides[`${API}/topics/create`] = () => ({ ok: true, result: { revision: 9, result: { topic: { id: 'tp_new', name: 'x' } } } });
