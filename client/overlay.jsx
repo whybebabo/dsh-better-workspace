@@ -306,6 +306,61 @@ export function OverlayPanel({ actions }) {
     },
   }), [dropHint, options]);
 
+  /**
+   * Collapsed sidebar (the rail). The host keeps its own 新建会话 / 搜索会话 buttons there and
+   * they still run the stock flows, so the rail is bridged to the panel: a new session is
+   * created through the host command and auto-filed like the stock ＋ button, and search
+   * reopens the sidebar on the panel's own search field.
+   */
+  const [railIntent, setRailIntent] = React.useState(null);
+  React.useEffect(() => {
+    if (geom.visible || geom.reason !== 'rail') return undefined;
+    const onCapture = (event) => {
+      const button = event.target?.closest?.('button,[role="button"]');
+      if (!button) return;
+      const label = (button.getAttribute('aria-label') || button.getAttribute('title') || '').trim();
+      const className = String(button.className ?? '');
+      const isNewSession = /newSession/i.test(className) || /^(新建会话|new session|new chat)$/i.test(label);
+      const isSearch = /searchButton/i.test(className) || /(搜索会话|搜索|search sessions|search)/i.test(label);
+      if (!isNewSession && !isSearch) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (isSearch) {
+        try {
+          actions.toggleSidebar();
+        } catch (error) {
+          flash(error?.message ?? String(error), 'bad');
+        }
+        setRailIntent('search');
+        return;
+      }
+      try {
+        // Same command the ＋ menu uses; the blank it produces is auto-filed like any other
+        // new session (newest topic of its workspace, or the default group).
+        actions.startSession(tree.currentWorkspaceId ?? undefined);
+      } catch (error) {
+        flash(error?.message ?? String(error), 'bad');
+      }
+    };
+    document.addEventListener('click', onCapture, true);
+    return () => document.removeEventListener('click', onCapture, true);
+  }, [geom.visible, geom.reason, tree.currentWorkspaceId]);
+
+  React.useEffect(() => {
+    if (!geom.visible || !railIntent) return undefined;
+    // The panel has just re-mounted; give it a frame before driving its own controls.
+    const timer = setTimeout(() => {
+      setRailIntent(null);
+      if (railIntent === 'search') {
+        setPrefs({ searchOpen: true });
+        return;
+      }
+      const plus = document.querySelector(`.dts-header .dts-iconbtn[aria-label="${t('action.create')}"]`);
+      plus?.click();
+    }, 90);
+    return () => clearTimeout(timer);
+  }, [geom.visible, railIntent]);
+
   if (!state.ready || !state.reachable) return null;
   if (!geom.visible) return null;
 

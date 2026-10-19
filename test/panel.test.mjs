@@ -34,6 +34,8 @@ let disposers;
 let slotCalls;
 /** Per-test override for `archiveSession`, so the "needs a stop" path can be exercised. */
 let archiveImpl;
+let startSessionCalls = 0;
+let toggleSidebarCalls = 0;
 /** Per-test override for `pinSession`, so a click can move the host's pin set. */
 let pinImpl;
 
@@ -220,7 +222,9 @@ function applyPlugin(mod) {
       if (name === 'uiWorkspace') {
         return {
           openSession() {},
-          startSession() {},
+          startSession() {
+            startSessionCalls += 1;
+          },
           archiveSession: async (id) => (archiveImpl ? archiveImpl(id) : undefined),
           unarchiveSession: async () => {},
           pinSession: async (id) => (pinImpl ? pinImpl(id) : undefined),
@@ -228,7 +232,7 @@ function applyPlugin(mod) {
           pickDirectory: async () => null,
         };
       }
-      if (name === 'layout') return { toggleSidebar() {} };
+      if (name === 'layout') return { toggleSidebar() { toggleSidebarCalls += 1; } };
       throw new Error(`no such service: ${name}`);
     },
     slots: {
@@ -263,6 +267,8 @@ beforeEach(async () => {
   slotCalls = [];
   archiveImpl = null;
   pinImpl = null;
+  startSessionCalls = 0;
+  toggleSidebarCalls = 0;
   const sessionsFixture = makeSessions(3);
   sessionSource = makeSource(sessionsFixture);
   workspaceSource = makeSource({
@@ -1014,6 +1020,43 @@ test('a clipped session title scrolls while hovered', async () => {
     if (clientWidth) Object.defineProperty(proto, 'clientWidth', clientWidth);
     else delete proto.clientWidth;
   }
+});
+
+test('the collapsed rail routes its new session and search through the panel', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  assert.ok(container.querySelector('.dts-header'), 'the panel starts visible');
+
+  const frame = document.querySelector('[data-shell-overlay]').parentElement;
+  frame.setAttribute('data-sidebar-collapsed', '');
+  await tick(200);
+  assert.equal(container.querySelector('.dts-header'), null, 'the panel steps aside for the rail');
+
+  const railButton = (className, label) => {
+    const button = document.createElement('button');
+    button.className = className;
+    button.setAttribute('aria-label', label);
+    frame.append(button);
+    return button;
+  };
+  const newSessionButton = railButton('_2H3hWW_newSession', '新建会话');
+  await act(async () => {
+    newSessionButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+  });
+  await tick();
+  assert.equal(startSessionCalls, 1, 'the rail’s new session goes through the host command the panel re-files');
+
+  const searchButton = railButton('_9lTDKa_searchButton', '搜索会话');
+  await act(async () => {
+    searchButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+  });
+  await tick();
+  assert.equal(toggleSidebarCalls, 1, 'and its search reopens the sidebar');
+
+  frame.removeAttribute('data-sidebar-collapsed');
+  await tick(200);
+  await tick(300);
+  assert.ok(container.querySelector('.dts-header__search'), 'where the panel opens its own search');
 });
 
 test('the create dialog offers the host emoji list and submits the chosen glyph', async () => {
