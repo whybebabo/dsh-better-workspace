@@ -180,7 +180,7 @@ export function Checkbox({ checked, indeterminate = false, onChange, label, disa
   );
 }
 
-export function TextInput({ value, onChange, placeholder, autoFocus = false, onEnter, maxLength = 80, 'aria-label': ariaLabel }) {
+export function TextInput({ value, onChange, placeholder, autoFocus = false, onEnter, maxLength = 80, 'aria-label': ariaLabel, onBlur, invalid = false }) {
   return (
     <input
       className="dts-input"
@@ -190,6 +190,8 @@ export function TextInput({ value, onChange, placeholder, autoFocus = false, onE
       placeholder={placeholder}
       autoFocus={autoFocus}
       aria-label={ariaLabel ?? placeholder}
+      aria-invalid={invalid || undefined}
+      onBlur={onBlur}
       onChange={(event) => onChange?.(event.target.value)}
       onKeyDown={(event) => {
         if (event.key === 'Enter' && onEnter) {

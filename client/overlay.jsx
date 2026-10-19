@@ -250,7 +250,11 @@ export function OverlayPanel({ actions }) {
 
   const style = geom.rect ? { left: geom.rect.left, top: geom.rect.top, width: geom.rect.width, height: geom.rect.height } : undefined;
 
-  const setPrefs = (changes) => store.setPrefs(changes);
+  const setPrefs = (changes) => {
+    // Leaving selection mode always drops the selection — a stale highlight must not survive.
+    if (changes?.selectMode === false) store.clearSelection();
+    return store.setPrefs(changes);
+  };
   const pickWorkspace = (workspaceId) => setPrefs({ workspaceFilter: workspaceId, topicFilter: null });
   const pickTopic = (topicId) => setPrefs({ topicFilter: topicId });
 
@@ -761,6 +765,8 @@ export function OverlayPanel({ actions }) {
             count={selectedIds.length}
             busy={state.busy !== null || progress !== null}
             progress={progress}
+            hasArchived={selectedRows().some((row) => row.archived)}
+            hasUnarchived={selectedRows().some((row) => !row.archived)}
             deleteAvailable={state.deleteAvailable}
             onArchive={() => runBatch('archive', selectedIds)}
             onUnarchive={() => runBatch('unarchive', selectedIds)}

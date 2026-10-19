@@ -955,6 +955,14 @@
   border-color: var(--dsw-alias-state-business-primary, #4176e6);
 }
 
+.dts-dialog--settings .dts-input[aria-invalid='true'] {
+  border-color: var(--dsw-alias-state-error-primary, #ec1313);
+}
+
+.dts-dialog--settings .dts-field__hint.is-error {
+  color: var(--dsw-alias-state-error-primary, #ec1313);
+}
+
 .dts-settings-value {
   display: flex;
   align-items: center;

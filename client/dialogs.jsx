@@ -75,12 +75,16 @@ function SessionPicker({ rows, selected, onToggle, onSelectAll, query, onQuery }
  */
 export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, emojis, onSubmit, onClose }) {
   const [name, setName] = React.useState('');
+  const [nameTouched, setNameTouched] = React.useState(false);
   const [emoji, setEmoji] = React.useState(emojis?.[0] ?? '');
   const [chosen, setChosen] = React.useState(workspaceId ?? (workspaces.length === 1 ? workspaces[0].workspaceId : null));
   const [selected, setSelected] = React.useState(() => new Set());
   const [error, setError] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
   const rows = chosen ? (rowsFor?.(chosen) ?? []) : [];
+  // The create button greys out on an empty name; the hint explains why instead of leaving
+  // the user guessing.
+  const nameInvalid = nameTouched && name.trim() === '';
 
   const toggle = (id) => {
     setSelected((current) => {
@@ -157,7 +161,17 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, emoji
       </div>
       <label className="dts-field">
         <span className="dts-field__label">{t('topic.name')}</span>
-        <TextInput autoFocus value={name} onChange={setName} placeholder={t('topic.namePlaceholder')} maxLength={40} onEnter={submit} />
+        <TextInput
+          autoFocus
+          value={name}
+          onChange={(value) => { setName(value); setError(null); }}
+          placeholder={t('topic.namePlaceholder')}
+          maxLength={40}
+          onEnter={submit}
+          onBlur={() => setNameTouched(true)}
+          invalid={nameInvalid}
+        />
+        {nameInvalid ? <span className="dts-field__hint is-error">{t('topic.nameRequired')}</span> : null}
       </label>
       <div className="dts-field">
         <span className="dts-field__label">{t('topic.icon')}</span>

@@ -777,6 +777,93 @@ test('the attach picker hides the provisional New Session', async () => {
   assert.equal(titles.includes('会话 1'), true, 'ordinary sessions stay attachable');
 });
 
+test('the batch bar greys out actions that conflict with the selection', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  window.localStorage.setItem('dsh-better-workspace:prefs:v1', JSON.stringify({ showArchived: true }));
+  const base = sessionSource.getSnapshot();
+  sessionSource.set({
+    ...base,
+    ids: [...base.ids, 'ses_arch2'],
+    byId: { ...base.byId, ses_arch2: { id: 'ses_arch2', displayTitle: '归档项2', cwd: 'D:/work/one', updatedAt: Date.now() } },
+  });
+  workspaceSource.set({ ...workspaceSource.getSnapshot(), archivedSessionIds: ['ses_arch2'] });
+  await mount();
+  const headerButton = (title) => [...container.querySelectorAll('.dts-header .dts-iconbtn')].find((node) => node.getAttribute('title') === title);
+  await act(async () => {
+    headerButton('批量选择').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const toggle = (title) => {
+    const row = find('.dts-row--session', title);
+    row.querySelector('.dts-check input').dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+  };
+  await act(async () => {
+    toggle('会话 1');
+    toggle('归档项2');
+  });
+  await tick();
+  const buttonByLabel = (label) => [...container.querySelectorAll('.dts-batchbar .dts-btn')].find((node) => node.textContent.trim() === label);
+  assert.equal(buttonByLabel('归档').disabled, true, 'an archived row in the selection blocks 归档');
+  assert.equal(buttonByLabel('取消归档').disabled, true, 'an unarchived row in the selection blocks 取消归档');
+  assert.equal(buttonByLabel('移动到分组').disabled, true, 'archived rows cannot be re-filed');
+  assert.equal(buttonByLabel('永久删除').disabled, false, 'deleting stays available for both kinds');
+  await act(async () => {
+    toggle('归档项2');
+  });
+  await tick();
+  assert.equal(buttonByLabel('归档').disabled, false, 'unarchived-only selection can archive');
+  assert.equal(buttonByLabel('取消归档').disabled, true, 'and still cannot unarchive');
+  assert.equal(buttonByLabel('移动到分组').disabled, false);
+});
+
+test('exiting selection mode clears the selection', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const headerButton = (title) => [...container.querySelectorAll('.dts-header .dts-iconbtn')].find((node) => node.getAttribute('title') === title);
+  await act(async () => {
+    headerButton('批量选择').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  await act(async () => {
+    const row = find('.dts-row--session', '会话 1');
+    row.querySelector('.dts-check input').dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+  });
+  await tick();
+  assert.ok(container.querySelector('.dts-row--session.is-selected'), 'the row highlights while selected');
+  await act(async () => {
+    headerButton('退出选择').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  assert.equal(container.querySelector('.dts-row--session.is-selected'), null, 'no stale highlight survives the exit');
+  assert.equal(container.querySelector('.dts-batchbar'), null);
+});
+
+test('an empty topic name explains itself once the field is touched', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  await act(async () => {
+    find('.dts-row--group .dts-row__actions .dts-iconbtn').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const input = document.querySelector('.dts-dialog .dts-input');
+  assert.equal(document.querySelector('.dts-dialog .dts-field__hint.is-error'), null, 'an untouched field stays quiet');
+  await act(async () => {
+    input.dispatchEvent(new window.FocusEvent('focusout', { bubbles: true }));
+  });
+  await tick();
+  const hint = document.querySelector('.dts-dialog .dts-field__hint.is-error');
+  assert.ok(hint, 'the touched empty field explains what is missing');
+  assert.equal(hint.textContent, '请填写分组名称');
+  assert.equal(input.getAttribute('aria-invalid'), 'true');
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(input, '有名字了');
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+  await tick();
+  assert.equal(document.querySelector('.dts-dialog .dts-field__hint.is-error'), null, 'typing clears the hint');
+});
+
 test('the create dialog offers the host emoji list and submits the chosen glyph', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   responseOverrides[`${API}/topics/create`] = () => ({ ok: true, result: { revision: 9, result: { topic: { id: 'tp_new', name: 'x' } } } });

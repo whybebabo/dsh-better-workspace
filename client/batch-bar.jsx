@@ -7,22 +7,26 @@ import { t } from './i18n.js';
 
 export const BATCH_LIMIT = 200;
 
-export function BatchBar({ count, busy, progress, onArchive, onUnarchive, onMove, onDelete, onClear, deleteAvailable }) {
+export function BatchBar({ count, busy, progress, hasArchived, hasUnarchived, onArchive, onUnarchive, onMove, onDelete, onClear, deleteAvailable }) {
   const overLimit = count > BATCH_LIMIT;
+  // Mixed selections would half-apply an archive run, so the conflicting action greys out.
+  const archiveDisabled = count === 0 || busy || overLimit || hasArchived;
+  const unarchiveDisabled = count === 0 || busy || overLimit || hasUnarchived;
+  const moveDisabled = count === 0 || busy || overLimit || hasArchived;
   return (
     <div className="dts-batchbar" role="toolbar" aria-label={t('action.select')}>
       <span className="dts-batchbar__count">{t('batch.selected', { n: count })}</span>
       {progress ? <span className="dts-batchbar__progress">{progress}</span> : null}
       <span className="dts-header__spacer" />
-      <Button disabled={count === 0 || busy || overLimit} onClick={onArchive}>
+      <Button disabled={archiveDisabled} title={hasArchived ? t('batch.archiveDisabled') : undefined} onClick={onArchive}>
         <Icon name="archive" />
         {t('batch.archive')}
       </Button>
-      <Button disabled={count === 0 || busy || overLimit} onClick={onUnarchive}>
+      <Button disabled={unarchiveDisabled} title={hasUnarchived ? t('batch.unarchiveDisabled') : undefined} onClick={onUnarchive}>
         <Icon name="unarchive" />
         {t('batch.unarchive')}
       </Button>
-      <Button disabled={count === 0 || busy || overLimit} onClick={onMove}>
+      <Button disabled={moveDisabled} title={hasArchived ? t('batch.moveDisabled') : undefined} onClick={onMove}>
         <Icon name="move" />
         {t('batch.move')}
       </Button>
