@@ -130,24 +130,24 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, emoji
       <div className="dts-field">
         <span className="dts-field__label">{t('section.workspaces')}</span>
         {workspaces.length > 1 ? (
-          <div className="dts-switch" role="radiogroup" aria-label={t('section.workspaces')}>
-            {workspaces.map((workspace) => (
-              <button
-                key={workspace.workspaceId}
-                type="button"
-                role="radio"
-                aria-checked={chosen === workspace.workspaceId}
-                className={cx('dts-switch__item', chosen === workspace.workspaceId && 'is-on')}
-                title={workspace.path}
-                onClick={() => {
-                  setChosen(workspace.workspaceId);
-                  setSelected(new Set());
-                  setError(null);
-                }}
-              >
-                {workspace.title}
-              </button>
-            ))}
+          <div className="dts-select">
+            <select
+              value={chosen ?? ''}
+              aria-label={t('section.workspaces')}
+              onChange={(event) => {
+                setChosen(event.target.value || null);
+                setSelected(new Set());
+                setError(null);
+              }}
+            >
+              {chosen ? null : <option value="" disabled>{t('topic.pickWorkspace')}</option>}
+              {workspaces.map((workspace) => (
+                <option key={workspace.workspaceId} value={workspace.workspaceId} title={workspace.path}>
+                  {workspace.title}
+                </option>
+              ))}
+            </select>
+            <Icon name="chevronDown" className="dts-select__caret" size={14} />
           </div>
         ) : (
           <span className="dts-settings-value" title={workspaces.find((workspace) => workspace.workspaceId === chosen)?.path ?? ''}>
@@ -312,8 +312,8 @@ export function RenameSessionDialog({ row, onSubmit, onClose }) {
   );
 }
 
-/** Move one or many sessions into a topic, out of every topic, or into a brand-new one. */
-export function MoveToTopicDialog({ count, topics, emojis, ungroupedCount, onMove, onCreate, onClose }) {
+/** Move one or many sessions into a topic (the default group included) or into a brand-new one. */
+export function MoveToTopicDialog({ count, topics, emojis, onMove, onCreate, onClose }) {
   const [creating, setCreating] = React.useState(false);
   const [name, setName] = React.useState('');
   const [emoji, setEmoji] = React.useState(emojis?.[0] ?? '');
@@ -383,11 +383,6 @@ export function MoveToTopicDialog({ count, topics, emojis, ungroupedCount, onMov
       }
     >
       <div className="dts-list">
-        <button type="button" className="dts-list__item" onClick={() => run(null)} disabled={busy}>
-          <TopicMark emoji="" />
-          <span className="dts-list__label">{t('picker.ungrouped')}</span>
-          <span className="dts-list__count">{ungroupedCount}</span>
-        </button>
         {topics.length === 0 ? <div className="dts-list__empty">{t('topic.emptyHere')}</div> : null}
         {topics.map((topic) => (
           <button key={topic.id} type="button" className="dts-list__item" onClick={() => run(topic.id)} disabled={busy}>

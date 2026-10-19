@@ -14,6 +14,14 @@
 import { t } from './i18n.js';
 
 export const SEARCH_RESULT_LIMIT = 100;
+/** Reserved id of the per-workspace system group; mirrors `lib/store.js`. */
+export const DEFAULT_TOPIC_ID = 'tp_default';
+
+/** System groups render their localized label instead of the stored name. */
+export function topicLabel(topic) {
+  return topic?.system ? t('topic.default') : String(topic?.name ?? '');
+}
+
 function toSet(value) {
   if (value instanceof Set) return value;
   return new Set(Array.isArray(value) ? value : []);
@@ -116,7 +124,13 @@ export function buildTree({ items, list, archivedIds, pinnedIds, topicsOf, assig
 
   for (const workspace of scoped) {
     if (truncated) break;
-    const topics = topicsOf(workspace.workspaceId) ?? [];
+    // The default group is a reserved, server-managed topic; a snapshot that predates it is
+    // patched here so every workspace always renders (and accepts drops into) one.
+    let topics = topicsOf(workspace.workspaceId) ?? [];
+    if (!topics.some((topic) => topic.id === DEFAULT_TOPIC_ID)) {
+      topics = [{ id: DEFAULT_TOPIC_ID, name: '', emoji: '', order: -1, createdAt: 0, system: true }, ...topics];
+    }
+    topics = [...topics].sort((left, right) => (left.order ?? 0) - (right.order ?? 0));
     const assignments = assignmentsOf(workspace.workspaceId) ?? {};
     const topicById = new Map(topics.map((topic) => [topic.id, topic]));
 
@@ -142,8 +156,8 @@ export function buildTree({ items, list, archivedIds, pinnedIds, topicsOf, assig
       if (session?.blank && id !== current) continue;
       if (isArchived && !showArchived) continue;
       if (!session) continue;
-      const topicId = assignments[id] ?? null;
-      const topic = topicId ? topicById.get(topicId) : null;
+      const topicId = assignments[id] ?? DEFAULT_TOPIC_ID;
+      const topic = topicById.get(topicId) ?? topicById.get(DEFAULT_TOPIC_ID) ?? null;
       // A topic filter means "only this folder" — archived rows stay only when they belong
       // to that topic, so the bucket never shows unrelated history.
       if (topicFilter && topic?.id !== topicFilter) continue;
@@ -152,8 +166,8 @@ export function buildTree({ items, list, archivedIds, pinnedIds, topicsOf, assig
         archived,
         pinned,
         workspaceId: workspace.workspaceId,
-        topicId: topic?.id ?? null,
-        topicName: topic?.name ?? null,
+        topicId: topic?.id ?? DEFAULT_TOPIC_ID,
+        topicName: topic ? topicLabel(topic) : null,
         topicEmoji: topic?.emoji ?? '',
       });
       row.workspaceTitle = workspace.title;
@@ -189,23 +203,12 @@ export function buildTree({ items, list, archivedIds, pinnedIds, topicsOf, assig
       sections.push({
         kind: 'topic',
         id: topic.id,
-        name: topic.name,
+        name: topicLabel(topic),
         emoji: topic.emoji ?? '',
+        system: topic.system === true,
         rows: topicRows,
         collapsed: collapsedTopics.has(`${workspace.workspaceId}:${topic.id}`),
         total: topicRows.length,
-      });
-    }
-    const unfiled = live.filter((row) => row.topicId === null);
-    if (unfiled.length > 0) {
-      sections.push({
-        kind: 'ungrouped',
-        id: null,
-        name: null,
-        emoji: '',
-        rows: unfiled,
-        collapsed: collapsedWorkspaces.has(`${workspace.workspaceId}:ungrouped`),
-        total: unfiled.length,
       });
     }
     if (archivedRows.length > 0) {

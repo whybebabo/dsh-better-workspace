@@ -59,7 +59,15 @@ function stateResult() {
       readOnly: false,
       warning: null,
       emojis: ['\u{1F4C1}', '\u{1F4A1}', '\u{1F3A8}', '\u{1F680}'],
-      workspaces: { [WORKSPACE]: { topics: [{ id: TOPIC, name: '设计', emoji: '\u{1F4A1}', order: 0, createdAt: 1 }], assignments: { ses_0: TOPIC } } },
+      workspaces: {
+        [WORKSPACE]: {
+          topics: [
+            { id: 'tp_default', name: '默认分组', emoji: '', order: -1, createdAt: 0, system: true },
+            { id: TOPIC, name: '设计', emoji: '\u{1F4A1}', order: 0, createdAt: 1 },
+          ],
+          assignments: { ses_0: TOPIC },
+        },
+      },
     },
   };
 }
@@ -355,11 +363,11 @@ test('dragging a session onto a topic files it there', async () => {
   assert.equal(assign.body.workspaceId, WORKSPACE);
 });
 
-test('dropping onto the unfiled bucket clears the topic', async () => {
+test('dropping onto the default group re-files the session there', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   await mount();
-  const unfiled = find('.dts-row--topic.is-bucket', '默认分组');
-  assert.ok(unfiled, 'the unfiled bucket shows because sessions remain unassigned');
+  const unfiled = find('.dts-row--topic', '默认分组');
+  assert.ok(unfiled, 'the default group renders like any other topic');
   await act(async () => {
     const start = new window.Event('dragstart', { bubbles: true });
     start.dataTransfer = makeDataTransfer(['ses_2']);
@@ -369,7 +377,7 @@ test('dropping onto the unfiled bucket clears the topic', async () => {
     unfiled.dispatchEvent(drop);
   });
   const assign = calls.find((call) => call.url.endsWith('/assign'));
-  assert.equal(assign.body.topicId, null);
+  assert.equal(assign.body.topicId, 'tp_default', 'the drop lands in the reserved default group');
 });
 
 test('a foreign drop payload writes nothing', async () => {
@@ -434,7 +442,7 @@ test('long buckets render progressively and expand on demand', async () => {
   sessionSource.set(many);
   workspaceSource.set({ ...workspaceSource.getSnapshot(), items: [{ workspaceId: WORKSPACE, path: 'D:/work/one', title: 'One', sessionIds: many.ids, createdAt: 1, updatedAt: 1 }] });
   await mount();
-  const unfiledSection = find('.dts-section--ungrouped');
+  const unfiledSection = [...container.querySelectorAll('.dts-section--topic')].find((node) => node.querySelector('.dts-row--topic')?.textContent.includes('默认分组'));
   assert.equal(unfiledSection.querySelectorAll('.dts-row--session').length, 60, 'only the first 60 rows of the long bucket mount');
   assert.equal(container.querySelectorAll('.dts-row--session').length, 61, 'plus the one row filed under the topic');
   const button = find('.dts-reveal');
@@ -594,7 +602,7 @@ test('starting a session into a topic from the header files the new blank sessio
   await tick();
   const topicStep = [...document.querySelectorAll('.dts-pop--create .dts-menu__item')].map((node) => node.textContent.trim());
   assert.ok(topicStep.some((label) => label.includes('设计')), 'the topic list is offered');
-  assert.ok(topicStep.includes('默认分组'), 'and so is the unfiled bucket');
+  assert.ok(topicStep.some((label) => label.includes('默认分组')), 'and so is the default group');
   await act(async () => {
     [...document.querySelectorAll('.dts-pop--create .dts-menu__item')].find((node) => node.textContent.includes('设计')).dispatchEvent(new window.Event('click', { bubbles: true }));
   });
@@ -610,7 +618,7 @@ test('starting a session into a topic from the header files the new blank sessio
   assert.equal(assign.body.topicId, TOPIC);
 });
 
-test('choosing 默认分组 from the header keeps the blank out of the newest topic', async () => {
+test('choosing 默认分组 from the header files the blank into the default group', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 7, result: { changed: 1 } } });
   await mount();
@@ -624,7 +632,7 @@ test('choosing 默认分组 from the header keeps the blank out of the newest to
   });
   await tick();
   await act(async () => {
-    [...document.querySelectorAll('.dts-pop--create .dts-menu__item')].find((node) => node.textContent.trim() === '默认分组').dispatchEvent(new window.Event('click', { bubbles: true }));
+    [...document.querySelectorAll('.dts-pop--create .dts-menu__item')].find((node) => node.textContent.includes('默认分组')).dispatchEvent(new window.Event('click', { bubbles: true }));
   });
 
   const before = sessionSource.getSnapshot();
@@ -633,16 +641,18 @@ test('choosing 默认分组 from the header keeps the blank out of the newest to
     sessionSource.set({ ...before, ids: [...before.ids, 'ses_default'], byId: { ...before.byId, ses_default: created }, current: 'ses_default' });
   });
   await tick();
-  assert.equal(calls.some((call) => call.url.endsWith('/assign')), false, 'an explicit default choice is not overridden by auto-filing');
+  const assign = calls.find((call) => call.url.endsWith('/assign'));
+  assert.ok(assign, 'the explicit default choice is honoured');
+  assert.equal(assign.body.topicId, 'tp_default');
 });
 
-test('the unassigned bucket is labelled 默认分组', async () => {
+test('the default group renders as a system topic row', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   await mount();
-  const bucket = find('.dts-row--topic.is-bucket');
-  assert.ok(bucket);
-  assert.ok(bucket.textContent.includes('默认分组'), bucket.textContent);
-  assert.equal(bucket.textContent.includes('未分类'), false);
+  const row = find('.dts-row--topic', '默认分组');
+  assert.ok(row, 'the default group is listed');
+  assert.equal(row.className.includes('is-bucket'), false, 'it is a topic row, not a trailing bucket');
+  assert.ok(row.querySelector('.dts-dash'), 'and carries the no-marker dash');
 });
 
 test('choosing a workspace in the create menu continues into the topic step', async () => {
@@ -667,7 +677,7 @@ test('choosing a workspace in the create menu continues into the topic step', as
   await tick();
   labels = [...document.querySelectorAll('.dts-pop--create .dts-menu__item')].map((node) => node.textContent.trim());
   assert.ok(labels.some((label) => label.includes('设计')), 'and picking a workspace lands on the topic list');
-  assert.ok(labels.includes('默认分组'));
+  assert.ok(labels.some((label) => label.includes('默认分组')));
 });
 
 test('unselected workspaces carry no background and only the current one tints its folder', async () => {
@@ -725,9 +735,46 @@ test('topics show their emoji and the default bucket shows a dash', async () => 
   assert.equal(mark.textContent, '\u{1F4A1}');
   assert.equal(topicRow.querySelector('.dts-dash'), null);
 
-  const bucket = find('.dts-row--topic.is-bucket', '默认分组');
-  assert.ok(bucket.querySelector('.dts-dash'), 'the default bucket carries a plain dash');
+  const bucket = find('.dts-row--topic', '默认分组');
+  assert.ok(bucket.querySelector('.dts-dash'), 'the default group carries a plain dash');
   assert.equal(bucket.querySelector('.dts-emoji'), null);
+});
+
+test('the create dialog picks the workspace from a dropdown', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  const extra = { workspaceId: 'ws_two', path: 'D:/work/two', title: 'Two', sessionIds: [], createdAt: 2, updatedAt: 2 };
+  workspaceSource.set({ ...workspaceSource.getSnapshot(), items: [...workspaceSource.getSnapshot().items, extra] });
+  await mount();
+  await act(async () => {
+    find('.dts-row--group .dts-row__actions .dts-iconbtn').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const select = document.querySelector('.dts-dialog--settings .dts-select select');
+  assert.ok(select, 'a dropdown replaces the segmented switch');
+  assert.equal(select.querySelectorAll('option').length, 2, 'one option per workspace');
+  assert.equal(select.selectedOptions[0]?.value, WORKSPACE, 'opening from a workspace row preselects it');
+});
+
+test('the attach picker hides the provisional New Session', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  const base = sessionSource.getSnapshot();
+  sessionSource.set({
+    ...base,
+    ids: [...base.ids, 'ses_blank'],
+    byId: { ...base.byId, ses_blank: { id: 'ses_blank', displayTitle: '', cwd: 'D:/work/one', updatedAt: Date.now(), blank: true, retainedBy: { mainView: 1 } } },
+  });
+  const workspace = workspaceSource.getSnapshot();
+  workspaceSource.set({ ...workspace, items: [{ ...workspace.items[0], sessionIds: [...base.ids, 'ses_blank'] }] });
+  await mount();
+  await act(async () => {
+    find('.dts-row--group .dts-row__actions .dts-iconbtn').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const picker = document.querySelector('.dts-picker');
+  assert.ok(picker, 'the attach picker renders');
+  const titles = [...picker.querySelectorAll('.dts-picker__title')].map((node) => node.textContent.trim());
+  assert.equal(titles.includes('新会话'), false, 'the blank row is not attachable');
+  assert.equal(titles.includes('会话 1'), true, 'ordinary sessions stay attachable');
 });
 
 test('the create dialog offers the host emoji list and submits the chosen glyph', async () => {
@@ -829,7 +876,9 @@ test('pin from the row strip moves the session to the top of its bucket', async 
     workspaceSource.set({ ...snapshot, pinnedSessionIds: [id, ...snapshot.pinnedSessionIds.filter((entry) => entry !== id)] });
   };
   await mount();
-  const bucketIds = () => [...document.querySelectorAll('.dts-section--ungrouped .dts-row--session')]
+  const defaultSection = () => [...document.querySelectorAll('.dts-section--topic')]
+    .find((node) => node.querySelector('.dts-row--topic')?.textContent.includes('默认分组'));
+  const bucketIds = () => [...defaultSection().querySelectorAll('.dts-row--session')]
     .map((row) => row.querySelector('.dts-row__text')?.textContent);
   assert.deepEqual(bucketIds(), ['会话 1', '会话 2']);
 
@@ -921,15 +970,15 @@ test('the composer topic chip shows the open session topic and re-files it', asy
     chip.dispatchEvent(new window.Event('click', { bubbles: true }));
   });
   await tick();
-  const item = [...document.querySelectorAll('.dts-pop--composer .dts-menu__item')].find((node) => node.textContent.trim() === '默认分组');
-  assert.ok(item, 'the unfiled bucket is offered');
+  const item = [...document.querySelectorAll('.dts-pop--composer .dts-menu__item')].find((node) => node.textContent.includes('默认分组'));
+  assert.ok(item, 'the default group is offered');
   await act(async () => {
     item.dispatchEvent(new window.Event('click', { bubbles: true }));
   });
   await tick();
   const assign = calls.find((call) => call.url.endsWith('/assign'));
   assert.deepEqual(assign.body.sessionIds, ['ses_0'], 'the open session is the one re-filed');
-  assert.equal(assign.body.topicId, null);
+  assert.equal(assign.body.topicId, 'tp_default', 'picking the default group files into it');
 });
 
 test('an archived row keeps the stock menu and only adds permanent delete', async () => {

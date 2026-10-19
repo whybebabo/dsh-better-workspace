@@ -84,10 +84,6 @@ function CreateMenu({ anchor, onClose, workspaceFilter, workspaces, topicsFor, o
     <Popover anchor={anchor} onClose={onClose} width={252} className="dts-pop--create">
       <div className="dts-pop__head">{t('action.newSessionInTopic')}</div>
       <div className="dts-pop__list">
-        <MenuItem icon={<TopicMark emoji="" />} onSelect={() => startInto(null)}>
-          {t('topic.ungrouped')}
-        </MenuItem>
-        {topics.length === 0 ? <div className="dts-pop__empty">{t('topic.emptyHere')}</div> : null}
         {topics.map((topic) => (
           <MenuItem key={topic.id} icon={<TopicMark emoji={topic.emoji} />} hint={String(topic.count ?? '')} onSelect={() => startInto(topic.id)}>
             {topic.name}

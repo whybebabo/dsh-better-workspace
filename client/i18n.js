@@ -49,7 +49,7 @@ const zh = {
   'menu.reload': '刷新',
   'menu.newSession': '在当前工作区新建会话',
 
-  'topic.ungrouped': '默认分组',
+  'topic.default': '默认分组',
   'topic.archived': '已归档',
   'topic.new': '新建分组',
   'topic.createDescription': '在同一工作区内建立分组，把相关会话收在一起。',
@@ -98,11 +98,9 @@ const zh = {
   'session.state.running': '运行中',
   'session.dragHint': '拖到分组行即可归组',
   'session.movedTo': '已移动到「{name}」',
-  'session.movedOut': '已移出分组',
   'session.crossWorkspace': '不能跨工作区归组',
 
   'picker.topic': '把 {n} 个会话移动到分组',
-  'picker.ungrouped': '默认分组',
   'picker.newTopic': '新建分组并放入…',
 
   'batch.selected': '已选 {n} 项',
@@ -197,7 +195,7 @@ const en = {
   'menu.reload': 'Refresh',
   'menu.newSession': 'New session in this workspace',
 
-  'topic.ungrouped': 'Default',
+  'topic.default': 'Default',
   'topic.archived': 'Archived',
   'topic.new': 'New topic',
   'topic.createDescription': 'Create a group inside one workspace and keep related sessions together.',
@@ -246,11 +244,9 @@ const en = {
   'session.state.running': 'Running',
   'session.dragHint': 'Drag a session onto a topic to file it',
   'session.movedTo': 'Moved to “{name}”',
-  'session.movedOut': 'Moved out of the topic',
   'session.crossWorkspace': 'Sessions cannot cross workspaces',
 
   'picker.topic': 'Move {n} sessions to a topic',
-  'picker.ungrouped': 'Default',
   'picker.newTopic': 'Create a topic and move there…',
 
   'batch.selected': '{n} selected',

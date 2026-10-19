@@ -10,7 +10,7 @@ import * as React from 'react';
 import { createPortal } from 'react-dom';
 import { observeComposerSlot, resolveComposerWorkspace } from './composer.js';
 import { observeWorkspaceRegion, setRegionInert, watchRegionModals } from './geometry.js';
-import { buildTree, buildWorkspaceOptions, mainSessionId, newestTopic } from './model.js';
+import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, mainSessionId, newestTopic, topicLabel } from './model.js';
 import { createPanelStore } from './store.js';
 import { runSessionAction, mergeOutcomes, BATCH_LIMIT } from './batch.js';
 import { cx, Popover, MenuItem, Icon, useLanguage, TopicMark } from './widgets.jsx';
@@ -304,13 +304,13 @@ export function OverlayPanel({ actions }) {
 
   const selectedIds = state.selection;
 
-  /** A drop files the dragged session(s) into the target topic, or clears it for the default bucket. */
+  /** A drop files the dragged session(s) into the target topic (the default group included). */
   const dropSessions = ({ ids, workspaceId, topicId }) => {
     if (!ids?.length || !workspaceId) return;
-    const name = topicId ? (store.topicsOf(workspaceId).find((entry) => entry.id === topicId)?.name ?? null) : null;
+    const topic = (store.topicsOf(workspaceId) ?? []).find((entry) => entry.id === topicId);
     store
       .assign({ workspaceId, sessionIds: ids, topicId })
-      .then(() => flash(name ? t('session.movedTo', { name }) : t('session.movedOut')))
+      .then(() => flash(t('session.movedTo', { name: topicLabel(topic) })))
       .catch((error) => flash(error?.message ?? String(error), 'bad'));
   };
 
@@ -339,7 +339,7 @@ export function OverlayPanel({ actions }) {
   function topicsWithCounts(workspaceId) {
     return (store.topicsOf(workspaceId) ?? []).map((topic) => {
       const assignments = store.assignmentsOf(workspaceId) ?? {};
-      return { ...topic, count: Object.values(assignments).filter((id) => id === topic.id).length };
+      return { ...topic, name: topicLabel(topic), count: Object.values(assignments).filter((id) => id === topic.id).length };
     });
   }
 
@@ -458,47 +458,55 @@ export function OverlayPanel({ actions }) {
     return items;
   };
 
-  const topicMenu = ({ section, group }) => [
-    <MenuItem key="filter" icon={<Icon name="filter" />} onSelect={() => { setMenu(null); pickTopic(prefs.topicFilter === section.id ? null : section.id); }}>
-      {t('topic.filter')}
-    </MenuItem>,
-    <MenuItem key="select" icon={<Icon name="check" />} onSelect={() => { setMenu(null); setPrefs({ selectMode: true }); store.setSelection(section.rows.map((row) => row.id)); }}>
-      {t('topic.batchSelect')}
-    </MenuItem>,
-    <MenuItem
-      key="new"
-      icon={<Icon name="plus" />}
-      onSelect={() => {
-        setMenu(null);
-        startSessionUnderTopic(group.workspaceId, section.id);
-      }}
-    >
-      {t('topic.newSession')}
-    </MenuItem>,
-    <MenuItem
-      key="edit"
-      icon={<Icon name="edit" />}
-      onSelect={() => {
-        const topic = (store.topicsOf(group.workspaceId) ?? []).find((entry) => entry.id === section.id);
-        setMenu(null);
-        if (topic) setDialog({ type: 'edit', topic, workspaceId: group.workspaceId });
-      }}
-    >
-      {t('topic.rename')}
-    </MenuItem>,
-    <MenuItem
-      key="delete"
-      danger
-      icon={<Icon name="trash" />}
-      onSelect={() => {
-        const topic = (store.topicsOf(group.workspaceId) ?? []).find((entry) => entry.id === section.id);
-        setMenu(null);
-        if (topic) setDialog({ type: 'deleteTopic', topic, workspaceId: group.workspaceId, count: section.rows.length });
-      }}
-    >
-      {t('topic.delete')}
-    </MenuItem>,
-  ];
+  const topicMenu = ({ section, group }) => {
+    const items = [
+      <MenuItem key="filter" icon={<Icon name="filter" />} onSelect={() => { setMenu(null); pickTopic(prefs.topicFilter === section.id ? null : section.id); }}>
+        {t('topic.filter')}
+      </MenuItem>,
+      <MenuItem key="select" icon={<Icon name="check" />} onSelect={() => { setMenu(null); setPrefs({ selectMode: true }); store.setSelection(section.rows.map((row) => row.id)); }}>
+        {t('topic.batchSelect')}
+      </MenuItem>,
+      <MenuItem
+        key="new"
+        icon={<Icon name="plus" />}
+        onSelect={() => {
+          setMenu(null);
+          startSessionUnderTopic(group.workspaceId, section.id);
+        }}
+      >
+        {t('topic.newSession')}
+      </MenuItem>,
+    ];
+    // The default group is system-owned: it can be filtered, filled and selected, but not
+    // renamed or deleted.
+    if (section.system) return items;
+    items.push(
+      <MenuItem
+        key="edit"
+        icon={<Icon name="edit" />}
+        onSelect={() => {
+          const topic = (store.topicsOf(group.workspaceId) ?? []).find((entry) => entry.id === section.id);
+          setMenu(null);
+          if (topic) setDialog({ type: 'edit', topic, workspaceId: group.workspaceId });
+        }}
+      >
+        {t('topic.rename')}
+      </MenuItem>,
+      <MenuItem
+        key="delete"
+        danger
+        icon={<Icon name="trash" />}
+        onSelect={() => {
+          const topic = (store.topicsOf(group.workspaceId) ?? []).find((entry) => entry.id === section.id);
+          setMenu(null);
+          if (topic) setDialog({ type: 'deleteTopic', topic, workspaceId: group.workspaceId, count: section.rows.length });
+        }}
+      >
+        {t('topic.delete')}
+      </MenuItem>,
+    );
+    return items;
+  };
 
   const workspaceMenu = (group) => [
     <MenuItem key="only" icon={<Icon name="folder" />} onSelect={() => { setMenu(null); pickWorkspace(group.workspaceId); }}>
@@ -621,7 +629,7 @@ export function OverlayPanel({ actions }) {
   const composerWorkspaceId = resolveComposerWorkspace(composer.workspaceTitle, options);
   const composerSessionId = tree.currentSessionId ?? null;
   const composerTopic = composerWorkspaceId && composerSessionId
-    ? (store.topicsOf(composerWorkspaceId) ?? []).find((entry) => entry.id === (store.assignmentsOf(composerWorkspaceId) ?? {})[composerSessionId]) ?? null
+    ? (store.topicsOf(composerWorkspaceId) ?? []).find((entry) => entry.id === ((store.assignmentsOf(composerWorkspaceId) ?? {})[composerSessionId] ?? DEFAULT_TOPIC_ID)) ?? null
     : null;
 
   const assignCurrent = async (topicId) => {
@@ -629,8 +637,8 @@ export function OverlayPanel({ actions }) {
     if (!composerWorkspaceId || !composerSessionId) return;
     try {
       await store.assign({ workspaceId: composerWorkspaceId, sessionIds: [composerSessionId], topicId });
-      const name = topicId ? (store.topicsOf(composerWorkspaceId) ?? []).find((entry) => entry.id === topicId)?.name : null;
-      flash(name ? t('session.movedTo', { name }) : t('session.movedOut'));
+      const topic = (store.topicsOf(composerWorkspaceId) ?? []).find((entry) => entry.id === topicId);
+      flash(t('session.movedTo', { name: topicLabel(topic) }));
     } catch (error) {
       flash(error?.message ?? String(error), 'bad');
     }
@@ -646,7 +654,7 @@ export function OverlayPanel({ actions }) {
       onClick={(event) => setComposerMenu(composerMenu ? null : event.currentTarget.getBoundingClientRect())}
     >
       {composerTopic ? <TopicMark emoji={composerTopic.emoji} /> : <Icon name="topic" />}
-      <span className="dts-composer-topic__label">{composerTopic ? composerTopic.name : t('composer.pickTopic')}</span>
+      <span className="dts-composer-topic__label">{composerTopic ? topicLabel(composerTopic) : t('composer.pickTopic')}</span>
       <Icon name="chevronDown" className="dts-composer-topic__caret" />
     </button>,
     composer.container,
@@ -656,12 +664,6 @@ export function OverlayPanel({ actions }) {
     <Popover anchor={composerMenu} onClose={() => setComposerMenu(null)} width={240} align="left" className="dts-pop--composer">
       <div className="dts-pop__head">{t('composer.pickTopic')}</div>
       <div className="dts-pop__list">
-        <MenuItem icon={<TopicMark emoji="" />} onSelect={() => assignCurrent(null)}>
-          {t('topic.ungrouped')}
-        </MenuItem>
-        {composerWorkspaceId && (store.topicsOf(composerWorkspaceId) ?? []).length === 0 ? (
-          <div className="dts-pop__empty">{t('topic.emptyHere')}</div>
-        ) : null}
         {(composerWorkspaceId ? topicsWithCounts(composerWorkspaceId) : []).map((topic) => (
           <MenuItem
             key={topic.id}
@@ -783,7 +785,7 @@ export function OverlayPanel({ actions }) {
           emojis={state.emojis}
           workspaces={options}
           workspaceId={dialog.workspaceId}
-          rowsFor={(workspaceId) => rowsInWorkspace(workspaceId)}
+          rowsFor={(workspaceId) => rowsInWorkspace(workspaceId).filter((row) => !row.blank)}
           onClose={() => setDialog(null)}
           onSubmit={async (input) => {
             const created = await store.createTopic(input);
@@ -822,11 +824,10 @@ export function OverlayPanel({ actions }) {
           count={dialog.ids.length}
           emojis={state.emojis}
           topics={topicsWithCounts(dialog.workspaceId)}
-          ungroupedCount={rowsInWorkspace(dialog.workspaceId).filter((row) => row.topicId === null).length}
           onClose={() => setDialog(null)}
           onMove={async (topicId) => {
             const result = await store.assign({ workspaceId: dialog.workspaceId, sessionIds: dialog.ids, topicId });
-            flash(topicId ? `✓ ${result.result.changed}` : `✓ ${t('picker.ungrouped')}`);
+            flash(`✓ ${result.result.changed}`);
           }}
           onCreate={async (input) => {
             const created = await store.createTopic({ workspaceId: dialog.workspaceId, ...input });

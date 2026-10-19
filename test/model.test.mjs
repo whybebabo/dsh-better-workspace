@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTree, buildWorkspaceOptions, mainSessionId, basename, newestTopic } from '../client/model.js';
+import { buildTree, buildWorkspaceOptions, mainSessionId, basename, newestTopic, DEFAULT_TOPIC_ID } from '../client/model.js';
 
 const WS_A = 'ws_a';
 const WS_B = 'ws_b';
@@ -49,17 +49,20 @@ test('archived sessions appear in their own bucket when enabled', () => {
   assert.equal(archived.rows[0].archived, true);
 });
 
-test('topics folder the sessions and unfiled stays last', () => {
+test('topics folder the sessions and unassigned ones land in the default group', () => {
   const topics = { [WS_A]: [{ id: 'tp_1', name: '设计', emoji: '{1F4A1}', order: 0 }, { id: 'tp_2', name: '排查', emoji: '{1F3A8}', order: 1 }] };
   const assignments = { [WS_A]: { ses_1: 'tp_1', ses_2: 'tp_2', ses_arch: 'tp_1' } };
   const built = buildTree({ ...fixture({ topics, assignments }), prefs: {}, query: '' });
   const alpha = built.groups.find((group) => group.workspaceId === WS_A);
-  assert.deepEqual(sectionIds(alpha), ['topic:设计', 'topic:排查', 'ungrouped:']);
-  const design = alpha.sections[0];
+  assert.deepEqual(sectionIds(alpha), ['topic:默认分组', 'topic:设计', 'topic:排查'], 'the system default group leads');
+  const fallback = alpha.sections[0];
+  assert.equal(fallback.id, DEFAULT_TOPIC_ID);
+  assert.equal(fallback.system, true);
+  assert.deepEqual(fallback.rows.map((row) => row.id), ['ses_3'], 'unassigned sessions live in the default group');
+  const design = alpha.sections[1];
   assert.deepEqual(design.rows.map((row) => row.id), ['ses_1']);
   assert.equal(design.rows[0].topicEmoji, '{1F4A1}');
-  assert.deepEqual(alpha.sections[2].rows.map((row) => row.id), ['ses_3'], 'pinned/unfiled land in 未分类');
-  assert.equal(alpha.topicCount, 2);
+  assert.equal(alpha.topicCount, 3);
   assert.equal(alpha.liveCount, 3);
 });
 
@@ -88,11 +91,11 @@ test('pinned sessions lead their own bucket in host pin order', () => {
   assert.equal(design.rows[0].pinned, true);
 });
 
-test('pinned sessions lead the unfiled bucket too', () => {
+test('pinned sessions lead the default group too', () => {
   const built = buildTree({ ...fixture(), pinnedIds: ['ses_3'], prefs: {}, query: '' });
   const alpha = built.groups.find((group) => group.workspaceId === WS_A);
-  const unfiled = alpha.sections.find((section) => section.kind === 'ungrouped');
-  assert.deepEqual(unfiled.rows.map((row) => row.id), ['ses_3', 'ses_1', 'ses_2'], 'unpinned rows keep their relative order');
+  const fallback = alpha.sections.find((section) => section.id === DEFAULT_TOPIC_ID);
+  assert.deepEqual(fallback.rows.map((row) => row.id), ['ses_3', 'ses_1', 'ses_2'], 'unpinned rows keep their relative order');
 });
 
 test('workspace filter scopes the tree, topic filter keeps only that folder', () => {
@@ -164,7 +167,7 @@ test('collapse state is read from prefs with stable composite keys', () => {
   const built = buildTree({ ...fixture({ topics, assignments: { [WS_A]: { ses_1: 'tp_1' } } }), prefs, query: '' });
   const alpha = built.groups.find((group) => group.workspaceId === WS_A);
   assert.equal(alpha.collapsed, true);
-  assert.equal(alpha.sections[0].collapsed, true);
+  assert.equal(alpha.sections.find((section) => section.id === 'tp_1').collapsed, true);
 });
 
 test('search forces everything expanded', () => {

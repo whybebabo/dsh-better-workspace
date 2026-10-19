@@ -15,12 +15,11 @@ import { t } from './i18n.js';
 export const REVEAL_LIMIT = 60;
 
 function sectionLabel(section) {
-  if (section.kind === 'ungrouped') return t('topic.ungrouped');
   if (section.kind === 'archived') return t('topic.archived');
   return section.name;
 }
 
-/** Where a drop on this row lands: a topic files in, the unfiled bucket clears. */
+/** Where a drop on this row lands: a topic (default included) files in. */
 function targetOf(section, group) {
   return { workspaceId: group.workspaceId, topicId: section.kind === 'topic' ? section.id : null };
 }
@@ -134,10 +133,10 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
       aria-label={label}
       style={{ '--dts-indent': selectMode ? '8px' : '10px' }}
       tabIndex={0}
-      title={section.kind === 'topic' ? t('topic.renameHint') : undefined}
+      title={section.kind === 'topic' && !section.system ? t('topic.renameHint') : undefined}
       onClick={onToggleCollapse}
       onDoubleClick={(event) => {
-        if (section.kind !== 'topic') return;
+        if (section.kind !== 'topic' || section.system) return;
         event.stopPropagation();
         setEditing(true);
       }}
@@ -385,7 +384,7 @@ export function TopicTree({
                     onToggleCollapse={() =>
                       section.kind === 'topic'
                         ? onToggleTopicCollapse(`${group.workspaceId}:${section.id}`)
-                        : onToggleWorkspaceCollapse(`${group.workspaceId}:${section.kind === 'archived' ? 'archived' : 'ungrouped'}`)
+                        : onToggleWorkspaceCollapse(`${group.workspaceId}:archived`)
                     }
                     onToggleSection={(ids, deselect) => onSelectMany(ids, !deselect)}
                     onFilter={onFilterTopic}
