@@ -10,8 +10,9 @@ import * as React from 'react';
 import { createPortal } from 'react-dom';
 import { observeComposerSlot, resolveComposerWorkspace } from './composer.js';
 import { observeWorkspaceRegion, setRegionInert, watchRegionModals } from './geometry.js';
-import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, mainSessionId, newestTopic, topicLabel } from './model.js';
+import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, mainSessionId, moveWithin, newestTopic, topicLabel } from './model.js';
 import { createPanelStore } from './store.js';
+import { beginReorder, currentDrag, endDrag, readDragPayload, reorderVerdict, writeReorderPayload } from './dnd.js';
 import { runSessionAction, mergeOutcomes, BATCH_LIMIT } from './batch.js';
 import { cx, Popover, MenuItem, Icon, useLanguage, TopicMark } from './widgets.jsx';
 import { Header } from './header.jsx';
@@ -51,6 +52,7 @@ export function OverlayPanel({ actions }) {
   const [hint, setHint] = React.useState(null);
   const [now, setNow] = React.useState(() => Date.now());
   const [pendingTopic, setPendingTopic] = React.useState(null);
+  const [dropHint, setDropHint] = React.useState(null);
   const pendingRef = React.useRef(null);
   /** Blank-session watcher: the first ready snapshot primes the set, so reloads never re-file. */
   const autoFileRef = React.useRef({ primed: false, seen: new Set(), busy: new Set() });
@@ -245,16 +247,69 @@ export function OverlayPanel({ actions }) {
     timersRef.current.toast = setTimeout(() => setToast(null), 3200);
   };
 
-  if (!state.ready || !state.reachable) return null;
-  if (!geom.visible) return null;
-
-  const style = geom.rect ? { left: geom.rect.left, top: geom.rect.top, width: geom.rect.width, height: geom.rect.height } : undefined;
-
   const setPrefs = (changes) => {
     // Leaving selection mode always drops the selection — a stale highlight must not survive.
     if (changes?.selectMode === false) store.clearSelection();
     return store.setPrefs(changes);
   };
+
+  /**
+   * Drag reordering, one level at a time. Workspace order and session order are UI state
+   * (prefs), topic order is data (the sidecar), so all three survive a reload — but only the
+   * topic one is shared with other windows.
+   */
+  const positionOf = (event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return rect.height > 0 && event.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+  };
+
+  const reorder = React.useMemo(() => ({
+    hint: dropHint,
+    onStart: (level, payload, event) => {
+      beginReorder({ level, ...payload });
+      writeReorderPayload(event.dataTransfer, { level, ...payload });
+      event.dataTransfer.effectAllowed = 'move';
+    },
+    onHover: (event, level, target) => {
+      const verdict = reorderVerdict(currentDrag(), { level, ...target });
+      if (!verdict.ok) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      const position = positionOf(event);
+      setDropHint((current) =>
+        current && current.level === level && current.id === target.id && current.position === position
+          ? current
+          : { level, id: target.id, position },
+      );
+    },
+    onDrop: (event, level, target) => {
+      const drag = currentDrag();
+      const verdict = reorderVerdict(drag, { level, ...target });
+      setDropHint(null);
+      if (!verdict.ok) return;
+      event.preventDefault();
+      event.stopPropagation();
+      endDrag();
+      const position = positionOf(event);
+      if (level === 'workspace') {
+        setPrefs({ workspaceOrder: moveWithin(options.map((option) => option.workspaceId), drag.id, target.id, position) });
+        return;
+      }
+      const ids = (store.topicsOf(drag.workspaceId) ?? []).filter((topic) => !topic.system).map((topic) => topic.id);
+      store
+        .reorderTopics({ workspaceId: drag.workspaceId, topicIds: moveWithin(ids, drag.id, target.id, position) })
+        .catch((error) => flash(error?.message ?? String(error), 'bad'));
+    },
+    onEnd: () => {
+      endDrag();
+      setDropHint(null);
+    },
+  }), [dropHint, options]);
+
+  if (!state.ready || !state.reachable) return null;
+  if (!geom.visible) return null;
+
+  const style = geom.rect ? { left: geom.rect.left, top: geom.rect.top, width: geom.rect.width, height: geom.rect.height } : undefined;
   const pickWorkspace = (workspaceId) => setPrefs({ workspaceFilter: workspaceId, topicFilter: null });
   const pickTopic = (topicId) => setPrefs({ topicFilter: topicId });
 
@@ -307,6 +362,33 @@ export function OverlayPanel({ actions }) {
   };
 
   const selectedIds = state.selection;
+
+  /** A session dropped on another session reorders it, or files it when the topics differ. */
+  const dropOnRow = (event, row) => {
+    const drag = currentDrag();
+    const dropped = readDragPayload(event.dataTransfer);
+    const position = positionOf(event);
+    setDropHint(null);
+    if (!drag || drag.kind === 'reorder' || dropped.length === 0) {
+      endDrag();
+      return;
+    }
+    endDrag();
+    if (drag.workspaceId !== row.workspaceId) {
+      flash(t('session.crossWorkspace'), 'bad');
+      return;
+    }
+    if (drag.fromTopicId !== row.topicId || dropped.length > 1) {
+      const topic = (store.topicsOf(row.workspaceId) ?? []).find((entry) => entry.id === row.topicId);
+      store
+        .assign({ workspaceId: row.workspaceId, sessionIds: dropped, topicId: row.topicId })
+        .then(() => flash(t('session.movedTo', { name: topicLabel(topic) })))
+        .catch((error) => flash(error?.message ?? String(error), 'bad'));
+      return;
+    }
+    const ids = rowsInWorkspace(row.workspaceId).filter((entry) => !entry.blank).map((entry) => entry.id);
+    setPrefs({ sessionOrder: { ...(prefs.sessionOrder ?? {}), [row.workspaceId]: moveWithin(ids, dropped[0], row.id, position) } });
+  };
 
   /** A drop files the dragged session(s) into the target topic (the default group included). */
   const dropSessions = ({ ids, workspaceId, topicId }) => {
@@ -755,6 +837,8 @@ export function OverlayPanel({ actions }) {
             onAddTopic={(workspaceId) => setDialog({ type: 'create', workspaceId })}
             onDropSessions={dropSessions}
             onRenameTopic={renameTopic}
+            onDropOnRow={dropOnRow}
+            reorder={reorder}
             pendingTopicId={pendingTopic}
             currentWorkspaceId={tree.currentWorkspaceId}
           />

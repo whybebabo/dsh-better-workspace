@@ -345,6 +345,46 @@
   white-space: nowrap;
 }
 
+/* Hovering a clipped title scrolls it instead of hiding the tail (native list behaviour). */
+.dts-row__text.is-marquee {
+  text-overflow: clip;
+}
+
+.dts-row__scroll {
+  display: inline-block;
+  will-change: transform;
+}
+
+.dts-row__text.is-marquee .dts-row__scroll {
+  animation: dts-marquee var(--dts-marquee-time, 4s) linear 0.45s infinite alternate;
+}
+
+@keyframes dts-marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(var(--dts-marquee-shift, 0)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dts-row__text.is-marquee .dts-row__scroll { animation: none; }
+}
+
+/* Drop position for row reordering: a hairline where the row would land. */
+.dts-row.is-dropbefore::before,
+.dts-row.is-dropafter::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--dsw-alias-state-business-primary, #4176e6);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.dts-row.is-dropbefore::before { top: -1px; }
+.dts-row.is-dropafter::after { bottom: -1px; }
+
 /* The stock workspace row is just its name; the meta appears with the hover strip. */
 .dts-row--group .dts-row__count {
   display: none;

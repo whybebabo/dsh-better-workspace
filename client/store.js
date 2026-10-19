@@ -17,6 +17,9 @@ const DEFAULT_PREFS = {
   collapsedWorkspaces: [],
   collapsedTopics: [],
   selectMode: false,
+  // Manual drag order: ids the user placed, everything else keeps the host's order.
+  workspaceOrder: [],
+  sessionOrder: {},
 };
 
 function readPrefs() {
@@ -31,6 +34,8 @@ function readPrefs() {
       selectMode: false,
       collapsedWorkspaces: Array.isArray(parsed?.collapsedWorkspaces) ? parsed.collapsedWorkspaces : [],
       collapsedTopics: Array.isArray(parsed?.collapsedTopics) ? parsed.collapsedTopics : [],
+      workspaceOrder: Array.isArray(parsed?.workspaceOrder) ? parsed.workspaceOrder : [],
+      sessionOrder: parsed?.sessionOrder && typeof parsed.sessionOrder === 'object' ? parsed.sessionOrder : {},
     };
   } catch {
     return { ...DEFAULT_PREFS };
@@ -161,6 +166,7 @@ export function createPanelStore() {
 
   const createTopic = (input) => runMutation((revision) => api.createTopic({ ...input, expectedRevision: revision }));
   const updateTopic = (input) => runMutation((revision) => api.updateTopic({ ...input, expectedRevision: revision }));
+  const reorderTopics = (input) => runMutation((revision) => api.reorderTopics({ ...input, expectedRevision: revision }));
   const deleteTopic = (input) => runMutation((revision) => api.deleteTopic({ ...input, expectedRevision: revision }));
   const assign = (input) => runMutation((revision) => api.assign({ ...input, expectedRevision: revision }));
 
@@ -189,6 +195,7 @@ export function createPanelStore() {
     assignmentsOf,
     createTopic,
     updateTopic,
+    reorderTopics,
     deleteTopic,
     assign,
     dismissError,

@@ -93,8 +93,32 @@ function makeRow(session, { current, archived, pinned, workspaceId, topicId, top
  * @param {object} input.prefs - {workspaceFilter, topicFilter, showArchived, collapsedWorkspaces, collapsedTopics}
  * @param {string} input.query - local search text
  */
+/**
+ * Manual drag order: the ids a drag produced lead in that order, anything the user never
+ * touched keeps the host's order (sort is stable, so unlisted entries stay put).
+ */
+function orderBy(rows, manual, keyOf) {
+  if (!Array.isArray(manual) || manual.length === 0) return rows;
+  const pick = keyOf ?? ((entry) => entry.id);
+  const rank = new Map();
+  manual.forEach((id, index) => rank.set(id, index));
+  return [...rows].sort((left, right) => (rank.get(pick(left)) ?? Number.MAX_SAFE_INTEGER) - (rank.get(pick(right)) ?? Number.MAX_SAFE_INTEGER));
+}
+
+/**
+ * Moves `dragId` next to `targetId` inside `ids`, which is the order the drag operates on.
+ * Returns the input unchanged when the target is missing (nothing to anchor the move to).
+ */
+export function moveWithin(ids, dragId, targetId, position) {
+  const next = ids.filter((id) => id !== dragId);
+  const at = next.indexOf(targetId);
+  if (at < 0) return ids;
+  next.splice(position === 'after' ? at + 1 : at, 0, dragId);
+  return next;
+}
+
 export function buildTree({ items, list, archivedIds, pinnedIds, topicsOf, assignmentsOf, prefs, query }) {
-  const workspaces = normalizeWorkspaces(items);
+  const workspaces = orderBy(normalizeWorkspaces(items), prefs?.workspaceOrder ?? [], (entry) => entry.workspaceId);
   const archived = toSet(archivedIds);
   const pinned = toSet(pinnedIds);
   // `pinnedSessionIds` is ordered most-recently-pinned first; that order is the tie-break
@@ -147,9 +171,13 @@ export function buildTree({ items, list, archivedIds, pinnedIds, topicsOf, assig
       .filter((session) => session && !seen.has(session.id) && session.cwd === workspace.path)
       .sort((left, right) => relativeKey(left.updatedAt) - relativeKey(right.updatedAt));
     for (const session of stragglers) orderedIds.push(session.id);
+    // A drag inside a workspace reorders its sessions; the manual list is a stable overlay
+    // on the host's order, so sessions created later simply fall in at the end.
+    const manualSessions = prefs?.sessionOrder?.[workspace.workspaceId];
+    const finalIds = orderBy(orderedIds, manualSessions, (id) => id);
 
     const rows = [];
-    for (const id of orderedIds) {
+    for (const id of finalIds) {
       const session = byId[id];
       const isArchived = archived.has(id);
       if (session?.origin === 'subagent') continue;

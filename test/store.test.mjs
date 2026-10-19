@@ -97,6 +97,20 @@ test('deleting a topic re-files its sessions into the default group', async () =
   assert.deepEqual(snapshot.workspaces.ws_a.assignments, { ses_1: DEFAULT_TOPIC_ID, ses_2: DEFAULT_TOPIC_ID });
 });
 
+test('reordering topics rewrites their order and protects the default group', async () => {
+  const { store } = await freshStore();
+  const a = (await store.createTopic({ workspaceId: 'ws_a', name: 'A' })).result.topic;
+  const b = (await store.createTopic({ workspaceId: 'ws_a', name: 'B', expectedRevision: 1 })).result.topic;
+  const moved = await store.reorderTopics({ workspaceId: 'ws_a', topicIds: [b.id, a.id], expectedRevision: 2 });
+  const snapshot = await store.snapshot();
+  assert.deepEqual(snapshot.workspaces.ws_a.topics.map((topic) => topic.id), [DEFAULT_TOPIC_ID, b.id, a.id]);
+  assert.equal(snapshot.workspaces.ws_a.topics[1].order, 0, 'orders are rewritten 0..n behind the default group');
+  await assert.rejects(
+    () => store.reorderTopics({ workspaceId: 'ws_a', topicIds: [DEFAULT_TOPIC_ID, a.id], expectedRevision: moved.revision }),
+    (e) => e.code === 'default-topic-protected',
+  );
+});
+
 test('stale expectedRevision is a 409 carrying the current revision', async () => {
   const { store } = await freshStore();
   await store.createTopic({ workspaceId: 'ws_a', name: 'A' });

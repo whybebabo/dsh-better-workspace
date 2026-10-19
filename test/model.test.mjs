@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTree, buildWorkspaceOptions, mainSessionId, basename, newestTopic, DEFAULT_TOPIC_ID } from '../client/model.js';
+import { buildTree, buildWorkspaceOptions, mainSessionId, basename, moveWithin, newestTopic, DEFAULT_TOPIC_ID } from '../client/model.js';
 
 const WS_A = 'ws_a';
 const WS_B = 'ws_b';
@@ -200,6 +200,24 @@ test('a topic filter also scopes the archived bucket', () => {
   });
   const archived = other.groups.find((group) => group.workspaceId === WS_A).sections.find((section) => section.kind === 'archived');
   assert.deepEqual(archived.rows.map((row) => row.id), ['ses_arch'], 'an archived row keeps its topic membership');
+});
+
+test('moveWithin places the dragged id next to its target', () => {
+  assert.deepEqual(moveWithin(['a', 'b', 'c'], 'a', 'c', 'after'), ['b', 'c', 'a']);
+  assert.deepEqual(moveWithin(['a', 'b', 'c'], 'c', 'a', 'before'), ['c', 'a', 'b']);
+  assert.deepEqual(moveWithin(['a', 'b'], 'a', 'zz', 'after'), ['a', 'b'], 'an unknown target changes nothing');
+});
+
+test('a manual order overlays the host order without dropping late entries', () => {
+  const reordered = buildTree({ ...fixture(), prefs: { workspaceOrder: [WS_B, WS_A] }, query: '' });
+  assert.deepEqual(reordered.groups.map((group) => group.workspaceId), [WS_B, WS_A]);
+
+  const sessions = buildTree({ ...fixture(), prefs: { sessionOrder: { [WS_A]: ['ses_3', 'ses_2', 'ses_1'] } }, query: '' });
+  assert.deepEqual(flatten(sessions.groups.find((group) => group.workspaceId === WS_A)), ['ses_3', 'ses_2', 'ses_1']);
+
+  // Ids the manual list never met keep the host order behind the ones it does know.
+  const partial = buildTree({ ...fixture(), prefs: { sessionOrder: { [WS_A]: ['ses_3'] } }, query: '' });
+  assert.deepEqual(flatten(partial.groups.find((group) => group.workspaceId === WS_A)), ['ses_3', 'ses_1', 'ses_2']);
 });
 
 test('workspace options carry live and archived counts', () => {

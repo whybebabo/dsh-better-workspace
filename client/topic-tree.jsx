@@ -24,14 +24,22 @@ function targetOf(section, group) {
   return { workspaceId: group.workspaceId, topicId: section.kind === 'topic' ? section.id : null };
 }
 
-function GroupHeader({ group, selectMode, selectionCount, groupIds, allSelected, onToggleGroup, onToggleCollapse, onMenu, onAddTopic, isActiveWorkspace }) {
+function GroupHeader({ group, selectMode, selectionCount, groupIds, allSelected, onToggleGroup, onToggleCollapse, onMenu, onAddTopic, isActiveWorkspace, reorder }) {
+  const hint = reorder?.hint;
+  const dropBefore = hint?.level === 'workspace' && hint.id === group.workspaceId && hint.position === 'before';
+  const dropAfter = hint?.level === 'workspace' && hint.id === group.workspaceId && hint.position === 'after';
   return (
     <div
-      className={cx('dts-row', 'dts-row--group', group.collapsed && 'is-collapsed')}
+      className={cx('dts-row', 'dts-row--group', group.collapsed && 'is-collapsed', dropBefore && 'is-dropbefore', dropAfter && 'is-dropafter')}
       role="treeitem"
       aria-expanded={!group.collapsed}
       tabIndex={0}
+      draggable={!selectMode}
       onClick={onToggleCollapse}
+      onDragStart={(event) => reorder?.onStart?.('workspace', { id: group.workspaceId, workspaceId: group.workspaceId }, event)}
+      onDragEnd={reorder?.onEnd}
+      onDragOver={(event) => reorder?.onHover?.(event, 'workspace', { id: group.workspaceId, workspaceId: group.workspaceId })}
+      onDrop={(event) => reorder?.onDrop?.(event, 'workspace', { id: group.workspaceId, workspaceId: group.workspaceId })}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
@@ -97,14 +105,18 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, allSelected,
   );
 }
 
-function SectionHeader({ section, group, selectMode, selectedIds, pending, onToggleCollapse, onToggleSection, onMenu, onFilter, onDropSessions, onRename }) {
+function SectionHeader({ section, group, selectMode, selectedIds, pending, onToggleCollapse, onToggleSection, onMenu, onFilter, onDropSessions, onRename, reorder }) {
   const ids = section.rows.map((row) => row.id);
   const selectedCount = ids.filter((id) => selectedIds.has(id)).length;
   const [dropState, setDropState] = React.useState('idle');
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState(section.name ?? '');
   const droppable = section.kind !== 'archived';
+  const draggable = section.kind === 'topic' && !section.system && !selectMode;
   const label = sectionLabel(section);
+  const hint = reorder?.hint;
+  const dropBefore = hint?.level === 'topic' && hint.id === section.id && hint.position === 'before';
+  const dropAfter = hint?.level === 'topic' && hint.id === section.id && hint.position === 'after';
 
   React.useEffect(() => {
     if (!editing) setDraft(section.name ?? '');
@@ -127,12 +139,15 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
         dropState === 'ok' && 'is-drop-ok',
         dropState === 'no' && 'is-drop-no',
         pending && 'is-pending',
+        dropBefore && 'is-dropbefore',
+        dropAfter && 'is-dropafter',
       )}
       role="treeitem"
       aria-expanded={!section.collapsed}
       aria-label={label}
       style={{ '--dts-indent': selectMode ? '8px' : '10px' }}
       tabIndex={0}
+      draggable={draggable}
       title={section.kind === 'topic' && !section.system ? t('topic.renameHint') : undefined}
       onClick={onToggleCollapse}
       onDoubleClick={(event) => {
@@ -150,7 +165,17 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
         event.preventDefault();
         if (section.kind === 'topic') onMenu({ type: 'topic', section, group, anchor: event.currentTarget.getBoundingClientRect() });
       }}
+      onDragStart={(event) => {
+        if (!draggable) return;
+        reorder?.onStart?.('topic', { id: section.id, workspaceId: group.workspaceId }, event);
+      }}
+      onDragEnd={reorder?.onEnd}
       onDragOver={(event) => {
+        // Row reordering and session filing share this row, so the active drag decides.
+        if (currentDrag()?.kind === 'reorder') {
+          reorder?.onHover?.(event, 'topic', { id: section.id, workspaceId: group.workspaceId });
+          return;
+        }
         if (!droppable) return;
         const verdict = evaluateDrop(currentDrag(), targetOf(section, group));
         // A cross-workspace hover is not a target at all: no preventDefault, no drop cursor.
@@ -162,6 +187,10 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
       onDragLeave={() => setDropState('idle')}
       onDrop={(event) => {
         setDropState('idle');
+        if (currentDrag()?.kind === 'reorder') {
+          reorder?.onDrop?.(event, 'topic', { id: section.id, workspaceId: group.workspaceId });
+          return;
+        }
         if (!droppable) return;
         event.preventDefault();
         const dropped = readDragPayload(event.dataTransfer);
@@ -249,7 +278,7 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
   );
 }
 
-const Section = React.memo(function Section({ section, group, selectMode, selectedIds, now, query, pendingTopicId, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleCollapse, onToggleSection, onFilter, onDropSessions, onRename }) {
+const Section = React.memo(function Section({ section, group, selectMode, selectedIds, now, query, pendingTopicId, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleCollapse, onToggleSection, onFilter, onDropSessions, onRename, onDropOnRow, reorder }) {
   const [revealed, setRevealed] = React.useState(false);
   const overflow = section.rows.length > REVEAL_LIMIT;
   const visible = overflow && !revealed ? section.rows.slice(0, REVEAL_LIMIT) : section.rows;
@@ -267,6 +296,7 @@ const Section = React.memo(function Section({ section, group, selectMode, select
         onFilter={onFilter}
         onDropSessions={onDropSessions}
         onRename={onRename}
+        reorder={reorder}
       />
       {!section.collapsed
         ? visible.map((row) => (
@@ -284,6 +314,8 @@ const Section = React.memo(function Section({ section, group, selectMode, select
                 writeDragPayload(event.dataTransfer, [row.id]);
                 event.dataTransfer.effectAllowed = 'move';
               }}
+              onDropOnRow={onDropOnRow}
+              reorder={reorder}
               onMenu={onMenu}
               onArchive={onArchive}
               onPin={onPin}
@@ -323,6 +355,8 @@ export function TopicTree({
   onAddTopic,
   onDropSessions,
   onRenameTopic,
+  onDropOnRow,
+  reorder,
   pendingTopicId,
   currentWorkspaceId,
 }) {
@@ -360,6 +394,7 @@ export function TopicTree({
               onToggleCollapse={() => onToggleWorkspaceCollapse(group.workspaceId)}
               onAddTopic={onAddTopic}
               onMenu={onMenu}
+              reorder={reorder}
             />
             {!group.collapsed ? (
               <div className="dts-group__body">
@@ -390,6 +425,8 @@ export function TopicTree({
                     onFilter={onFilterTopic}
                     onDropSessions={onDropSessions}
                     onRename={onRenameTopic}
+                    onDropOnRow={onDropOnRow}
+                    reorder={reorder}
                   />
                 ))}
               </div>

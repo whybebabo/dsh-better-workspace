@@ -23,6 +23,17 @@ function highlight(title, query) {
   );
 }
 
+/**
+ * Marquee plan for a title wider than its box: the shift is the overflow, and the duration
+ * keeps a constant reading speed so short titles do not crawl and long ones do not sprint.
+ */
+export function marqueePlan(element, { speed = 42 } = {}) {
+  if (!element) return null;
+  const overflow = element.scrollWidth - element.clientWidth;
+  if (overflow <= 1) return null;
+  return { shift: -overflow, duration: Math.min(12, Math.max(2.4, overflow / speed)) };
+}
+
 export const SessionRow = React.memo(function SessionRow({
   row,
   query = '',
@@ -32,6 +43,8 @@ export const SessionRow = React.memo(function SessionRow({
   onOpen,
   onToggleSelect,
   onDragStart,
+  onDropOnRow,
+  reorder,
   onMenu,
   onArchive,
   onPin,
@@ -41,17 +54,28 @@ export const SessionRow = React.memo(function SessionRow({
   depth = 0,
 }) {
   const hintTimer = React.useRef(null);
+  const textRef = React.useRef(null);
+  const [marquee, setMarquee] = React.useState(null);
   React.useEffect(() => () => clearTimeout(hintTimer.current), []);
   const startHint = (element) => {
     clearTimeout(hintTimer.current);
+    // Native behaviour: hovering a clipped title scrolls it instead of hiding the tail.
+    setMarquee(marqueePlan(textRef.current));
     if (!onHint) return;
     const rect = element.getBoundingClientRect();
     hintTimer.current = setTimeout(() => onHint({ row, rect }), 480);
   };
   const endHint = () => {
     clearTimeout(hintTimer.current);
+    setMarquee(null);
     onHintEnd?.();
   };
+  const hint = reorder?.hint;
+  const dropBefore = hint?.level === 'session' && hint.id === row.id && hint.position === 'before';
+  const dropAfter = hint?.level === 'session' && hint.id === row.id && hint.position === 'after';
+  const scrollStyle = marquee
+    ? { '--dts-marquee-shift': `${marquee.shift}px`, '--dts-marquee-time': `${marquee.duration}s` }
+    : undefined;
   return (
     <div
       className={cx(
@@ -61,6 +85,8 @@ export const SessionRow = React.memo(function SessionRow({
         row.archived && 'is-archived',
         row.running && 'is-running',
         selected && 'is-selected',
+        dropBefore && 'is-dropbefore',
+        dropAfter && 'is-dropafter',
       )}
       style={{ '--dts-indent': selectMode ? '8px' : `${42 + depth * 10}px` }}
       role="treeitem"
@@ -76,6 +102,12 @@ export const SessionRow = React.memo(function SessionRow({
       onDragEnd={(event) => {
         endDrag();
         event.currentTarget.removeAttribute('data-dragging');
+      }}
+      onDragOver={(event) => reorder?.onHover?.(event, 'session', { id: row.id, workspaceId: row.workspaceId, topicId: row.topicId })}
+      onDrop={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onDropOnRow?.(event, row);
       }}
       onClick={() => (selectMode ? onToggleSelect(row.id) : onOpen(row))}
       onKeyDown={(event) => {
@@ -107,7 +139,9 @@ export const SessionRow = React.memo(function SessionRow({
       ) : null}
 
       <span className="dts-row__title">
-        <span className="dts-row__text">{highlight(row.title, query)}</span>
+        <span ref={textRef} className={cx('dts-row__text', marquee && 'is-marquee')}>
+          <span className="dts-row__scroll" style={scrollStyle}>{highlight(row.title, query)}</span>
+        </span>
       </span>
 
       {row.blank ? null : (

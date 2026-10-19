@@ -7,6 +7,8 @@
  * read from `dataTransfer` on drop, which is what makes the actual write correct.
  */
 export const DND_MIME = 'application/x-dsh-topic-sessions';
+/** Payload for "move this row inside its own level" drags (workspace / topic / session). */
+export const REORDER_MIME = 'application/x-dsh-better-workspace-reorder';
 
 /** Same shape the host sidecar accepts; anything else cannot be a session id. */
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -14,7 +16,13 @@ const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 let context = null;
 
 export function beginDrag({ ids, workspaceId, fromTopicId }) {
-  context = { ids: [...new Set(ids ?? [])], workspaceId: workspaceId ?? null, fromTopicId: fromTopicId ?? null };
+  context = { kind: 'file', ids: [...new Set(ids ?? [])], workspaceId: workspaceId ?? null, fromTopicId: fromTopicId ?? null };
+  return context;
+}
+
+/** Starts a reorder drag: one row moved inside its own level. */
+export function beginReorder({ level, id, workspaceId, topicId }) {
+  context = { kind: 'reorder', level, id, workspaceId: workspaceId ?? null, topicId: topicId ?? null };
   return context;
 }
 
@@ -38,6 +46,20 @@ export function evaluateDrop(drag, target) {
     return { ok: false, reason: 'cross-workspace' };
   }
   if (drag.ids.length === 1 && drag.fromTopicId === target.topicId) return { ok: false, reason: 'already-there' };
+  return { ok: true, reason: null };
+}
+
+/**
+ * Reordering is level-scoped: a workspace moves among workspaces, a topic among the topics
+ * of its own workspace, a session among the rows of its own topic. Anything else is refused
+ * so a drag can never silently change what a row *means*.
+ */
+export function reorderVerdict(drag, target) {
+  if (!drag || drag.kind !== 'reorder' || !target) return { ok: false, reason: 'not-a-reorder' };
+  if (target.level !== drag.level) return { ok: false, reason: 'level' };
+  if (target.id === drag.id) return { ok: false, reason: 'self' };
+  if (drag.level !== 'workspace' && target.workspaceId !== drag.workspaceId) return { ok: false, reason: 'cross-workspace' };
+  if (drag.level === 'session' && target.topicId !== drag.topicId) return { ok: false, reason: 'cross-topic' };
   return { ok: true, reason: null };
 }
 
@@ -65,6 +87,14 @@ export function writeDragPayload(dataTransfer, ids) {
   try {
     dataTransfer.setData(DND_MIME, payload);
     dataTransfer.setData('text/plain', payload);
+  } catch {
+    /* some browsers lock setData outside of dragstart */
+  }
+}
+
+export function writeReorderPayload(dataTransfer, payload) {
+  try {
+    dataTransfer.setData(REORDER_MIME, JSON.stringify(payload));
   } catch {
     /* some browsers lock setData outside of dragstart */
   }

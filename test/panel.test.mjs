@@ -894,6 +894,115 @@ test('a name that is taken or illegal is refused in the field', async () => {
   assert.equal(createButton().disabled, false);
 });
 
+test('dragging a workspace row reorders the workspaces', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  const snapshot = workspaceSource.getSnapshot();
+  workspaceSource.set({
+    ...snapshot,
+    items: [...snapshot.items, { workspaceId: 'ws_two', path: 'D:/work/two', title: 'Two', sessionIds: [], createdAt: 2, updatedAt: 2 }],
+  });
+  await mount();
+  const titles = () => [...container.querySelectorAll('.dts-row--group .dts-row__text')].map((node) => node.textContent);
+  assert.deepEqual(titles(), ['One', 'Two']);
+  const rows = [...container.querySelectorAll('.dts-row--group')];
+  await act(async () => {
+    const start = new window.Event('dragstart', { bubbles: true });
+    start.dataTransfer = makeDataTransfer([]);
+    rows[0].dispatchEvent(start);
+    const drop = new window.Event('drop', { bubbles: true, cancelable: true });
+    drop.dataTransfer = makeDataTransfer([]);
+    rows[1].dispatchEvent(drop);
+  });
+  await tick();
+  assert.deepEqual(titles(), ['Two', 'One'], 'the dragged workspace lands where it was dropped');
+});
+
+test('dragging a topic row reorders the topics of that workspace', async () => {
+  responseOverrides[`${API}/state`] = () => ({
+    ok: true,
+    result: {
+      ...stateResult().result,
+      workspaces: {
+        [WORKSPACE]: {
+          topics: [
+            { id: 'tp_default', name: '默认分组', emoji: '', order: -1, createdAt: 0, system: true },
+            { id: 'tp_a', name: 'A', emoji: '', order: 0, createdAt: 1 },
+            { id: TOPIC, name: '设计', emoji: '', order: 1, createdAt: 2 },
+          ],
+          assignments: {},
+        },
+      },
+    },
+  });
+  responseOverrides[`${API}/topics/reorder`] = () => ({ ok: true, result: { revision: 5, result: { topics: [] } } });
+  await mount();
+  const rows = [...container.querySelectorAll('.dts-row--topic')];
+  assert.equal(rows.length, 3, 'default group plus two topics');
+  await act(async () => {
+    const start = new window.Event('dragstart', { bubbles: true });
+    start.dataTransfer = makeDataTransfer([]);
+    rows[1].dispatchEvent(start);
+    const drop = new window.Event('drop', { bubbles: true, cancelable: true });
+    drop.dataTransfer = makeDataTransfer([]);
+    rows[2].dispatchEvent(drop);
+  });
+  await tick();
+  const call = calls.find((entry) => entry.url.endsWith('/topics/reorder'));
+  assert.ok(call, 'the new order is written to the sidecar');
+  assert.deepEqual(call.body.topicIds, [TOPIC, 'tp_a']);
+  assert.equal(call.body.workspaceId, WORKSPACE);
+});
+
+test('dragging a session onto another session reorders them', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const rowFor = (title) => find('.dts-row--session', title);
+  await act(async () => {
+    const start = new window.Event('dragstart', { bubbles: true });
+    start.dataTransfer = makeDataTransfer(['ses_1']);
+    rowFor('会话 1').dispatchEvent(start);
+    const drop = new window.Event('drop', { bubbles: true, cancelable: true });
+    drop.dataTransfer = makeDataTransfer(['ses_1']);
+    rowFor('会话 2').dispatchEvent(drop);
+  });
+  await tick();
+  assert.equal(calls.some((entry) => entry.url.endsWith('/assign')), false, 'reordering is not a re-file');
+  const order = [...container.querySelectorAll('.dts-row--session .dts-row__text')].map((node) => node.textContent);
+  assert.equal(order.indexOf('会话 2') < order.indexOf('会话 1'), true, 'the dropped row follows its target');
+  const saved = JSON.parse(window.localStorage.getItem('dsh-better-workspace:prefs:v1')).sessionOrder;
+  assert.deepEqual(saved[WORKSPACE], ['ses_2', 'ses_1', 'ses_0']);
+});
+
+test('a clipped session title scrolls while hovered', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const proto = window.HTMLElement.prototype;
+  const scrollWidth = Object.getOwnPropertyDescriptor(proto, 'scrollWidth');
+  const clientWidth = Object.getOwnPropertyDescriptor(proto, 'clientWidth');
+  Object.defineProperty(proto, 'scrollWidth', { configurable: true, get: () => 240 });
+  Object.defineProperty(proto, 'clientWidth', { configurable: true, get: () => 120 });
+  try {
+    const row = find('.dts-row--session', '会话 1');
+    await act(async () => {
+      row.dispatchEvent(new window.MouseEvent('mouseover', { bubbles: true, view: window }));
+    });
+    await tick();
+    const text = row.querySelector('.dts-row__text');
+    assert.ok(text.classList.contains('is-marquee'), 'a title wider than its box scrolls');
+    assert.equal(row.querySelector('.dts-row__scroll').style.getPropertyValue('--dts-marquee-shift'), '-120px');
+    await act(async () => {
+      row.dispatchEvent(new window.MouseEvent('mouseout', { bubbles: true, view: window }));
+    });
+    await tick();
+    assert.equal(row.querySelector('.dts-row__text').classList.contains('is-marquee'), false, 'and stops on leave');
+  } finally {
+    if (scrollWidth) Object.defineProperty(proto, 'scrollWidth', scrollWidth);
+    else delete proto.scrollWidth;
+    if (clientWidth) Object.defineProperty(proto, 'clientWidth', clientWidth);
+    else delete proto.clientWidth;
+  }
+});
+
 test('the create dialog offers the host emoji list and submits the chosen glyph', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   responseOverrides[`${API}/topics/create`] = () => ({ ok: true, result: { revision: 9, result: { topic: { id: 'tp_new', name: 'x' } } } });
