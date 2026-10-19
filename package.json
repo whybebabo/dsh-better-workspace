@@ -1,0 +1,53 @@
+{
+  "name": "dsh-better-workspace",
+  "version": "0.1.0",
+  "description": "DSH(DeepSeek Harness)主题分组侧栏插件:叠加注入原生侧边栏工作区区域,提供工作区下拉筛选、主题文件夹树、批量归档/取消归档与安全永久删除。",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis-plugin",
+    "sidebar",
+    "workspace",
+    "topic",
+    "theme-group",
+    "archive",
+    "侧边栏",
+    "主题分组"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build": "node client/build.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check lib/index.js && node --check lib/store.js && node --check lib/delete.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "jsdom": "^30.1.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}

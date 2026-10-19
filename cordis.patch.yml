@@ -1,0 +1,12 @@
+# dsh-better-workspace bundle patch: insert the plugin row into the profile roster.
+# The node half (exports ".") runs in the host process and owns the topic sidecar
+# plus the /dsh-better-workspace/api routes; `dsh.client.platform` in package.json makes
+# the browser half (exports "./client") load in the web GUI and the Desktop shell.
+# Set `enabled: false` here (or in your profile's own patch layer) as the kill switch:
+# the host stops serving routes and the overlay panel hides, restoring the stock UI.
+- insert:
+    - id: dsh-better-workspace
+      name: dsh-better-workspace
+      config:
+        enabled: true
+        enableDelete: true
