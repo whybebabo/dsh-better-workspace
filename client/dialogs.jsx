@@ -7,6 +7,7 @@ import * as React from 'react';
 import { cx, Dialog, Button, TextInput, Checkbox, Icon, TopicMark } from './widgets.jsx';
 import { t } from './i18n.js';
 
+/** Offline fallback; every glyph is also present in the host's Zen-sourced list. */
 export const FALLBACK_EMOJIS = ['\u{1F4C1}', '\u{1F4A1}', '\u{1F3A8}', '\u{1F6E0}\u{FE0F}', '\u{1F9EA}', '\u{1F41E}', '\u{1F680}', '\u{1F4DD}'];
 
 /** Control characters are the only glyphs the sidecar strips, so they are the illegal set. */
@@ -34,7 +35,7 @@ function problemText(problem) {
   return null;
 }
 
-/** Marker picker: the host's curated glyphs plus a "no marker" option (rendered as a dash). */
+/** Marker picker: the host's glyphs (Zen's emoji set) plus a "no marker" option rendered as '-'. */
 export function EmojiPicker({ emojis, value, onChange, name }) {
   return (
     <div className="dts-emojis" role="radiogroup" aria-label={name}>
@@ -46,7 +47,7 @@ export function EmojiPicker({ emojis, value, onChange, name }) {
         title={t('topic.noIcon')}
         onClick={() => onChange('')}
       >
-        <span className="dts-dash" aria-hidden="true" />
+        <span className="dts-dash" aria-hidden="true">-</span>
       </button>
       {emojis.map((glyph) => (
         <button
@@ -67,7 +68,11 @@ export function EmojiPicker({ emojis, value, onChange, name }) {
 function SessionPicker({ rows, selected, onToggle, onSelectAll, query, onQuery }) {
   const [needle, setNeedle] = React.useState('');
   const text = (query ?? needle).trim().toLowerCase();
-  const matches = text ? rows.filter((row) => `${row.title} ${row.workspaceTitle ?? ''}`.toLowerCase().includes(text)) : rows;
+  // The picker is already scoped to one workspace, so the trailing label names each row's
+  // current group — the one fact that differs inside the list and that attaching will change.
+  const matches = text
+    ? rows.filter((row) => `${row.title} ${row.workspaceTitle ?? ''} ${row.topicName ?? ''}`.toLowerCase().includes(text))
+    : rows;
   return (
     <div className="dts-picker">
       <TextInput value={needle} placeholder={t('search.placeholder')} onChange={(value) => { setNeedle(value); onQuery?.(value); }} />
@@ -85,7 +90,7 @@ function SessionPicker({ rows, selected, onToggle, onSelectAll, query, onQuery }
             <span className="dts-picker__title" title={row.title}>
               {row.title}
             </span>
-            <span className="dts-picker__ws">{row.workspaceTitle}</span>
+            <span className="dts-picker__group">{row.topicName}</span>
           </label>
         ))}
       </div>
@@ -309,6 +314,101 @@ export function DeleteTopicDialog({ topic, count, onConfirm, onClose }) {
       }
     >
       <p className="dts-dialog__text">{t('topic.deleteBody', { n: count })}</p>
+    </Dialog>
+  );
+}
+
+/** Rename a workspace (native menu parity: one field, duplicate names blocked in place). */
+export function RenameWorkspaceDialog({ workspace, workspaces = [], onSubmit, onClose }) {
+  const [title, setTitle] = React.useState(workspace.title ?? '');
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState(null);
+  const trimmed = title.trim();
+  const duplicate = trimmed !== '' && workspaces.some((entry) => entry.workspaceId !== workspace.workspaceId && entry.title === trimmed);
+  const blocked = busy || !trimmed || trimmed === workspace.title || duplicate;
+  const close = () => {
+    if (!busy) onClose();
+  };
+  const commit = async () => {
+    if (blocked) return;
+    setBusy(true);
+    try {
+      await onSubmit(trimmed);
+      onClose();
+    } catch (caught) {
+      setBusy(false);
+      setError(caught?.message ?? String(caught));
+    }
+  };
+  return (
+    <Dialog
+      title={t('workspace.renameTitle')}
+      onClose={close}
+      width={400}
+      footer={
+        <>
+          <Button onClick={close}>{t('action.cancel')}</Button>
+          <Button variant="primary" disabled={blocked} onClick={commit}>
+            {t('action.rename')}
+          </Button>
+        </>
+      }
+    >
+      <label className="dts-field">
+        <span className="dts-field__label">{t('workspace.name')}</span>
+        <TextInput
+          autoFocus
+          value={title}
+          onChange={(value) => { setTitle(value); setError(null); }}
+          onEnter={commit}
+          invalid={duplicate}
+          maxLength={200}
+          aria-label={t('workspace.name')}
+        />
+        {duplicate ? <span className="dts-field__hint is-error">{t('workspace.renameConflict', { name: trimmed })}</span> : null}
+      </label>
+      {error ? <p className="dts-error">{error}</p> : null}
+    </Dialog>
+  );
+}
+
+/** Remove a workspace from the host list; the folder and session logs stay on disk. */
+export function DeleteWorkspaceDialog({ workspace, onConfirm, onClose }) {
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState(null);
+  const close = () => {
+    if (!busy) onClose();
+  };
+  return (
+    <Dialog
+      title={t('workspace.deleteTitle')}
+      description={t('workspace.deleteBody', { name: workspace.title })}
+      onClose={close}
+      width={420}
+      footer={
+        <>
+          <Button variant="ghost" disabled={busy} onClick={close}>{t('action.cancel')}</Button>
+          <Button
+            variant="danger"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              setError(null);
+              try {
+                await onConfirm();
+                onClose();
+              } catch (caught) {
+                setBusy(false);
+                setError(caught?.message ?? String(caught));
+              }
+            }}
+          >
+            {busy ? t('workspace.deleting') : t('workspace.deleteTitle')}
+          </Button>
+        </>
+      }
+    >
+      {error ? <p className="dts-error">{error}</p> : null}
     </Dialog>
   );
 }

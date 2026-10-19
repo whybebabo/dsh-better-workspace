@@ -63,6 +63,19 @@ export function reorderVerdict(drag, target) {
   return { ok: true, reason: null };
 }
 
+/**
+ * Session drags start as file drags because they may end on a different topic. A single
+ * session dropped on a row of its *own* topic is a reorder, and that is what the hover
+ * verdict below has to recognise before the browser will fire `drop` at all.
+ */
+export function sessionReorderVerdict(drag, target) {
+  if (!drag || drag.kind !== 'file' || !target) return { ok: false, reason: 'not-a-session-drag' };
+  if (drag.workspaceId && target.workspaceId && drag.workspaceId !== target.workspaceId) return { ok: false, reason: 'cross-workspace' };
+  if (drag.ids.length !== 1 || drag.fromTopicId !== target.topicId) return { ok: false, reason: 'file' };
+  if (drag.ids[0] === target.id) return { ok: false, reason: 'self' };
+  return { ok: true, reason: null };
+}
+
 /** Reads the dropped ids, preferring the structured payload and falling back to plain text. */
 export function readDragPayload(dataTransfer) {
   const raw = dataTransfer?.getData?.(DND_MIME) || dataTransfer?.getData?.('text/plain') || '';
@@ -83,10 +96,11 @@ export function readDragPayload(dataTransfer) {
 }
 
 export function writeDragPayload(dataTransfer, ids) {
+  // Custom MIME only: a text/plain payload makes Chromium treat the drag as dragged text
+  // (the "release to search" cursor) instead of an internal move.
   const payload = JSON.stringify(ids);
   try {
     dataTransfer.setData(DND_MIME, payload);
-    dataTransfer.setData('text/plain', payload);
   } catch {
     /* some browsers lock setData outside of dragstart */
   }

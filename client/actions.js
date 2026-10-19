@@ -19,10 +19,12 @@ export function createHostActions(ctx) {
   };
   const cached = new Map();
   const service = (name) => {
-    if (!cached.has(name)) cached.set(name, resolve(name));
+    // Do not pin a miss: services can mount after the plugin's first render.
+    if (!cached.has(name) || cached.get(name) == null) cached.set(name, resolve(name));
     return cached.get(name);
   };
   const uiWorkspace = () => service('uiWorkspace');
+  const uiSession = () => service('uiSession');
   const workspaces = () => service('workspaces');
   const sessions = () => service('sessions');
   const layout = () => service('layout');
@@ -38,6 +40,10 @@ export function createHostActions(ctx) {
   return {
     get sessionStore() {
       return sessions()?.list ?? null;
+    },
+    /** Host-global running / pending-interaction / completion-unread facts, keyed by session id. */
+    get sessionStatusStore() {
+      return uiSession()?.sessionStatus ?? null;
     },
     get workspaceStore() {
       return workspaces()?.list ?? null;
@@ -78,6 +84,12 @@ export function createHostActions(ctx) {
       if (!path) return null;
       await call(workspaces(), 'create', { path });
       return path;
+    },
+    renameWorkspace(workspaceId, title) {
+      return call(workspaces(), 'rename', workspaceId, title);
+    },
+    deleteWorkspace(workspaceId) {
+      return call(workspaces(), 'delete', workspaceId);
     },
     toggleSidebar() {
       const target = layout();

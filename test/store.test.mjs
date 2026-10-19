@@ -21,6 +21,12 @@ test('a missing file reads as an empty writable state', async () => {
   assert.deepEqual(Object.keys(snapshot.workspaces), []);
 });
 
+test('the emoji picker enumerates Zen Browser\'s emoji set in order', () => {
+  assert.equal(TOPIC_EMOJIS.length, 1915);
+  assert.deepEqual(TOPIC_EMOJIS.slice(0, 3), ['\u{1F600}', '\u{1F603}', '\u{1F604}']);
+  assert.equal(TOPIC_EMOJIS.at(-1), '\u{1F3F4}\u{E0067}\u{E0062}\u{E0077}\u{E006C}\u{E0073}\u{E007F}');
+});
+
 test('creates topics, persists them, rotates emoji markers', async () => {
   const { store } = await freshStore();
   const first = await store.createTopic({ workspaceId: 'ws_a', name: '设计' });
@@ -63,6 +69,8 @@ test('topic names are trimmed, length-checked, unique per workspace case-insensi
   assert.equal(normalizeTopicEmoji(undefined), null, 'absent means leave the field alone');
   assert.equal(normalizeTopicEmoji(null), '', 'explicit null clears the marker');
   assert.equal(normalizeTopicEmoji('  x  '), 'x');
+  assert.equal(normalizeTopicEmoji('\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}'), '\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}', 'tag sequences are not truncated');
+  assert.equal(normalizeTopicEmoji('\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F48B}\u200D\u{1F468}'), '\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F48B}\u200D\u{1F468}', 'ZWJ sequences are not truncated');
 });
 
 test('assign is idempotent, moves between topics, and null means the default group', async () => {

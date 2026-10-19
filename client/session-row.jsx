@@ -4,9 +4,10 @@
  * owned by the panel so only one popover exists at a time.
  */
 import * as React from 'react';
-import { cx, Checkbox, Icon, IconButton } from './widgets.jsx';
+import { cx, Checkbox, Icon, IconButton, StateMark } from './widgets.jsx';
 import { formatRelative } from './time.js';
-import { endDrag } from './dnd.js';
+import { pendingStatusLabel } from './model.js';
+import { endDrag, currentDrag, sessionReorderVerdict } from './dnd.js';
 import { t } from './i18n.js';
 
 function highlight(title, query) {
@@ -51,7 +52,6 @@ export const SessionRow = React.memo(function SessionRow({
   onRename,
   onHint,
   onHintEnd,
-  depth = 0,
 }) {
   const hintTimer = React.useRef(null);
   const textRef = React.useRef(null);
@@ -76,6 +76,18 @@ export const SessionRow = React.memo(function SessionRow({
   const scrollStyle = marquee
     ? { '--dts-marquee-shift': `${marquee.shift}px`, '--dts-marquee-time': `${marquee.duration}s` }
     : undefined;
+  // Native order: a pending interaction replaces the timestamp with its compact label;
+  // archived and provisional rows never carry a live status marker.
+  const trailing = row.pendingKind ? pendingStatusLabel(row.pendingKind, true) : null;
+  // Pending rows expose the compact label as real text; the other states are dot/spinner
+  // only, so give assistive tech the same status the native row announces.
+  const silentStatusLabel = !row.pendingKind && row.status
+    ? row.running
+      ? t('session.state.running')
+      : row.completed
+        ? t('session.state.completed')
+        : null
+    : null;
   return (
     <div
       className={cx(
@@ -88,7 +100,9 @@ export const SessionRow = React.memo(function SessionRow({
         dropBefore && 'is-dropbefore',
         dropAfter && 'is-dropafter',
       )}
-      style={{ '--dts-indent': selectMode ? '8px' : `${42 + depth * 10}px` }}
+      // 41.5px puts the title's left edge at the right edge of the topic emoji
+      // (25.5–41.5px after the marker's left pull); the checkbox in flow takes 22px.
+      style={{ '--dts-indent': selectMode ? '19.5px' : '41.5px' }}
       role="treeitem"
       aria-selected={row.isCurrent}
       tabIndex={0}
@@ -101,9 +115,31 @@ export const SessionRow = React.memo(function SessionRow({
       }}
       onDragEnd={(event) => {
         endDrag();
+        reorder?.onEnd?.();
         event.currentTarget.removeAttribute('data-dragging');
       }}
-      onDragOver={(event) => reorder?.onHover?.(event, 'session', { id: row.id, workspaceId: row.workspaceId, topicId: row.topicId })}
+      onDragOver={(event) => {
+        const drag = currentDrag();
+        if (!drag) return;
+        if (drag.kind === 'reorder') {
+          reorder?.onHover?.(event, 'session', { id: row.id, workspaceId: row.workspaceId, topicId: row.topicId });
+          return;
+        }
+        const target = { id: row.id, workspaceId: row.workspaceId, topicId: row.topicId };
+        if (sessionReorderVerdict(drag, target).ok) {
+          reorder?.onHover?.(event, 'session', target);
+          return;
+        }
+        // A session dragged from another topic can still be filed by dropping it on a row:
+        // the browser only fires `drop` when the row opts in here.
+        if (!drag.ids.includes(row.id) && (!drag.workspaceId || drag.workspaceId === row.workspaceId)) {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'move';
+        }
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) reorder?.onLeave?.('session', row.id);
+      }}
       onDrop={(event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -134,8 +170,11 @@ export const SessionRow = React.memo(function SessionRow({
         <span className="dts-row__check" onClick={(event) => event.stopPropagation()}>
           <Checkbox checked={selected} onChange={() => onToggleSelect(row.id)} label={row.title} />
         </span>
-      ) : row.running ? (
-        <span className="dts-dot dts-dot--ongoing" aria-hidden="true" />
+      ) : row.status && !row.blank && !row.archived ? (
+        <>
+          <StateMark state={row.status} className="dts-row__status" />
+          {silentStatusLabel ? <span className="dts-visually-hidden">{silentStatusLabel}</span> : null}
+        </>
       ) : null}
 
       <span className="dts-row__title">
@@ -146,7 +185,7 @@ export const SessionRow = React.memo(function SessionRow({
 
       {row.blank ? null : (
         <span className="dts-row__aside">
-          <span className="dts-row__time">{formatRelative(row.updatedAt, now)}</span>
+          <span className="dts-row__time">{trailing ?? formatRelative(row.updatedAt, now)}</span>
           {row.pinned ? (
             <span className="dts-row__pin" role="img" aria-label={t('session.pinned')} title={t('session.pinned')}>
               <Icon name="pinFilled" />

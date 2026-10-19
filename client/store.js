@@ -6,6 +6,7 @@
  * a conflict instead of silently clobbering another window's write.
  */
 import { api, ApiError } from './api.js';
+import { withDefaultTopic } from './model.js';
 
 const PREFS_KEY = 'dsh-better-workspace:prefs:v1';
 const DEFAULT_PREFS = {
@@ -137,7 +138,10 @@ export function createPanelStore() {
   }
 
   function topicsOf(workspaceId) {
-    return state.workspaces[workspaceId]?.topics ?? [];
+    // The sidecar persists a workspace only after its first write; until then the system
+    // default group is virtual, and every consumer (tree, pickers, composer, filters) needs
+    // to see the same group.
+    return withDefaultTopic(state.workspaces[workspaceId]?.topics);
   }
 
   function assignmentsOf(workspaceId) {

@@ -15,6 +15,16 @@ dsh-better-workspace 是独立实现(MIT),**没有复制任何第三方插件的
 > THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
 > WITH REGARD TO THIS SOFTWARE.
 
+## Emoji 数据
+
+`lib/emojis.js` 的字形与顺序取自 [Zen Browser](https://github.com/zen-browser/desktop/blob/dev/src/zen/common/emojis/ZenEmojisData.min.mjs)
+的 `ZenEmojisData.min.mjs`(MPL-2.0;该数据由 `emoji-picker-element-data` 生成)。本项目只保留
+Unicode emoji 字符与原有顺序,不使用其搜索标签或代码。该数据文件同样以 MPL-2.0 提供:
+
+> This Source Code Form is subject to the terms of the Mozilla Public
+> License, v. 2.0. If a copy of the MPL was not distributed with this
+> file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 ## 运行时依赖(未打包,由宿主提供)
 
 客户端 bundle 外部化并在运行时 `require` 两个宿主模块:

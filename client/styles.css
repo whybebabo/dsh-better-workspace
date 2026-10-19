@@ -268,6 +268,47 @@
   flex-direction: column;
 }
 
+/* ---------- collapse animation ----------
+   A 1fr → 0fr grid row animates the body's natural height without measuring it in JS; the
+   inner box clips while it shrinks, and visibility switches only after the row has closed. */
+.dts-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.2s var(--ds-ease-in-out, ease-in-out);
+}
+
+.dts-collapse__inner {
+  min-height: 0;
+  overflow: hidden;
+  visibility: visible;
+  transition: visibility 0s;
+}
+
+.dts-collapse.is-collapsed {
+  grid-template-rows: 0fr;
+}
+
+.dts-collapse.is-collapsed > .dts-collapse__inner {
+  visibility: hidden;
+  transition: visibility 0s 0.2s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dts-collapse {
+    transition: none;
+  }
+  .dts-collapse.is-collapsed > .dts-collapse__inner {
+    transition: none;
+  }
+}
+
+/* A topic drag grows the insert-after zone under the last group: its lower half plus this
+   strip, so appending is not a 14px target on the last header. */
+.dts-drop-tail {
+  flex: 0 0 auto;
+  height: 28px;
+}
+
 .dts-section--archived {
   margin-top: 4px;
   padding-top: 4px;
@@ -318,6 +359,7 @@
 .dts-row--session.is-archived {
   color: var(--dsw-alias-label-tertiary, #81858c);
 }
+
 
 .dts-row.is-current {
   background: var(--dsw-specific-sidebar-nav-item-active, rgba(38, 49, 72, 0.08));
@@ -491,6 +533,12 @@
   width: 14px;
 }
 
+/* Pull the marker and name toward the caret: only a quarter of the row's 6px gap remains. */
+.dts-row--topic .dts-emoji,
+.dts-row--topic .dts-dash {
+  margin-left: -4.5px;
+}
+
 .dts-caret {
   display: none;
   align-items: center;
@@ -519,6 +567,21 @@
   color: var(--dsw-alias-link, #4176e6);
 }
 
+/* Workspace leading slot priority: caret (hover/focus) > live status > folder. */
+.dts-row--group.has-status .dts-folder {
+  display: none;
+}
+
+/* A status replaces the folder, so keep the active workspace visible through the row. */
+.dts-row--group.is-active-workspace:not(:hover) {
+  background: var(--dsw-specific-sidebar-nav-item-active, rgba(38, 49, 72, 0.08));
+}
+
+.dts-row--group:hover .dts-workspace-status,
+.dts-row--group:focus-visible .dts-workspace-status {
+  display: none;
+}
+
 .dts-row--group:hover .dts-folder,
 .dts-row--group:focus-visible .dts-folder {
   display: none;
@@ -529,6 +592,13 @@
 .dts-row--topic:hover .dts-caret,
 .dts-row--topic:focus-visible .dts-caret {
   display: inline-flex;
+}
+
+/* The group's aggregate status shares the caret cell, but the caret wins: it replaces the
+   marker whenever the row is hovered or keyboard-focused. */
+.dts-row--topic:hover .dts-section-status,
+.dts-row--topic:focus-visible .dts-section-status {
+  display: none;
 }
 
 /* ---------- composer topic chip ---------- */
@@ -577,36 +647,96 @@
   color: var(--dsw-alias-label-caption, #adb2b8);
 }
 
-/* ---------- status dot ---------- */
-.dts-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
+/* Text for assistive tech only; the native rows announce status the same way. */
+.dts-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------- session status markers ----------
+   The marker is the host's own StateDot whenever it is exported (spinner for ongoing,
+   state-coloured dots otherwise); these are the geometry fallbacks used if it is missing. */
+.dts-state-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 auto;
-  background: var(--dsw-alias-state-idle-primary, #d4d4d4);
 }
 
-.dts-dot--ongoing {
-  background: var(--dsw-alias-state-business-primary, #4176e6);
-  animation: dts-pulse 1.4s ease-in-out infinite;
+/* The status marker sits in the indent, so the title stays aligned with a resting row. */
+.dts-row--session > .dts-row__status {
+  position: absolute;
+  left: calc(var(--dts-indent) - 16px);
+  top: 50%;
+  width: 16px;
+  height: 16px;
+  transform: translateY(-50%);
 }
 
-.dts-dot--done {
-  background: var(--dsw-alias-state-success-primary, #22c55e);
+.dts-state-dot {
+  position: relative;
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  flex: none;
 }
 
-.dts-dot--warning {
-  background: var(--dsw-alias-state-warn-primary, #f59e0b);
+.dts-state-dot::after {
+  content: '';
+  position: absolute;
+  inset: 20%;
+  border-radius: 50%;
+  background: currentColor;
 }
 
-.dts-dot--idle {
-  background: transparent;
-  box-shadow: inset 0 0 0 1px var(--dsw-alias-border-l4, rgba(0, 0, 0, 0.22));
+.dts-state-dot--warning { color: var(--dsw-alias-state-warn-primary, #f59e0b); }
+.dts-state-dot--done { color: var(--dsw-alias-state-success-primary, #22c55e); }
+.dts-state-dot--idle { color: var(--dsw-alias-state-idle-primary, #d4d4d4); }
+
+.dts-spinner {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary, #81858c);
 }
 
-@keyframes dts-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
+.dts-spinner__motion {
+  transform-origin: center;
+  animation: dts-state-spin 1.5s linear infinite;
+}
+
+.dts-spinner__track,
+.dts-spinner__arc {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.dts-spinner__track { opacity: 0.25; }
+.dts-spinner__arc {
+  stroke-dasharray: 12 150;
+  animation: dts-state-dash 1.5s ease-in-out infinite;
+}
+
+@keyframes dts-state-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes dts-state-dash {
+  0% { stroke-dasharray: 12 150; stroke-dashoffset: 0; }
+  50% { stroke-dasharray: 24 150; stroke-dashoffset: -6; }
+  to { stroke-dasharray: 12 150; stroke-dashoffset: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dts-spinner__motion,
+  .dts-spinner__arc { animation: none; }
 }
 
 /* ---------- checkbox ---------- */
@@ -1247,7 +1377,7 @@
   font-size: 13px;
 }
 
-.dts-picker__ws {
+.dts-picker__group {
   font-size: 11px;
   color: var(--dsw-alias-label-caption, #adb2b8);
 }
@@ -1422,13 +1552,8 @@
   gap: 6px;
 }
 
-.dts-tip__dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: 0.75;
-  flex: 0 0 auto;
+.dts-tip__state {
+  opacity: 0.9;
 }
 
 .dts-toast {
@@ -1529,8 +1654,9 @@
   pointer-events: none;
 }
 
-/* ---------- topic markers: emoji, or a plain dash when there is none ---------- */
-.dts-emoji {
+/* ---------- topic markers: emoji, or the '-' symbol when there is none ---------- */
+.dts-emoji,
+.dts-dash {
   font-size: 14px;
   line-height: 1;
   flex: 0 0 auto;
@@ -1539,12 +1665,7 @@
 }
 
 .dts-dash {
-  width: 8px;
-  height: 2px;
-  border-radius: 1px;
-  flex: 0 0 auto;
-  background: var(--dsw-alias-label-caption, #adb2b8);
-  transform: translateY(1px);
+  color: var(--dsw-alias-label-caption, #adb2b8);
 }
 
 .dts-menu__icon .dts-emoji,
@@ -1554,11 +1675,16 @@
   display: inline-block;
 }
 
+/* Zen ships ~1900 glyphs; keep the grid compact and let the markers scroll on their own. */
 .dts-emojis {
   display: flex;
   flex-wrap: wrap;
+  align-content: flex-start;
   gap: 2px;
   max-width: 320px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .dts-emojis__item {

@@ -8,7 +8,7 @@
  */
 import * as React from 'react';
 import * as primitives from '@deepseek-ai/dsh-client-ui-primitives';
-import { subscribeLanguage, t } from './i18n.js';
+import { getLanguage, subscribeLanguage, t } from './i18n.js';
 
 /**
  * Native iconography.
@@ -42,6 +42,7 @@ const HOST_ICONS = {
   copy: 'IconCopyOutlineRegular',
   refresh: 'IconRefreshOutlineRegular',
   projectAdd: 'IconProjectAddOutlineRegular',
+  newChat: 'IconNewChatOutlineRegular',
   warning: 'IconWarningTriangleOutlineRegular',
   fork: 'IconBranchOutlineRegular',
   caret: 'IconTriangleRightFillRegular',
@@ -81,16 +82,18 @@ const FALLBACK_PATHS = {
   copy: ['M5.5 5.5h8v8h-8z', 'M2.5 10.5v-8h8'],
   refresh: ['M13 8a5 5 0 1 1-1.6-3.7', 'M13 2.6v3.2H9.8'],
   projectAdd: ['M2 5.2A1.2 1.2 0 0 1 3.2 4h2.6l1.2 1.6h5.8A1.2 1.2 0 0 1 14 6.8v4.4A1.2 1.2 0 0 1 12.8 12.4H3.2A1.2 1.2 0 0 1 2 11.2Z', 'M8 7.6v3.2', 'M6.4 9.2h3.2'],
+  newChat: ['M2.5 3.5h11v7H7l-3.5 3v-3h-1v-7Z', 'M8 5.4v3.4', 'M6.3 7.1h3.4'],
   warning: ['M8 2.4 14 12.8H2Z', 'M8 6.2v3', 'M8 11h.01'],
   fork: ['M2.5 8h4.2c1 0 1.6-.3 2.2-.9L11.6 4.4', 'M2.5 8h4.2c1 0 1.6.3 2.2.9l2.7 2.7'],
   ellipsis: ['M3.2 8h.01', 'M8 8h.01', 'M12.8 8h.01'],
   caret: ['M5.5 3 11 8l-5.5 5Z'],
 };
 
-/** Re-renders the caller whenever the UI language changes (`t()` reads a module-local). */
+/** Re-renders the caller whenever the UI language changes and returns the active id. */
 export function useLanguage() {
   const [, bump] = React.useReducer((count) => count + 1, 0);
   React.useEffect(() => subscribeLanguage(() => bump()), []);
+  return getLanguage();
 }
 
 export function cx(...parts) {
@@ -203,11 +206,41 @@ export function TextInput({ value, onChange, placeholder, autoFocus = false, onE
   );
 }
 
-/** Topic marker: the chosen glyph, or a plain dash when the folder has none (including 默认). */
+/** Topic marker: the chosen glyph, or the '-' symbol when the folder has none (including 默认). */
 export function TopicMark({ emoji, className }) {
   return emoji
     ? React.createElement('span', { className: cx('dts-emoji', className), 'aria-hidden': true }, emoji)
-    : React.createElement('span', { className: cx('dts-dash', className), 'aria-hidden': true });
+    : React.createElement('span', { className: cx('dts-dash', className), 'aria-hidden': true }, '-');
+}
+
+function FallbackStateMark({ state }) {
+  if (state === 'ongoing') {
+    return (
+      <svg className="dts-spinner" width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
+        <g className="dts-spinner__motion">
+          <circle className="dts-spinner__track" cx="12" cy="12" r="9.5" />
+          <circle className="dts-spinner__arc" cx="12" cy="12" r="9.5" />
+        </g>
+      </svg>
+    );
+  }
+  return <span className={cx('dts-state-dot', `dts-state-dot--${state}`)} aria-hidden="true" />;
+}
+
+/**
+ * Session-state marker. The host's StateDot is the original asset (spinner and state dots),
+ * so the row reads exactly like the stock list; the local fallback mirrors its geometry.
+ */
+export function StateMark({ state, className }) {
+  const Component = primitives?.StateDot;
+  const mark = typeof Component === 'function'
+    ? <Component state={state} />
+    : <FallbackStateMark state={state} />;
+  return (
+    <span className={cx('dts-state-mark', className)} aria-hidden="true">
+      {mark}
+    </span>
+  );
 }
 
 /** Anchored dropdown surface. `anchor` is a DOMRect from the caller's button. */

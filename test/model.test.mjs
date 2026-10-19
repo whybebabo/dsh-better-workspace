@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTree, buildWorkspaceOptions, mainSessionId, basename, moveWithin, newestTopic, DEFAULT_TOPIC_ID } from '../client/model.js';
+import { buildTree, buildWorkspaceOptions, mainSessionId, basename, moveWithin, newestTopic, DEFAULT_TOPIC_ID, UNGROUPED_WORKSPACE_ID } from '../client/model.js';
 
 const WS_A = 'ws_a';
 const WS_B = 'ws_b';
@@ -98,6 +98,77 @@ test('pinned sessions lead the default group too', () => {
   assert.deepEqual(fallback.rows.map((row) => row.id), ['ses_3', 'ses_1', 'ses_2'], 'unpinned rows keep their relative order');
 });
 
+test('host statuses drive rows and roll up with pending > completed > running', () => {
+  const topics = {
+    [WS_A]: [
+      { id: 'tp_1', name: '设计', emoji: '{1F4A1}', order: 0 },
+      { id: 'tp_2', name: '排查', emoji: '{1F3A8}', order: 1 },
+    ],
+  };
+  const assignments = { [WS_A]: { ses_1: 'tp_1', ses_2: 'tp_2', ses_3: 'tp_2', ses_arch: 'tp_1' } };
+  const statuses = new Map([
+    ['ses_1', { running: true, pendingInteraction: { kind: 'question' } }],
+    ['ses_2', { running: false, completionUnread: true }],
+    ['ses_3', { running: true }],
+    ['ses_arch', { pendingInteraction: { kind: 'approval' } }],
+  ]);
+  const built = buildTree({ ...fixture({ topics, assignments }), statuses, prefs: { showArchived: true }, query: '' });
+  const alpha = built.groups.find((group) => group.workspaceId === WS_A);
+  const design = alpha.sections.find((section) => section.id === 'tp_1');
+  const triage = alpha.sections.find((section) => section.id === 'tp_2');
+  const archived = alpha.sections.find((section) => section.kind === 'archived');
+  const pending = design.rows.find((row) => row.id === 'ses_1');
+  const completed = triage.rows.find((row) => row.id === 'ses_2');
+  const running = triage.rows.find((row) => row.id === 'ses_3');
+
+  assert.equal(pending.pendingKind, 'question');
+  assert.equal(pending.status, 'warning', 'a pending question wins over the live run');
+  assert.equal(pending.running, true);
+  assert.equal(completed.completed, true);
+  assert.equal(completed.status, 'done');
+  assert.equal(running.status, 'ongoing');
+  assert.equal(design.status, 'warning');
+  assert.equal(triage.status, 'done', 'an unread completion outranks a running sibling');
+  assert.equal(alpha.status, 'warning', 'the workspace takes the strongest topic status');
+  assert.equal(archived.status, null, 'archived rows never surface a status');
+});
+
+test('workspace status is an overview that ignores topic and search filters', () => {
+  const topics = {
+    [WS_A]: [
+      { id: 'tp_1', name: '设计', order: 0 },
+      { id: 'tp_2', name: '排查', order: 1 },
+    ],
+  };
+  const assignments = { [WS_A]: { ses_1: 'tp_1', ses_2: 'tp_2', ses_3: 'tp_2' } };
+  const statuses = new Map([
+    ['ses_1', { pendingInteraction: { kind: 'question' } }],
+    ['ses_2', { running: true }],
+  ]);
+  const base = { ...fixture({ topics, assignments }), statuses };
+
+  const filtered = buildTree({ ...base, prefs: { topicFilter: 'tp_2' }, query: '' });
+  const alpha = filtered.groups.find((group) => group.workspaceId === WS_A);
+  assert.equal(alpha.status, 'warning', 'a pending row hidden by the topic filter still warns');
+  assert.equal(alpha.sections.find((section) => section.id === 'tp_2').status, 'ongoing', 'the visible topic keeps its own status');
+
+  const searched = buildTree({ ...base, prefs: {}, query: 'API' });
+  const searchedAlpha = searched.groups.find((group) => group.workspaceId === WS_A);
+  assert.equal(searchedAlpha.status, 'warning', 'a search does not hide the workspace overview');
+  assert.deepEqual(flatten(searchedAlpha), ['ses_2']);
+});
+
+test('a topic filter locks the workspace it was opened from when ids are shared', () => {
+  // Every workspace owns a virtual tp_default, so the id alone cannot identify the scope.
+  const scoped = buildTree({
+    ...fixture(),
+    prefs: { topicFilter: DEFAULT_TOPIC_ID, workspaceFilter: WS_B },
+    query: '',
+  });
+  assert.deepEqual(scoped.groups.map((group) => group.workspaceId), [WS_B]);
+  assert.equal(scoped.currentWorkspaceId, WS_B, 'the locked workspace is the highlighted one');
+});
+
 test('workspace filter scopes the tree, topic filter keeps only that folder', () => {
   const topics = { [WS_A]: [{ id: 'tp_1', name: '设计', emoji: '{1F4A1}', order: 0 }], [WS_B]: [{ id: 'tp_b', name: 'Beta 主题', emoji: '{1F535}', order: 0 }] };
   const assignments = { [WS_A]: { ses_1: 'tp_1' }, [WS_B]: { ses_9: 'tp_b' } };
@@ -159,6 +230,57 @@ test('sessions missing from the workspace record still surface by cwd', () => {
     ['ses_1', 'ses_2', 'ses_3'],
     'cwd-matched sessions are appended even when the workspace record lags',
   );
+});
+
+test('sessions no workspace accounts for trail in a virtual 未分组 group', () => {
+  const base = fixture();
+  const byId = { ...base.byId, ses_stray: { id: 'ses_stray', displayTitle: '游离会话', cwd: 'D:/elsewhere', updatedAt: 50 } };
+  const list = { ...base.list, ids: [...base.list.ids, 'ses_stray'], byId };
+  const loose = { ...base, byId, list };
+
+  const built = buildTree({ ...loose, prefs: {}, query: '' });
+  const virtual = built.groups.at(-1);
+  assert.equal(virtual.workspaceId, UNGROUPED_WORKSPACE_ID);
+  assert.equal(virtual.virtual, true);
+  assert.equal(virtual.title, '未分组');
+  assert.deepEqual(flatten(virtual), ['ses_stray'], 'the row lives in the trailing group');
+  assert.deepEqual(sectionIds(virtual), ['topic:默认分组']);
+  assert.equal(virtual.sections[0].bare, true, '未分组 is a bucket, so it renders no group row');
+
+  const filtered = buildTree({ ...loose, prefs: { workspaceFilter: WS_A }, query: '' });
+  assert.equal(filtered.groups.some((group) => group.virtual), false, 'workspace filters never include 未分组');
+
+  const searched = buildTree({ ...loose, prefs: {}, query: '游离' });
+  assert.equal(searched.groups.at(-1).virtual, true);
+  assert.deepEqual(flatten(searched.groups.at(-1)), ['ses_stray'], 'search can find stray sessions');
+
+  const archivedStray = buildTree({ ...loose, archivedIds: ['ses_stray'], prefs: { showArchived: true }, query: '' });
+  const archivedVirtual = archivedStray.groups.at(-1);
+  assert.deepEqual(sectionIds(archivedVirtual), ['archived:'], 'archived strays keep their own bucket');
+});
+
+test('the virtual ungrouped workspace keeps its overview status under search', () => {
+  const byId = {
+    ses_match: { id: 'ses_match', displayTitle: '匹配会话', cwd: 'D:/elsewhere', updatedAt: 20 },
+    ses_pending: { id: 'ses_pending', displayTitle: '待回答会话', cwd: 'D:/elsewhere', updatedAt: 10 },
+  };
+  const list = { ids: Object.keys(byId), byId, current: 'ses_match', phase: 'ready' };
+  const statuses = new Map([['ses_pending', { pendingInteraction: { kind: 'question' } }]]);
+  const built = buildTree({
+    items: [],
+    list,
+    statuses,
+    archivedIds: [],
+    pinnedIds: [],
+    topicsOf: () => [],
+    assignmentsOf: () => ({}),
+    prefs: {},
+    query: '匹配',
+  });
+  const virtual = built.groups.at(-1);
+  assert.equal(virtual.workspaceId, UNGROUPED_WORKSPACE_ID);
+  assert.equal(virtual.status, 'warning', 'a matching row does not hide the pending sibling');
+  assert.deepEqual(flatten(virtual), ['ses_match']);
 });
 
 test('collapse state is read from prefs with stable composite keys', () => {

@@ -10,15 +10,15 @@ import * as React from 'react';
 import { createPortal } from 'react-dom';
 import { observeComposerSlot, resolveComposerWorkspace } from './composer.js';
 import { observeWorkspaceRegion, setRegionInert, watchRegionModals } from './geometry.js';
-import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, mainSessionId, moveWithin, newestTopic, topicLabel } from './model.js';
+import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, mainSessionId, moveWithin, newestTopic, pendingStatusLabel, topicLabel, UNGROUPED_WORKSPACE_ID } from './model.js';
 import { createPanelStore } from './store.js';
-import { beginReorder, currentDrag, endDrag, readDragPayload, reorderVerdict, writeReorderPayload } from './dnd.js';
+import { beginReorder, currentDrag, endDrag, readDragPayload, reorderVerdict, sessionReorderVerdict, writeReorderPayload } from './dnd.js';
 import { runSessionAction, mergeOutcomes, BATCH_LIMIT } from './batch.js';
-import { cx, Popover, MenuItem, Icon, useLanguage, TopicMark } from './widgets.jsx';
+import { cx, Popover, MenuItem, Icon, StateMark, useLanguage, TopicMark } from './widgets.jsx';
 import { Header } from './header.jsx';
 import { TopicTree } from './topic-tree.jsx';
 import { BatchBar } from './batch-bar.jsx';
-import { CreateTopicDialog, EditTopicDialog, DeleteTopicDialog, MoveToTopicDialog, RenameSessionDialog } from './dialogs.jsx';
+import { CreateTopicDialog, EditTopicDialog, DeleteTopicDialog, MoveToTopicDialog, RenameSessionDialog, RenameWorkspaceDialog, DeleteWorkspaceDialog } from './dialogs.jsx';
 import { BatchResultDialog, DeleteSessionsDialog } from './results.jsx';
 import { t } from './i18n.js';
 import { formatRelative } from './time.js';
@@ -38,7 +38,7 @@ function useSnapshot(source) {
 }
 
 export function OverlayPanel({ actions }) {
-  useLanguage();
+  const language = useLanguage();
   const store = React.useMemo(() => createPanelStore(), []);
   const [state, setState] = React.useState(() => store.getState());
   const [geom, setGeom] = React.useState({ visible: false, rect: null, reason: 'init', regionEl: null });
@@ -53,6 +53,8 @@ export function OverlayPanel({ actions }) {
   const [now, setNow] = React.useState(() => Date.now());
   const [pendingTopic, setPendingTopic] = React.useState(null);
   const [dropHint, setDropHint] = React.useState(null);
+  /** Transient collapse focus while a workspace/topic is dragged; never persisted. */
+  const [dragFocus, setDragFocus] = React.useState(null);
   const pendingRef = React.useRef(null);
   /** Blank-session watcher: the first ready snapshot primes the set, so reloads never re-file. */
   const autoFileRef = React.useRef({ primed: false, seen: new Set(), busy: new Set() });
@@ -60,6 +62,7 @@ export function OverlayPanel({ actions }) {
   const timersRef = React.useRef({ toast: null, arm: null });
 
   const sessionSnapshot = useSnapshot(actions.sessionStore);
+  const sessionStatuses = useSnapshot(actions.sessionStatusStore);
   const workspaceSnapshot = useSnapshot(actions.workspaceStore);
 
   React.useEffect(() => store.subscribe(() => setState(store.getState())), [store]);
@@ -125,6 +128,7 @@ export function OverlayPanel({ actions }) {
       buildTree({
         items,
         list,
+        statuses: sessionStatuses,
         archivedIds,
         pinnedIds,
         topicsOf: store.topicsOf,
@@ -132,18 +136,25 @@ export function OverlayPanel({ actions }) {
         prefs,
         query: prefs.searchOpen ? prefs.search : '',
       }),
-    [items, list, archivedIds, pinnedIds, prefs, state.workspaces, store],
+    [items, list, sessionStatuses, archivedIds, pinnedIds, prefs, state.workspaces, store, language],
   );
 
   // A filter pointing at a closed workspace or a deleted topic must not strand the panel —
   // but only once the workspace list has actually arrived, or the first empty snapshot would
   // wipe the persisted filter on every load.
   React.useEffect(() => {
-    if (options.length === 0) return;
-    const known = new Set(options.map((option) => option.workspaceId));
-    for (const bucket of Object.values(state.workspaces)) (bucket.topics ?? []).forEach((topic) => known.add(topic.id));
+    const workspacePhase = workspaceSnapshot?.phase ?? null;
+    if (options.length === 0 && workspacePhase !== 'ready') return;
+    // Only groups that still belong to a live workspace keep a filter alive; a deleted
+    // workspace (or a topic of it) must not strand the view. `topicsOf` also carries the
+    // virtual default group of workspaces that have no sidecar document yet.
+    const known = new Set();
+    for (const option of options) {
+      known.add(option.workspaceId);
+      for (const topic of store.topicsOf(option.workspaceId)) known.add(topic.id);
+    }
     store.reconcile((id) => known.has(id));
-  }, [options, state.workspaces, store]);
+  }, [options, state.workspaces, store, workspaceSnapshot?.phase]);
 
   /**
    * New-session filing. Two paths share one watcher so a blank is claimed exactly once:
@@ -196,7 +207,7 @@ export function OverlayPanel({ actions }) {
       auto.busy.add(target);
       store
         .assign({ workspaceId: active.workspaceId, sessionIds: [target], topicId: active.topicId })
-        .then(() => flash(t('session.movedTo', { name: topic.name })))
+        .then(() => flash(t('session.movedTo', { name: topicLabel(topic) })))
         .catch(() => { /* the session stays unfiled; the row menu can still move it */ })
         .finally(() => auto.busy.delete(target));
       return;
@@ -212,7 +223,9 @@ export function OverlayPanel({ actions }) {
         ?? options.find((option) => option.path && byId[id]?.cwd === option.path);
       if (!workspace) continue;
       const topic = newestTopic(store.topicsOf(workspace.workspaceId));
-      if (!topic) {
+      // The virtual default group is where unfiled sessions already live; filing into it
+      // would only materialize the sidecar document.
+      if (!topic || topic.system) {
         auto.seen.add(id);
         continue;
       }
@@ -227,12 +240,12 @@ export function OverlayPanel({ actions }) {
 
   const activeTopic = React.useMemo(() => {
     if (!prefs.topicFilter) return null;
-    for (const workspaceId of Object.keys(state.workspaces)) {
-      const found = (state.workspaces[workspaceId].topics ?? []).find((topic) => topic.id === prefs.topicFilter);
-      if (found) return found;
+    for (const option of options) {
+      const found = store.topicsOf(option.workspaceId).find((topic) => topic.id === prefs.topicFilter);
+      if (found) return { ...found, name: topicLabel(found) };
     }
     return null;
-  }, [prefs.topicFilter, state.workspaces]);
+  }, [prefs.topicFilter, options, state.workspaces, store]);
 
   const titles = React.useMemo(() => {
     const map = {};
@@ -265,32 +278,42 @@ export function OverlayPanel({ actions }) {
 
   const reorder = React.useMemo(() => ({
     hint: dropHint,
+    focus: dragFocus,
     onStart: (level, payload, event) => {
       beginReorder({ level, ...payload });
+      setDragFocus({ level, id: payload.id, workspaceId: payload.workspaceId });
       writeReorderPayload(event.dataTransfer, { level, ...payload });
       event.dataTransfer.effectAllowed = 'move';
     },
-    onHover: (event, level, target) => {
-      const verdict = reorderVerdict(currentDrag(), { level, ...target });
+    onHover: (event, level, target, forcedPosition) => {
+      const drag = currentDrag();
+      // Session drags are file drags; only a sibling row of the same topic is a reorder.
+      const verdict = drag?.kind === 'file'
+        ? sessionReorderVerdict(drag, target)
+        : reorderVerdict(drag, { level, ...target });
       if (!verdict.ok) return;
       event.preventDefault();
       event.dataTransfer.dropEffect = 'move';
-      const position = positionOf(event);
+      const position = forcedPosition ?? positionOf(event);
       setDropHint((current) =>
         current && current.level === level && current.id === target.id && current.position === position
           ? current
           : { level, id: target.id, position },
       );
     },
-    onDrop: (event, level, target) => {
+    onLeave: (level, id) => {
+      setDropHint((current) => (current?.level === level && current.id === id ? null : current));
+    },
+    onDrop: (event, level, target, forcedPosition) => {
       const drag = currentDrag();
       const verdict = reorderVerdict(drag, { level, ...target });
       setDropHint(null);
+      setDragFocus(null);
       if (!verdict.ok) return;
       event.preventDefault();
       event.stopPropagation();
       endDrag();
-      const position = positionOf(event);
+      const position = forcedPosition ?? positionOf(event);
       if (level === 'workspace') {
         setPrefs({ workspaceOrder: moveWithin(options.map((option) => option.workspaceId), drag.id, target.id, position) });
         return;
@@ -303,16 +326,21 @@ export function OverlayPanel({ actions }) {
     onEnd: () => {
       endDrag();
       setDropHint(null);
+      setDragFocus(null);
     },
-  }), [dropHint, options]);
+  }), [dropHint, dragFocus, options]);
 
   /**
-   * Collapsed sidebar (the rail). The host keeps its own 新建会话 / 搜索会话 buttons there and
-   * they still run the stock flows, so the rail is bridged to the panel: a new session is
-   * created through the host command and auto-filed like the stock ＋ button, and search
-   * reopens the sidebar on the panel's own search field.
+   * Collapsed sidebar (the rail). The host keeps its own 新建会话 / 添加工作区 / 搜索会话
+   * buttons there and they still run the stock flows, so the rail is bridged to the panel:
+   * a new session first reopens the sidebar and then runs the very same host command the
+   * expanded button runs (no workspace hint, so both land on the same page); adding a
+   * workspace keeps the host's own picker in the rail, then reopens the sidebar as soon as
+   * the new workspace lands (expanding earlier would cover the picker); search reopens the
+   * sidebar on the panel's own search field.
    */
   const [railIntent, setRailIntent] = React.useState(null);
+  const railAddRef = React.useRef(null);
   React.useEffect(() => {
     if (geom.visible || geom.reason !== 'rail') return undefined;
     const onCapture = (event) => {
@@ -322,7 +350,19 @@ export function OverlayPanel({ actions }) {
       const className = String(button.className ?? '');
       const isNewSession = /newSession/i.test(className) || /^(新建会话|new session|new chat)$/i.test(label);
       const isSearch = /searchButton/i.test(className) || /(搜索会话|搜索|search sessions|search)/i.test(label);
+      const isAddWorkspace = /^(添加工作区|add workspace|open folder)(…|\.\.\.)?$/i.test(label);
+      if (isAddWorkspace) {
+        // Do not cancel the event: the host's picker must stay in the rail, where the panel
+        // does not cover it. Expansion waits until the workspace actually lands.
+        railAddRef.current = {
+          known: new Set(options.map((option) => option.workspaceId)),
+          until: Date.now() + 600_000,
+        };
+        return;
+      }
       if (!isNewSession && !isSearch) return;
+      // An explicit rail action supersedes any add-workspace flow the user abandoned.
+      railAddRef.current = null;
       event.preventDefault();
       event.stopPropagation();
       if (isSearch) {
@@ -335,16 +375,41 @@ export function OverlayPanel({ actions }) {
         return;
       }
       try {
-        // Same command the ＋ menu uses; the blank it produces is auto-filed like any other
-        // new session (newest topic of its workspace, or the default group).
-        actions.startSession(tree.currentWorkspaceId ?? undefined);
+        // Expand first, then start exactly like the host's expanded 新会话 button (which calls
+        // `startSession()` without a workspace). The blank is still auto-filed by the panel.
+        actions.toggleSidebar();
+        actions.startSession();
       } catch (error) {
         flash(error?.message ?? String(error), 'bad');
       }
     };
     document.addEventListener('click', onCapture, true);
     return () => document.removeEventListener('click', onCapture, true);
-  }, [geom.visible, geom.reason, tree.currentWorkspaceId]);
+  }, [geom.visible, geom.reason, options]);
+
+  // The rail's add-workspace flow finishes by creating the workspace; expand when that
+  // workspace actually lands. A new session alone is not proof: the user may have cancelled
+  // the picker and started a session another way.
+  React.useEffect(() => {
+    const pending = railAddRef.current;
+    if (!pending) return;
+    if (Date.now() > pending.until) {
+      railAddRef.current = null;
+      return;
+    }
+    if (geom.visible) {
+      railAddRef.current = null;
+      return;
+    }
+    const added = options.some((option) => !pending.known.has(option.workspaceId));
+    if (!added) return;
+    railAddRef.current = null;
+    try {
+      actions.toggleSidebar();
+    } catch (error) {
+      flash(error?.message ?? String(error), 'bad');
+    }
+  }, [options, geom.visible]);
 
   React.useEffect(() => {
     if (!geom.visible || !railIntent) return undefined;
@@ -366,7 +431,15 @@ export function OverlayPanel({ actions }) {
 
   const style = geom.rect ? { left: geom.rect.left, top: geom.rect.top, width: geom.rect.width, height: geom.rect.height } : undefined;
   const pickWorkspace = (workspaceId) => setPrefs({ workspaceFilter: workspaceId, topicFilter: null });
-  const pickTopic = (topicId) => setPrefs({ topicFilter: topicId });
+  // A topic id is only unique inside its workspace (`tp_default` is shared by every
+  // workspace), so "only this topic" must carry its owner along with the filter.
+  const pickTopic = (topicId, workspaceId) => {
+    if (!topicId) {
+      setPrefs({ topicFilter: null });
+      return;
+    }
+    setPrefs({ topicFilter: topicId, workspaceFilter: workspaceId ?? prefs.workspaceFilter ?? null });
+  };
 
   const openSession = (row) => {
     try {
@@ -433,6 +506,11 @@ export function OverlayPanel({ actions }) {
       flash(t('session.crossWorkspace'), 'bad');
       return;
     }
+    // The trailing 未分组 group has no sidecar document, so a drop there can never assign a
+    // topic; only the same-topic reorder path below applies.
+    if (row.workspaceId === UNGROUPED_WORKSPACE_ID && (drag.fromTopicId !== row.topicId || dropped.length > 1)) {
+      return;
+    }
     if (drag.fromTopicId !== row.topicId || dropped.length > 1) {
       const topic = (store.topicsOf(row.workspaceId) ?? []).find((entry) => entry.id === row.topicId);
       store
@@ -447,7 +525,7 @@ export function OverlayPanel({ actions }) {
 
   /** A drop files the dragged session(s) into the target topic (the default group included). */
   const dropSessions = ({ ids, workspaceId, topicId }) => {
-    if (!ids?.length || !workspaceId) return;
+    if (!ids?.length || !workspaceId || workspaceId === UNGROUPED_WORKSPACE_ID) return;
     const topic = (store.topicsOf(workspaceId) ?? []).find((entry) => entry.id === topicId);
     store
       .assign({ workspaceId, sessionIds: ids, topicId })
@@ -566,7 +644,7 @@ export function OverlayPanel({ actions }) {
         {t('session.copyId')}
       </MenuItem>,
     );
-    if (!row.archived) {
+    if (!row.archived && row.workspaceId !== UNGROUPED_WORKSPACE_ID) {
       items.push(
         <div key="sep" className="dts-menu__sep" role="separator" />,
         <MenuItem
@@ -601,7 +679,7 @@ export function OverlayPanel({ actions }) {
 
   const topicMenu = ({ section, group }) => {
     const items = [
-      <MenuItem key="filter" icon={<Icon name="filter" />} onSelect={() => { setMenu(null); pickTopic(prefs.topicFilter === section.id ? null : section.id); }}>
+      <MenuItem key="filter" icon={<Icon name="filter" />} onSelect={() => { setMenu(null); pickTopic(prefs.topicFilter === section.id ? null : section.id, group.workspaceId); }}>
         {t('topic.filter')}
       </MenuItem>,
       <MenuItem key="select" icon={<Icon name="check" />} onSelect={() => { setMenu(null); setPrefs({ selectMode: true }); store.setSelection(section.rows.map((row) => row.id)); }}>
@@ -620,8 +698,7 @@ export function OverlayPanel({ actions }) {
     ];
     // The default group is system-owned: it can be filtered, filled and selected, but not
     // renamed or deleted.
-    if (section.system) return items;
-    items.push(
+    if (section.system) return items;    items.push(
       <MenuItem
         key="edit"
         icon={<Icon name="edit" />}
@@ -669,6 +746,22 @@ export function OverlayPanel({ actions }) {
     </MenuItem>,
     <MenuItem key="new" icon={<Icon name="plus" />} onSelect={() => { setMenu(null); newSession(group.workspaceId); }}>
       {t('menu.newSession')}
+    </MenuItem>,
+    <div key="sep" className="dts-menu__sep" role="separator" />,
+    <MenuItem
+      key="rename"
+      icon={<Icon name="edit" />}
+      onSelect={() => { setMenu(null); setDialog({ type: 'renameWorkspace', group }); }}
+    >
+      {t('action.rename')}
+    </MenuItem>,
+    <MenuItem
+      key="delete"
+      danger
+      icon={<Icon name="trash" />}
+      onSelect={() => { setMenu(null); setDialog({ type: 'deleteWorkspace', group }); }}
+    >
+      {t('workspace.deleteTitle')}
     </MenuItem>,
   ];
 
@@ -831,6 +924,16 @@ export function OverlayPanel({ actions }) {
     document.body,
   ) : null;
 
+  const hintStatus = hint && !hint.row.archived
+    ? hint.row.pendingKind
+      ? { tone: 'warning', label: pendingStatusLabel(hint.row.pendingKind) }
+      : hint.row.running
+        ? { tone: 'ongoing', label: t('session.state.running') }
+        : hint.row.completed
+          ? { tone: 'done', label: t('session.state.completed') }
+          : { tone: 'idle', label: t('session.state.idle') }
+    : null;
+
   return (
     <div className={cx('dts-overlay', menu || dialog ? 'has-floating' : null)} style={style} data-reason={geom.reason}>
       <div className="dts-panel">
@@ -888,8 +991,8 @@ export function OverlayPanel({ actions }) {
               }
               store.setSelection([...current]);
             }}
-            onFilterTopic={(topicId) => pickTopic(prefs.topicFilter === topicId ? null : topicId)}
-            onAddTopic={(workspaceId) => setDialog({ type: 'create', workspaceId })}
+            onFilterTopic={(topicId, workspaceId) => pickTopic(prefs.topicFilter === topicId ? null : topicId, workspaceId)}
+            onNewSession={newSession}
             onDropSessions={dropSessions}
             onRenameTopic={renameTopic}
             onDropOnRow={dropOnRow}
@@ -906,10 +1009,19 @@ export function OverlayPanel({ actions }) {
             progress={progress}
             hasArchived={selectedRows().some((row) => row.archived)}
             hasUnarchived={selectedRows().some((row) => !row.archived)}
+            hasUngrouped={selectedRows().some((row) => row.workspaceId === UNGROUPED_WORKSPACE_ID)}
             deleteAvailable={state.deleteAvailable}
             onArchive={() => runBatch('archive', selectedIds)}
             onUnarchive={() => runBatch('unarchive', selectedIds)}
-            onMove={() => setDialog({ type: 'move', ids: selectedIds, workspaceId: workspaceOfIds() })}
+            onMove={() => {
+              const workspaceId = workspaceOfIds();
+              const movable = selectedRows().filter((row) => row.workspaceId === workspaceId);
+              if (!workspaceId || workspaceId === UNGROUPED_WORKSPACE_ID || movable.length === 0) {
+                flash(t('session.crossWorkspace'), 'bad');
+                return;
+              }
+              setDialog({ type: 'move', ids: movable.map((row) => row.id), workspaceId });
+            }}
             onDelete={() => setDialog({ type: 'delete', ids: selectedIds })}
             onClear={() => {
               setPrefs({ selectMode: false });
@@ -995,6 +1107,29 @@ export function OverlayPanel({ actions }) {
         />
       ) : null}
 
+      {dialog?.type === 'renameWorkspace' ? (
+        <RenameWorkspaceDialog
+          workspace={dialog.group}
+          workspaces={options}
+          onClose={() => setDialog(null)}
+          onSubmit={async (title) => {
+            await actions.renameWorkspace(dialog.group.workspaceId, title);
+            flash(t('workspace.renamed', { name: title }));
+          }}
+        />
+      ) : null}
+
+      {dialog?.type === 'deleteWorkspace' ? (
+        <DeleteWorkspaceDialog
+          workspace={dialog.group}
+          onClose={() => setDialog(null)}
+          onConfirm={async () => {
+            await actions.deleteWorkspace(dialog.group.workspaceId);
+            flash(t('workspace.deleted', { name: dialog.group.title }));
+          }}
+        />
+      ) : null}
+
       {dialog?.type === 'delete' ? (
         <DeleteSessionsDialog
           ids={dialog.ids}
@@ -1005,7 +1140,14 @@ export function OverlayPanel({ actions }) {
             setPrefs({ selectMode: false });
             store.load();
           }}
-          onDone={() => store.load()}
+          onDone={async () => {
+            store.load();
+            // Deleting rewrites session artifacts behind the host's back, so its session list
+            // does not emit on its own — re-read it or the row lingers until a manual F5.
+            try {
+              await actions.refreshSessions();
+            } catch { /* optional */ }
+          }}
         />
       ) : null}
 
@@ -1045,8 +1187,8 @@ export function OverlayPanel({ actions }) {
             </div>
           ) : (
             <div className="dts-tip__meta dts-tip__badge">
-              <span className="dts-tip__dot" aria-hidden="true" />
-              {hint.row.running ? t('session.state.running') : t('session.state.idle')}
+              {hintStatus ? <StateMark state={hintStatus.tone} className="dts-tip__state" /> : null}
+              {hintStatus?.label}
             </div>
           )}
         </div>
