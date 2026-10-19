@@ -25,16 +25,20 @@ DeepSeek Harness 侧边栏**主题分组**插件:叠加在原生"工作区"区�
 ## 安装
 
 ```bash
+git clone https://github.com/whybebabo/dsh-better-workspace.git
+cd dsh-better-workspace
+npm install && npm run build
+
 # 隔离环境验证(不触碰现有 profile)
 dsh --profile topic-e2e --from-default-profile web --dump-config
-dsh plugin --profile topic-e2e add "link:D:/Projects/AI/dsh_topic_plugin"
+dsh plugin --profile topic-e2e add "link:$(pwd)"
 dsh --profile topic-e2e --no-open --port 8791      # 打印带 token 的 URL
 
 # Desktop(会修改 desktop profile,请先备份 cordis.patch.yml / package.json / pnpm-lock.yaml)
-dsh plugin --profile desktop add "link:D:/Projects/AI/dsh_topic_plugin"
+dsh plugin --profile desktop add "link:$(pwd)"
 ```
 
-安装前需先构建客户端:`npm install && npm run build`。
+仓库为私有;已安装过旧名 `dsh-topic-sidebar` 的 profile 需要先移除旧条目,再添加新名。
 
 ## 数据与文件
 
