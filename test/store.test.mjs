@@ -97,17 +97,18 @@ test('deleting a topic re-files its sessions into the default group', async () =
   assert.deepEqual(snapshot.workspaces.ws_a.assignments, { ses_1: DEFAULT_TOPIC_ID, ses_2: DEFAULT_TOPIC_ID });
 });
 
-test('reordering topics rewrites their order and protects the default group', async () => {
+test('reordering rewrites the topic order, default group included', async () => {
   const { store } = await freshStore();
   const a = (await store.createTopic({ workspaceId: 'ws_a', name: 'A' })).result.topic;
   const b = (await store.createTopic({ workspaceId: 'ws_a', name: 'B', expectedRevision: 1 })).result.topic;
-  const moved = await store.reorderTopics({ workspaceId: 'ws_a', topicIds: [b.id, a.id], expectedRevision: 2 });
+  const moved = await store.reorderTopics({ workspaceId: 'ws_a', topicIds: [b.id, DEFAULT_TOPIC_ID, a.id], expectedRevision: 2 });
   const snapshot = await store.snapshot();
-  assert.deepEqual(snapshot.workspaces.ws_a.topics.map((topic) => topic.id), [DEFAULT_TOPIC_ID, b.id, a.id]);
-  assert.equal(snapshot.workspaces.ws_a.topics[1].order, 0, 'orders are rewritten 0..n behind the default group');
+  assert.deepEqual(snapshot.workspaces.ws_a.topics.map((topic) => topic.id), [b.id, DEFAULT_TOPIC_ID, a.id]);
+  assert.equal(snapshot.workspaces.ws_a.topics[1].order, 1, 'orders are rewritten to the listed positions');
+  assert.equal(snapshot.workspaces.ws_a.topics[1].system, true, 'and the default group keeps its flag');
   await assert.rejects(
-    () => store.reorderTopics({ workspaceId: 'ws_a', topicIds: [DEFAULT_TOPIC_ID, a.id], expectedRevision: moved.revision }),
-    (e) => e.code === 'default-topic-protected',
+    () => store.reorderTopics({ workspaceId: 'ws_a', topicIds: [a.id, 'tp_nope'], expectedRevision: moved.revision }),
+    (e) => e.code === 'topic-not-found',
   );
 });
 

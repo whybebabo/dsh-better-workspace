@@ -949,8 +949,21 @@ test('dragging a topic row reorders the topics of that workspace', async () => {
   await tick();
   const call = calls.find((entry) => entry.url.endsWith('/topics/reorder'));
   assert.ok(call, 'the new order is written to the sidecar');
-  assert.deepEqual(call.body.topicIds, [TOPIC, 'tp_a']);
+  assert.deepEqual(call.body.topicIds, ['tp_default', TOPIC, 'tp_a']);
   assert.equal(call.body.workspaceId, WORKSPACE);
+
+  // The default group drags too: being first is only its starting position.
+  await act(async () => {
+    const start = new window.Event('dragstart', { bubbles: true });
+    start.dataTransfer = makeDataTransfer([]);
+    rows[0].dispatchEvent(start);
+    const drop = new window.Event('drop', { bubbles: true, cancelable: true });
+    drop.dataTransfer = makeDataTransfer([]);
+    rows[2].dispatchEvent(drop);
+  });
+  await tick();
+  const last = calls.filter((entry) => entry.url.endsWith('/topics/reorder')).pop();
+  assert.deepEqual(last.body.topicIds, ['tp_a', TOPIC, 'tp_default'], 'the default group can be filed anywhere');
 });
 
 test('dragging a session onto another session reorders them', async () => {

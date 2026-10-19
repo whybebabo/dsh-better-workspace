@@ -112,7 +112,9 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState(section.name ?? '');
   const droppable = section.kind !== 'archived';
-  const draggable = section.kind === 'topic' && !section.system && !selectMode;
+  // The default group is a system group — it cannot be renamed or deleted — but the user can
+  // still file it wherever they want, so it drags like any other topic.
+  const draggable = section.kind === 'topic' && !selectMode;
   const label = sectionLabel(section);
   const hint = reorder?.hint;
   const dropBefore = hint?.level === 'topic' && hint.id === section.id && hint.position === 'before';

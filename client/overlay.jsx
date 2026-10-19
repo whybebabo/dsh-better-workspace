@@ -295,7 +295,7 @@ export function OverlayPanel({ actions }) {
         setPrefs({ workspaceOrder: moveWithin(options.map((option) => option.workspaceId), drag.id, target.id, position) });
         return;
       }
-      const ids = (store.topicsOf(drag.workspaceId) ?? []).filter((topic) => !topic.system).map((topic) => topic.id);
+      const ids = (store.topicsOf(drag.workspaceId) ?? []).map((topic) => topic.id);
       store
         .reorderTopics({ workspaceId: drag.workspaceId, topicIds: moveWithin(ids, drag.id, target.id, position) })
         .catch((error) => flash(error?.message ?? String(error), 'bad'));
