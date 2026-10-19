@@ -858,6 +858,19 @@ test('a default-group filter is scoped to the workspace it was opened from', asy
   const tinted = container.querySelectorAll('.dts-folder.is-active');
   assert.equal(tinted.length, 1, 'the filtered workspace folder is tinted');
   assert.ok(groups[0].parentElement.contains(tinted[0]));
+
+  const activeGroup = [...container.querySelectorAll('.dts-row--topic')].find((node) => node.textContent.includes('默认分组'));
+  const filterAgain = activeGroup.querySelector('.dts-row__actions .dts-iconbtn[aria-label="只看此分组"]');
+  assert.ok(filterAgain, 'the active group still offers the filter toggle');
+  await act(async () => {
+    filterAgain.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  assert.equal(container.querySelectorAll('.dts-row--group').length, 2, 'cancelling releases the workspace lock too');
+  assert.equal(container.querySelector('.dts-header__chips'), null, 'both filter chips disappear');
+  const cleared = JSON.parse(window.localStorage.getItem('dsh-better-workspace:prefs:v1'));
+  assert.equal(cleared.workspaceFilter, null);
+  assert.equal(cleared.topicFilter, null);
 });
 
 test('deleting the last workspace clears a stale filter', async () => {

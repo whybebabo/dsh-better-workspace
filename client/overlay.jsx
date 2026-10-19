@@ -435,7 +435,8 @@ export function OverlayPanel({ actions }) {
   // workspace), so "only this topic" must carry its owner along with the filter.
   const pickTopic = (topicId, workspaceId) => {
     if (!topicId) {
-      setPrefs({ topicFilter: null });
+      // Applying a topic filter also locks its workspace; release both together.
+      setPrefs({ topicFilter: null, workspaceFilter: null });
       return;
     }
     setPrefs({ topicFilter: topicId, workspaceFilter: workspaceId ?? prefs.workspaceFilter ?? null });
