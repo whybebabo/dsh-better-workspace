@@ -55,7 +55,9 @@ dsh plugin --profile desktop add "link:$(pwd)"
 | `<DSH_HOME>/dsh-better-workspace/topics.v1.lock` | 跨进程写锁,进程异常退出后 10 秒自动失效 |
 | `localStorage["dsh-better-workspace:prefs:v1"]` | 工作区/主题筛选、折叠、搜索、选择模式 |
 
-写入采用 临时文件 → `fsync` → `rename`,并在覆盖前保留 `.bak`;主文件损坏时自动回退备份并进入**只读模式**(面板顶部横幅提示)。
+写入采用 临时文件 → `fsync` → `rename`,并在覆盖前保留 `.bak`。主文件损坏时自动回退备份并进入**只读模式**(面板顶部横幅提示);回退期间发生的那次写入不会再拿损坏的主文件覆盖 `.bak`,损坏文件另存为 `topics.v1.json.corrupt-<ts>` 供人工抢救。主文件与备份**同时**不可解析时拒绝一切写入(不会用空状态覆盖磁盘),修好文件后只读模式自动解除,无需重启宿主。
+
+写锁是跨进程文件锁:锁文件内容为 `<pid>-<随机>` 令牌,释放前校验令牌,**只有持有者能删锁**;`mtime` 超过 `staleLockMs` 且令牌中的 PID 已不存在的锁才会被回收(回收用 `rename` 原子夺锁,不会误删活跃进程的锁)。因此慢写入不会被判成过期而被顶掉。
 
 主题规则:一个会话最多属于一个主题;主题按工作区隔离;删除主题只清除归属,会话回到系统默认分组;每个工作区(包括尚未写入 sidecar 的新工作区)都有一个系统默认分组——面板会虚拟补齐,不可重命名或删除,但可以像普通分组一样拖动排序;归档/取消归档不改变归属;删除会话时同步清理其归属记录。虚拟「未分组」只承接没有工作区的**未归档**会话;已归档会话只出现在所属工作区的「已归档」桶里,没有工作区的归档记录不会进入未分组。
 
@@ -63,9 +65,9 @@ dsh plugin --profile desktop add "link:$(pwd)"
 
 前缀 `/dsh-better-workspace/api`,同时注册到 `webServer`(浏览器)与 `connection.fetch`(Desktop 无端口 carrier,客户端走 `/api/...`)。仅接受本机回环 + 同源请求。
 
-`GET /state` · `POST /topics/{create,update,delete}` · `POST /assign` · `POST /delete/{preview,execute}`
+`GET /state` · `POST /topics/{create,update,delete}` · `POST /topics/reorder` · `POST /assign` · `POST /delete/{preview,execute}`
 
-所有写请求带 `expectedRevision`,不一致返回 `409` 并附 `currentRevision`,客户端重新拉取后重试。
+所有写请求**必须**带 `expectedRevision`(缺失返回 `400 revision-required`),不一致返回 `409` 并附 `currentRevision`,客户端重新拉取后重试。`/delete/*` 是命令式操作,不参与 revision 校验。
 
 ## 覆盖策略与失效保护
 
@@ -82,10 +84,10 @@ DSH 不提供删除会话的宿主命令,插件自行实现,规则是"宁可拒�
 1. 会话 id 必须是单段安全字符(拒绝 `/`、`\`、`..`);
 2. 目录必须位于 `<DSH_HOME>/sessions` 之下,路径每一级都经 `lstat` + `realpath` 校验,拒绝 symlink/junction;sessions 根本身是链接时直接拒绝;
 3. 必须读取 `session.v3.jsonl[.zstd]` 首行 header 并确认 `header.id === sessionId`,仅凭目录名匹配**不删**;
-4. 存在写锁(`*.lock`)或目标是子智能体会话(`origin: 'subagent'`)→ 拦下(子智能体由主会话级联删除并在 preview 中计数);仅带 `parentSession` 的用户分叉不算子智能体;
+4. 会话文件**最近仍在写入**时拦下(子智能体会话同样拦下,由主会话级联删除并在 preview 中计数);仅带 `parentSession` 的用户分叉不算子智能体。注意 DSH 的写租约不是"锁文件存在与否":Windows 用命名内核信号量、POSIX 的 `session.lock` 一经创建永不删除,所以这里改看 artifact 的最近修改时间(15 秒静默窗口),而不是 `*.lock` 文件名;
 5. 运行中的会话先按官方方式 `agent.cancel({kind:'user'})` 并等待其离开 running(上限 3 秒),停不下来就不删;
-6. 从 `sessions` store 与 `workspaceRegistry` detach 后再 `rm -rf`,删除后再次 `lstat` 确认目录确实消失;
-7. 批量先整体 preflight 再逐条执行,部分失败不回滚已成功项,逐条返回 `deleted/skipped/failed`。
+6. 删除时先把目标目录 `rename` 进根内的 `.trash-<pid>-<rand>` 隔离区,再删隔离区——`rename` 是原子的且只解析一次路径,从而消除"检查通过后父目录被换成 junction"的窗口;删除后再次 `lstat` 确认目录确实消失;
+7. 批量先整体 preflight 再逐条执行,部分失败不回滚已成功项,逐条返回 `deleted/skipped/partial/failed`;`partial` 表示主会话已删但有子会话未删成功(`subagentsFailed` 列出)。
 
 ## 开关与回滚
 
@@ -97,13 +99,15 @@ DSH 不提供删除会话的宿主命令,插件自行实现,规则是"宁可拒�
 
 ```bash
 npm install
-npm run build     # esbuild -> lib/client.js(window.__ModuleLoader__.load 壳,仅外部化 react)
-npm test          # 141 项:sidecar 锁/原子写/revision、树派生、批量归档分类、删除安全、拖拽/改名/渲染集成、定时任务频率与悬浮段
+npm run build     # esbuild -> lib/client.js(window.__ModuleLoader__.load 壳,外部化 react/react-dom/宿主 primitives)
+npm test          # 153 项:sidecar 锁/原子写/revision/损坏恢复、树派生、批量归档分类、删除安全、拖拽/改名/渲染集成、定时任务频率与悬浮段
 ```
 
 `client/` 是源码,`lib/client.js` 是产物(已随包发布,勿手改)。测试里的 `react`/`react-dom`/`jsdom` 只是**开发依赖**:产物运行时 `require('react')` 用的是宿主已加载的实例(与 DSH 0.2.1 同为 React 18.3.1),不会打包第二份 React。
 
 `test/panel.test.mjs` 直接加载**构建产物**跑 jsdom 集成测试(伪造布局与 `fetch`),覆盖拖拽归组、内联改名、渐进渲染、"主题下新建会话"的认领逻辑、语言热切换、原生图标与回退、折叠让位,以及"注册项不得声明他人的槽位"这一启动安全约束。
+
+本轮的每一条安全修复都做过**变异自检**:把实现改回旧行为,对应测试必须变红。改完安全相关的代码后建议照做一遍——只加 happy-path 用例而不做这一步,很容易得到"看起来被守护、实际删掉也全绿"的测试(本轮审查就发现了 6 处这样的断言)。
 
 ## 已知边界
 
@@ -112,6 +116,8 @@ npm test          # 141 项:sidecar 锁/原子写/revision、树派生、批量�
 - 会话行菜单的按钮由插件自绘(不能借用官方条目,见上),但顺序、文案、图标与快捷键提示逐项对齐原版;快捷键提示取自宿主当前默认绑定,若在设置里改键,提示文字会滞后(动作本身仍走官方命令);
 - "在此主题下新建会话"依赖宿主把新会话标记为 `blank`,若某版本不再标记则退化为"不自动归组"(可手动移动),不会误改既有会话;
 - 永久删除依赖 `sessions`/`agents`/`workspaceRegistry`/`storageDomain`(`session_projcache`、`workspace`)等宿主内部服务名,DSH 主版本变更时需要重新核对;缺失某个清理服务时日志仍会删除,清理失败会记录在返回结果里;
+- 跨进程"正在写入"判定是**保守近似**:插件无法从浏览器/宿主进程直接查询内核租约,因此用 artifact 的最近修改时间(15 秒静默窗口)判断。刚结束写入的会话在 15 秒内可能被判为"仍在写"而暂时拒绝删除(preview 会给出 `locked` 提示,稍后重试即可);反之一个静默但仍在运行的会话可能被漏判——这条边界宁可漏放也不误删;
+- 侧栏的内联改名、拖拽排序等交互依赖浏览器原生 DOM/junction 行为,jsdom 只能覆盖结构而不覆盖视觉("状态让位"是纯 CSS,删掉规则测试也不会红,靠人眼验收);
 - 定时任务的行首时钟与悬浮段由插件读取 `remote.schedule.catalog()` 后自绘:宿主的 `sidebar.session.row.leading` / `.hover` 两个 slot 只能由声明者(原生列表)渲染,覆盖层无法借用;`cron` 规则按宿主的原文形式 `Cron {expression}（zone）` 显示,不做人类可读的 cron 预览。注意命名空间是**独立的 cordis 服务**(`ctx.get('remote.schedule')`),不是 `remote` 的属性——后者未在 `inject` 里声明时会抛 `cannot get property "remote.schedule" without inject`,按属性读会把"服务存在"误判成"服务缺失"(2633ab8 即因此实测不生效);解析失败时插件会 `console.warn` 一次,便于定位。catalog 字段若在后续版本改名,这两处不显示,不影响面板其它部分。
 
 许可证:MIT。第三方致谢见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
