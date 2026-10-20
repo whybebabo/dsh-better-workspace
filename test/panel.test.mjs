@@ -1550,6 +1550,24 @@ test('sessions outside every workspace trail in a virtual 未分组 group', asyn
   assert.equal(document.querySelector('.dts-pop--menu').textContent.includes('移动到分组'), false, 'a session with no workspace cannot be moved to a topic');
 });
 
+test('archived orphans stay out of the virtual 未分组 group', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  const base = sessionSource.getSnapshot();
+  sessionSource.set({
+    ...base,
+    ids: [...base.ids, 'ses_orphan'],
+    byId: {
+      ...base.byId,
+      ses_orphan: { id: 'ses_orphan', displayTitle: '归档孤儿', cwd: '', updatedAt: Date.now(), blank: false },
+    },
+  });
+  workspaceSource.set({ ...workspaceSource.getSnapshot(), archivedSessionIds: ['ses_orphan'] });
+  window.localStorage.setItem('dsh-better-workspace:prefs:v1', JSON.stringify({ showArchived: true }));
+  await mount();
+  assert.equal(find('.dts-row--group', '未分组'), undefined, 'archived orphans do not create a virtual workspace');
+  assert.equal(find('.dts-row--session', '归档孤儿'), undefined, 'the orphan is not smuggled into any tree');
+});
+
 test('dragging a workspace can drop just above the virtual 未分组 group', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   const base = sessionSource.getSnapshot();

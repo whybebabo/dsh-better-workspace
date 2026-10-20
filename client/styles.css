@@ -116,6 +116,25 @@
   background: var(--dsw-alias-interactive-bg-hover-danger, rgba(236, 19, 19, 0.08));
 }
 
+/* The host's archive icons sit on different grids (16 vs 20 viewBox), and the move arrow
+   is drawn smaller. Normalize stroke weight and optical size so the four actions share one
+   baseline instead of inheriting each glyph's own padding. */
+.dts-selectbar__action .dts-icon > svg {
+  display: block;
+}
+
+.dts-selectbar__action .dts-icon path {
+  vector-effect: non-scaling-stroke;
+}
+
+.dts-selectbar__action--archive .dts-icon > svg {
+  transform: translateY(-0.5px);
+}
+
+.dts-selectbar__action--move .dts-icon > svg {
+  transform: scale(1.15);
+}
+
 /* ---------- buttons ---------- */
 .dts-iconbtn {
   display: inline-flex;

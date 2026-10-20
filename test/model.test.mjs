@@ -254,9 +254,24 @@ test('sessions no workspace accounts for trail in a virtual 未分组 group', ()
   assert.equal(searched.groups.at(-1).virtual, true);
   assert.deepEqual(flatten(searched.groups.at(-1)), ['ses_stray'], 'search can find stray sessions');
 
-  const archivedStray = buildTree({ ...loose, archivedIds: ['ses_stray'], prefs: { showArchived: true }, query: '' });
-  const archivedVirtual = archivedStray.groups.at(-1);
-  assert.deepEqual(sectionIds(archivedVirtual), ['archived:'], 'archived strays keep their own bucket');
+  const archivedOnly = buildTree({ ...loose, archivedIds: ['ses_stray'], prefs: { showArchived: true }, query: '' });
+  assert.equal(archivedOnly.groups.some((group) => group.virtual), false, 'archived strays never create a 未分组 group');
+
+  const byIdWithArchive = {
+    ...byId,
+    ses_arch_stray: { id: 'ses_arch_stray', displayTitle: '归档游离', cwd: 'D:/elsewhere', updatedAt: 60 },
+  };
+  const mixed = buildTree({
+    ...loose,
+    list: { ...list, ids: [...list.ids, 'ses_arch_stray'], byId: byIdWithArchive },
+    byId: byIdWithArchive,
+    archivedIds: ['ses_arch_stray'],
+    prefs: { showArchived: true },
+    query: '',
+  });
+  const mixedVirtual = mixed.groups.at(-1);
+  assert.deepEqual(flatten(mixedVirtual), ['ses_stray'], 'archived strays stay out of the virtual group');
+  assert.equal(mixedVirtual.archivedCount, 0, '未分组 never carries an archived bucket');
 });
 
 test('the virtual ungrouped workspace keeps its overview status under search', () => {

@@ -44,18 +44,36 @@ export function BatchBar({ count, busy, progress, hasArchived, hasUnarchived, ha
           {t('batch.selected', { n: count })}
         </span>
         <span className="dts-header__spacer" />
-        <IconButton label={t('batch.archive')} title={archiveTitle} disabled={archiveDisabled} onClick={onArchive}>
+        <IconButton
+          className="dts-selectbar__action dts-selectbar__action--archive"
+          label={t('batch.archive')}
+          title={archiveTitle}
+          disabled={archiveDisabled}
+          onClick={onArchive}
+        >
           <Icon name="archive" />
         </IconButton>
-        <IconButton label={t('batch.unarchive')} title={unarchiveTitle} disabled={unarchiveDisabled} onClick={onUnarchive}>
+        <IconButton
+          className="dts-selectbar__action dts-selectbar__action--unarchive"
+          label={t('batch.unarchive')}
+          title={unarchiveTitle}
+          disabled={unarchiveDisabled}
+          onClick={onUnarchive}
+        >
           <Icon name="unarchive" />
         </IconButton>
-        <IconButton label={t('batch.move')} title={moveTitle} disabled={moveDisabled} onClick={onMove}>
+        <IconButton
+          className="dts-selectbar__action dts-selectbar__action--move"
+          label={t('batch.move')}
+          title={moveTitle}
+          disabled={moveDisabled}
+          onClick={onMove}
+        >
           <Icon name="move" />
         </IconButton>
         {deleteAvailable ? (
           <IconButton
-            className="dts-selectbar__danger"
+            className="dts-selectbar__action dts-selectbar__danger"
             label={t('batch.delete')}
             title={deleteTitle}
             disabled={deleteDisabled}

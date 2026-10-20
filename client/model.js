@@ -359,13 +359,15 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
 
   // The native browser trails a virtual 未分组 workspace for sessions no workspace
   // accounts for. It stays out of filters (those are workspace-scoped) and out of the
-  // workspace order; it is only a home for rows that would otherwise disappear.
+  // workspace order; it is only a home for live rows that would otherwise disappear.
+  // Archived sessions always belong to their workspace's archived bucket: sessions with no
+  // workspace at all stay out instead of surfacing under 未分组.
   if (!workspaceFilter && !topicFilter) {
     const accounted = new Set();
     for (const workspace of workspaces) for (const id of workspace.sessionIds ?? []) accounted.add(id);
     const workspacePaths = new Set(workspaces.map((workspace) => workspace.path).filter(Boolean));
     const strays = Object.values(byId)
-      .filter((session) => session && !accounted.has(session.id) && !workspacePaths.has(session.cwd))
+      .filter((session) => session && !accounted.has(session.id) && !workspacePaths.has(session.cwd) && !archived.has(session.id))
       .sort((left, right) => relativeKey(left.updatedAt) - relativeKey(right.updatedAt));
     const orderedStrays = orderBy(strays.map((session) => session.id), prefs?.sessionOrder?.[UNGROUPED_WORKSPACE_ID], (id) => id);
     const defaultName = t('topic.default');
@@ -376,8 +378,6 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
       if (!session) continue;
       if (session.origin === 'subagent') continue;
       if (session.blank && id !== current) continue;
-      const isArchived = archived.has(id);
-      if (isArchived && !showArchived) continue;
       const row = makeRow(session, {
         current,
         archived,
@@ -402,40 +402,22 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
     }
     if (rows.length > 0) {
       sortRows(rows);
-      const live = rows.filter((row) => !row.archived);
-      const archivedRows = rows.filter((row) => row.archived);
-      const sections = [];
-      if (live.length > 0) {
-        const status = aggregateStatus(live);
-        sections.push({
-          kind: 'topic',
-          id: DEFAULT_TOPIC_ID,
-          name: defaultName,
-          emoji: '',
-          system: true,
-          // 未分组 is a bucket, not a workspace that groups anything: its rows hang directly
-          // off the workspace header instead of a "default group" row.
-          bare: true,
-          rows: live,
-          status: status.state,
-          statusKind: status.kind,
-          collapsed: false,
-          total: live.length,
-        });
-      }
-      if (archivedRows.length > 0) {
-        sections.push({
-          kind: 'archived',
-          id: '__archived__',
-          name: null,
-          emoji: '',
-          rows: archivedRows,
-          status: null,
-          statusKind: null,
-          collapsed: collapsedWorkspaces.has(`${UNGROUPED_WORKSPACE_ID}:archived`),
-          total: archivedRows.length,
-        });
-      }
+      const status = aggregateStatus(rows);
+      const sections = [{
+        kind: 'topic',
+        id: DEFAULT_TOPIC_ID,
+        name: defaultName,
+        emoji: '',
+        system: true,
+        // 未分组 is a bucket, not a workspace that groups anything: its rows hang directly
+        // off the workspace header instead of a "default group" row.
+        bare: true,
+        rows,
+        status: status.state,
+        statusKind: status.kind,
+        collapsed: false,
+        total: rows.length,
+      }];
       const workspaceStatus = aggregateStatus(liveStatusRows(orderedStrays, {
         byId,
         archived,
@@ -451,8 +433,8 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
         sections,
         status: workspaceStatus.state,
         statusKind: workspaceStatus.kind,
-        liveCount: live.length,
-        archivedCount: archivedRows.length,
+        liveCount: rows.length,
+        archivedCount: 0,
         topicCount: 1,
         collapsed: collapsedWorkspaces.has(UNGROUPED_WORKSPACE_ID),
         isSelectedWorkspaceFilter: false,
