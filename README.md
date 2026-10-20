@@ -12,6 +12,12 @@
 
 插件不会接管 DSH 的其余部分：侧栏折叠、窄视口或路由不可达时，面板会**完全隐藏并交还原生 UI**（见[失效保护](#覆盖策略与失效保护)）。
 
+## 界面预览
+
+![dsh-better-workspace 侧边栏：工作区筛选、emoji 分组树、会话状态点与行尾操作](https://raw.githubusercontent.com/whybebabo/dsh-better-workspace/main/docs/assets/preview.png)
+
+> 图片走 GitHub 绝对地址，这样在 npm 包页面上也能显示（`files` 白名单不带 `docs/`，相对路径在 npm 上会变成坏图）。
+
 ## 工作方式
 
 - **叠加而非替换**：面板渲染在 `shell.overlay`，用结构选择器定位原生工作区区域，覆盖矩形与该区域自身盒子重合。被覆盖区域加上 `inert` + `aria-hidden`，官方弹窗出现时自动释放。
@@ -25,11 +31,43 @@
 
 - DeepSeek Harness Desktop 或 Web `0.2.1-rc.x`，`@deepseek-ai/cordis` 4.0.5；
 - Node.js ≥ 22.19；
-- 本机可用 Git（以 `github:` 方式安装时）；
+- 本机可用 Git（以 `github:` 方式安装时）。
 
-### 从源码安装（当前推荐）
+### 从 npm 安装（推荐）
 
-插件尚未发布 tag，请先克隆并构建，再用 `link:` 方式挂到 profile：
+```bash
+dsh plugin --profile web add @whybebabo/dsh-better-workspace
+```
+
+DSH 会把插件装进 Web profile，并把 `@whybebabo/dsh-better-workspace` 注册到 `dsh.profile.bundles`，不需要克隆仓库、手动安装依赖或构建客户端。
+
+没有全局 `dsh` 命令时，用 `npx` 执行：
+
+```bash
+npx @deepseek-ai/dsh plugin --profile web add @whybebabo/dsh-better-workspace
+```
+
+安装命令需要本机可以使用 [Git](https://git-scm.com/) 与 pnpm；使用 `npx` 时还需要 Node.js。
+
+Desktop 会修改 `desktop` profile，装之前建议先备份 `cordis.patch.yml` / `package.json` / `pnpm-lock.yaml`：
+
+```bash
+dsh plugin --profile desktop add @whybebabo/dsh-better-workspace
+```
+
+### 从 GitHub 安装
+
+不经过 npm，直接从仓库安装某个发布版本：
+
+```bash
+dsh plugin --profile web add github:whybebabo/dsh-better-workspace#v0.2.0
+```
+
+把 `#v0.2.0` 换成你要的 tag。这条路径同样需要 Git 与 pnpm，也不需要克隆仓库。
+
+### 从源码安装
+
+需要改代码或跟 `main` 分支时：
 
 ```bash
 git clone https://github.com/whybebabo/dsh-better-workspace.git
@@ -45,41 +83,48 @@ dsh plugin --profile topic-e2e add "link:$(pwd)"
 dsh --profile topic-e2e --no-open --port 8791      # 打印带 token 的 URL
 ```
 
-确认无误后装到日常使用的 profile（Web）：
+确认无误后装到日常使用的 profile：
 
 ```bash
 dsh plugin --profile web add "link:$(pwd)"
 ```
 
-Desktop 会修改 `desktop` profile，装之前建议先备份 `cordis.patch.yml` / `package.json` / `pnpm-lock.yaml`：
-
-```bash
-dsh plugin --profile desktop add "link:$(pwd)"
-```
-
-没有全局 `dsh` 命令时，用 `npx @deepseek-ai/dsh` 代替 `dsh`，例如：
-
-```bash
-npx @deepseek-ai/dsh plugin --profile web add "link:$(pwd)"
-```
+以 `link:` 方式安装时，宿主读取的始终是当前目录的产物：改完代码 `npm run build` 并重启即可，不必重新 `add`。
 
 ### 启动或重启 DSH
 
-安装后重启 DSH Web 或 Desktop。打开侧栏，点「工作区」标题旁出现的 ▾，或把鼠标移到「工作区」上——看到工作区下拉与分组树，说明插件已加载。
+安装后关闭旧的 DSH Web 进程并重新启动：
+
+```bash
+dsh web
+```
+
+使用 `npx` 的启动方式：
+
+```bash
+npx @deepseek-ai/dsh web
+```
+
+打开侧栏，点「工作区」标题旁出现的 ▾，或把鼠标移到「工作区」上——看到工作区下拉与分组树，说明插件已加载。
 
 ### 升级
 
+发布新版本后重新执行安装命令并替换版本：
+
 ```bash
-cd dsh-better-workspace
-git pull && npm install && npm run build
+dsh plugin --profile web add @whybebabo/dsh-better-workspace
 ```
 
-随后重启 DSH。以 `link:` 方式安装时，宿主读取的始终是当前目录的产物，不需要重新 `add`。
+随后重启 DSH。以源码方式安装的则用：
+
+```bash
+git pull && npm install && npm run build
+```
 
 ### 卸载
 
 ```bash
-dsh plugin --profile web remove dsh-better-workspace
+dsh plugin --profile web remove @whybebabo/dsh-better-workspace
 ```
 
 主题数据保留在 `<DSH_HOME>/dsh-better-workspace/`，需要清除请手动删除该目录。
@@ -95,16 +140,6 @@ Invoke-WebRequest 'http://127.0.0.1:3080/dsh-better-workspace/api/state' | Selec
 预期状态码 `200`，返回体里 `ok: true`、`result.workspaces` 是你的分组数据。
 
 > 该路由只接受本机回环 + 同源请求，用别的机器访问会拿到 `403`，这不是故障。
-
-### 从 GitHub 安装（发布 tag 后可用）
-
-打上 tag 之后，可以直接让 DSH 拉取并安装，不必克隆：
-
-```bash
-dsh plugin --profile web add github:whybebabo/dsh-better-workspace#vX.Y.Z
-```
-
-DSH 会把它装进 Web profile 并注册到 `dsh.profile.bundles`。**当前仓库没有 tag**，`#vX.Y.Z` 需要替换成实际发布版本；在此之前请用上面的源码安装方式。
 
 ## 用法
 
@@ -229,12 +264,26 @@ npm test          # 155 项
 ### 目录结构
 
 ```
-lib/           Node 端：入口、sidecar 存储、删除、会话文件解析、emoji 表
-client/        浏览器端源码（.js 逻辑层 + .jsx 组件层 + styles.css）
-lib/client.js  构建产物，由 client/build.mjs 生成
-test/          node --test 用例
+lib/              Node 端：入口、sidecar 存储、删除、会话文件解析、emoji 表
+client/           浏览器端源码（.js 逻辑层 + .jsx 组件层 + styles.css）
+lib/client.js     构建产物，由 client/build.mjs 生成
+test/             node --test 用例
+docs/assets/      README 截图
 cordis.patch.yml  profile 插桩（enabled / enableDelete 开关）
 ```
+
+### 发布
+
+包名 `@whybebabo/dsh-better-workspace`，`publishConfig.access: public`，`files` 白名单只带 `lib`、`cordis.patch.yml`、`README.md`、`LICENSE` 与 `THIRD_PARTY_NOTICES.md`（源码不入包）。
+
+```bash
+npm run build          # 先构建，包里的 lib/client.js 是产物
+npm pack --dry-run     # 确认文件清单
+npm publish            # 发布到 npm
+git tag v0.2.0 && git push --tags
+```
+
+打 tag 之后 `dsh plugin add github:whybebabo/dsh-better-workspace#v0.2.0` 这条路径才可用；两者互不影响，同版本号建议一起发布。
 
 ## 已知边界
 
@@ -246,7 +295,7 @@ cordis.patch.yml  profile 插桩（enabled / enableDelete 开关）
 - 跨进程"正在写入"判定是**保守近似**：插件无法从浏览器/宿主进程直接查询内核租约，因此用 artifact 的最近修改时间（15 秒静默窗口）判断。刚结束写入的会话在 15 秒内可能被判为"仍在写"而暂时拒绝删除（preview 会给出 `locked` 提示，稍后重试即可）；反之一个静默但仍在运行的会话可能被漏判——这条边界宁可漏放也不误删；
 - 侧栏的内联改名、拖拽排序等交互依赖浏览器原生 DOM/junction 行为，jsdom 只能覆盖结构而不覆盖视觉（"状态让位"是纯 CSS，删掉规则测试也不会红，靠人眼验收）；
 - 定时任务的行首时钟与悬浮段由插件读取 `remote.schedule.catalog()` 后自绘：宿主的 `sidebar.session.row.leading` / `.hover` 两个 slot 只能由声明者（原生列表）渲染，覆盖层无法借用；`cron` 规则按宿主的原文形式 `Cron {expression}（zone）` 显示，不做人类可读的 cron 预览。注意命名空间是**独立的 cordis 服务**（`ctx.get('remote.schedule')`），不是 `remote` 的属性——后者未在 `inject` 里声明时会抛 `cannot get property "remote.schedule" without inject`，按属性读会把"服务存在"误判成"服务缺失"；解析失败时插件会 `console.warn` 一次，便于定位。catalog 字段若在后续版本改名，这两处不显示，不影响面板其它部分；
-- 仓库尚未发布 tag，因此「从 GitHub 安装」的 `#vX.Y.Z` 暂时不可用，需按源码方式安装；
+- npm 上装的是打包产物；要跟 `main` 分支或改代码，用上面的源码安装并 `npm run build`；
 
 ## 许可证
 

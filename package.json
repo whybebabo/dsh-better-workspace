@@ -1,6 +1,6 @@
 {
-  "name": "dsh-better-workspace",
-  "version": "0.1.0",
+  "name": "@whybebabo/dsh-better-workspace",
+  "version": "0.2.0",
   "description": "DSH(DeepSeek Harness)主题分组侧栏插件:叠加注入原生侧边栏工作区区域,提供工作区下拉筛选、主题文件夹树、批量归档/取消归档与安全永久删除。",
   "keywords": [
     "dsh",
@@ -17,14 +17,6 @@
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/whybebabo/dsh-better-workspace.git"
-  },
-  "homepage": "https://github.com/whybebabo/dsh-better-workspace#readme",
-  "bugs": {
-    "url": "https://github.com/whybebabo/dsh-better-workspace/issues"
-  },
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
@@ -48,10 +40,22 @@
       "platform": "web"
     }
   },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whybebabo/dsh-better-workspace.git"
+  },
+  "homepage": "https://github.com/whybebabo/dsh-better-workspace#readme",
+  "bugs": {
+    "url": "https://github.com/whybebabo/dsh-better-workspace/issues"
+  },
   "scripts": {
     "build": "node client/build.mjs",
     "test": "node --test test/*.test.mjs",
-    "check": "node --check lib/index.js && node --check lib/store.js && node --check lib/delete.js"
+    "check": "node --check lib/index.js && node --check lib/store.js && node --check lib/delete.js",
+    "prepublishOnly": "npm run build && npm run check && npm test"
   },
   "devDependencies": {
     "esbuild": "^0.25.0",
