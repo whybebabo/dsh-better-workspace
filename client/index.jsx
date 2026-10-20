@@ -20,7 +20,12 @@ import css from './styles.css';
 export const inject = ['slots'];
 
 const STYLE_ATTRIBUTE = 'data-plugin';
-const STYLE_ID = 'dsh-better-workspace';
+/**
+ * The loader keys styles by the same id it keys the bundle by (the package name), so the
+ * <style> tag claims that id instead of a second, hand-maintained one. `build.mjs` replaces
+ * this identifier with the package name at build time.
+ */
+const STYLE_ID = __DSH_CLIENT_ID__;
 
 /**
  * Follows the host language. The locale service is authoritative when present; `<html lang>`
