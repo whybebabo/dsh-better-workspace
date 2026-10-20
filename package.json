@@ -17,6 +17,14 @@
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whybebabo/dsh-better-workspace.git"
+  },
+  "homepage": "https://github.com/whybebabo/dsh-better-workspace#readme",
+  "bugs": {
+    "url": "https://github.com/whybebabo/dsh-better-workspace/issues"
+  },
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
@@ -26,6 +34,7 @@
     "lib",
     "cordis.patch.yml",
     "README.md",
+    "LICENSE",
     "THIRD_PARTY_NOTICES.md"
   ],
   "engines": {
