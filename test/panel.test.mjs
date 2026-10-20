@@ -1798,8 +1798,10 @@ test('the row menu offers the commands the panel can carry out itself', async ()
   assert.equal(slotCalls.length, 0, 'the panel never renders another package\'s slots');
 });
 
-test('a permanent delete re-reads the host session list', async () => {
+test('a permanent delete re-reads the host session list and leaves a deleted open session', async () => {
   responseOverrides[`${API}/state`] = stateResult;
+  const baseSessions = sessionSource.getSnapshot();
+  sessionSource.set({ ...baseSessions, current: 'ses_1' });
   responseOverrides[`${API}/delete/preview`] = () => ({
     ok: true,
     result: {
@@ -1843,6 +1845,7 @@ test('a permanent delete re-reads the host session list', async () => {
   });
   await tick();
   assert.equal(sessionRefreshCalls, 1, 'the deleted row cannot linger until a manual F5');
+  assert.equal(startSessionCalls, 1, 'deleting the open session starts a fresh one');
 });
 
 test('rows render the native hover actions and follow the native drag rule', async () => {

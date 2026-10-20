@@ -33,6 +33,10 @@ function ctxWith(agents = {}) {
   };
 }
 
+function ctxServices(services) {
+  return { get: (name) => services[name] ?? null };
+}
+
 test('id validation blocks traversal before any filesystem work', async () => {
   const fx = await fixture();
   for (const bad of ['../../etc', 'a/b', 'a\\b', '.', '..', '', 'x'.repeat(200), 'ses x']) {
@@ -108,8 +112,8 @@ test('deletion requires explicit confirmation', async () => {
 test('execute removes only verified sessions, cascades subagents and reports per item', async () => {
   const fx = await fixture();
   await makeSession(fx, 'ses_main');
-  await makeSession(fx, 'ses_sub1', { origin: 'subagent', parentSession: 'ses_main' });
-  await makeSession(fx, 'ses_sub2', { parentSession: 'ses_sub1' });
+  await makeSession(fx, 'ses_sub1', { origin: 'subagent', delegationDepth: 1, parentSession: 'ses_main' });
+  await makeSession(fx, 'ses_sub2', { origin: 'subagent', delegationDepth: 2, parentSession: 'ses_sub1' });
   await makeSession(fx, 'ses_other');
   await makeSession(fx, 'ses_locked', {}, { lease: true });
 
@@ -127,6 +131,76 @@ test('execute removes only verified sessions, cascades subagents and reports per
   assert.equal(await exists(fx.sessionDir('ses_sub2')), false);
   assert.equal(await exists(fx.sessionDir('ses_other')), true, 'unrelated sessions untouched');
   assert.equal(await exists(fx.sessionDir('ses_locked')), true);
+});
+
+test('user forks carry parentSession but are neither subagents nor cascaded', async () => {
+  const fx = await fixture();
+  await makeSession(fx, 'ses_source');
+  await makeSession(fx, 'ses_fork', { parentSession: 'ses_source', isSeeded: true });
+
+  const forkPreview = await previewDelete({ home: fx.home, ctx: ctxWith(), sessionIds: ['ses_fork'] });
+  assert.equal(forkPreview.items[0].subagent, false, 'parentSession alone is not a subagent');
+  assert.deepEqual(forkPreview.items[0].blockers, [], 'the user fork is deletable');
+  assert.equal(forkPreview.items[0].subagentCount, 0, 'the fork has no cascaded children');
+
+  const source = await executeDelete({ home: fx.home, ctx: ctxWith(), sessionIds: ['ses_source'], confirm: true });
+  assert.equal(source.items[0].status, 'deleted');
+  assert.equal(await exists(fx.sessionDir('ses_fork')), true, 'deleting the source leaves the fork intact');
+
+  const fork = await executeDelete({ home: fx.home, ctx: ctxWith(), sessionIds: ['ses_fork'], confirm: true });
+  assert.equal(fork.items[0].status, 'deleted');
+  assert.equal(await exists(fx.sessionDir('ses_fork')), false);
+});
+
+test('execute flushes the live store and clears host workspace, archive/pin and projection records', async () => {
+  const fx = await fixture();
+  await makeSession(fx, 'ses_one');
+  const calls = { flush: 0, detach: 0, workspace: 0, unarchive: 0, unpin: 0, projection: 0, globalSet: 0 };
+  const entry = { session: {}, detach() { calls.detach += 1; } };
+  let globalState = {
+    initialized: true,
+    workspaceIds: ['ws_a'],
+    archivedSessionIds: ['ses_one'],
+    pinnedSessionIds: ['ses_one'],
+  };
+  const record = { title: 'Alpha', path: 'C:/Work/demo', sessionIds: ['ses_one'] };
+  const table = {
+    keys: () => ['ws_a'][Symbol.iterator](),
+    get: (key) => (key === 'ws_a' ? record : undefined),
+    update: async () => { throw new Error('the registry entity should handle the row'); },
+  };
+  const registry = {
+    table,
+    get: (key) => (key === 'ws_a' ? { detachSession: async (id) => { assert.equal(id, 'ses_one'); calls.workspace += 1; } } : undefined),
+    global: {
+      get: () => globalState,
+      set: async (next) => { globalState = next; calls.globalSet += 1; },
+    },
+    unarchiveSession: async () => { calls.unarchive += 1; },
+    unpinSession: async () => { calls.unpin += 1; },
+  };
+  const projection = { delete: async (id) => { assert.equal(id, 'ses_one'); calls.projection += 1; return true; } };
+  const storage = {
+    get: (name) => {
+      if (name === 'workspace') return { table: () => table, global: registry.global };
+      if (name === 'session_projcache') return { table: () => projection };
+      return null;
+    },
+  };
+  const ctx = ctxServices({
+    sessions: {
+      store: { get: (id) => (id === 'ses_one' ? entry : undefined) },
+      flush: async () => { calls.flush += 1; return true; },
+    },
+    workspaceRegistry: registry,
+    storageDomain: storage,
+  });
+
+  const outcome = await executeDelete({ home: fx.home, ctx, sessionIds: ['ses_one'], confirm: true });
+  assert.equal(outcome.items[0].status, 'deleted');
+  assert.deepEqual(calls, { flush: 1, detach: 1, workspace: 1, unarchive: 1, unpin: 1, projection: 1, globalSet: 1 });
+  assert.equal(globalState.archivedSessionIds.includes('ses_one'), false);
+  assert.equal(globalState.pinnedSessionIds.includes('ses_one'), false);
 });
 
 test('a running session is cancelled first, and never deleted while it stays running', async () => {

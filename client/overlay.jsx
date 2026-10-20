@@ -1139,13 +1139,19 @@ export function OverlayPanel({ actions }) {
             setPrefs({ selectMode: false });
             store.load();
           }}
-          onDone={async () => {
+          onDone={async (result) => {
             store.load();
             // Deleting rewrites session artifacts behind the host's back, so its session list
             // does not emit on its own — re-read it or the row lingers until a manual F5.
             try {
               await actions.refreshSessions();
             } catch { /* optional */ }
+            // Keep the shell off a conversation whose log no longer exists.
+            if ((result?.items ?? []).some((item) => item.status === 'deleted' && item.sessionId === tree.currentSessionId)) {
+              try {
+                actions.startSession();
+              } catch { /* the host may already have moved */ }
+            }
           }}
         />
       ) : null}
