@@ -98,7 +98,7 @@ DSH 不提供删除会话的宿主命令,插件自行实现,规则是"宁可拒�
 ```bash
 npm install
 npm run build     # esbuild -> lib/client.js(window.__ModuleLoader__.load 壳,仅外部化 react)
-npm test          # 140 项:sidecar 锁/原子写/revision、树派生、批量归档分类、删除安全、拖拽/改名/渲染集成、定时任务频率与悬浮段
+npm test          # 141 项:sidecar 锁/原子写/revision、树派生、批量归档分类、删除安全、拖拽/改名/渲染集成、定时任务频率与悬浮段
 ```
 
 `client/` 是源码,`lib/client.js` 是产物(已随包发布,勿手改)。测试里的 `react`/`react-dom`/`jsdom` 只是**开发依赖**:产物运行时 `require('react')` 用的是宿主已加载的实例(与 DSH 0.2.1 同为 React 18.3.1),不会打包第二份 React。
@@ -112,6 +112,6 @@ npm test          # 140 项:sidecar 锁/原子写/revision、树派生、批量�
 - 会话行菜单的按钮由插件自绘(不能借用官方条目,见上),但顺序、文案、图标与快捷键提示逐项对齐原版;快捷键提示取自宿主当前默认绑定,若在设置里改键,提示文字会滞后(动作本身仍走官方命令);
 - "在此主题下新建会话"依赖宿主把新会话标记为 `blank`,若某版本不再标记则退化为"不自动归组"(可手动移动),不会误改既有会话;
 - 永久删除依赖 `sessions`/`agents`/`workspaceRegistry`/`storageDomain`(`session_projcache`、`workspace`)等宿主内部服务名,DSH 主版本变更时需要重新核对;缺失某个清理服务时日志仍会删除,清理失败会记录在返回结果里;
-- 定时任务的行首时钟与悬浮段由插件读取 `remote.schedule.catalog()` 后自绘:宿主的 `sidebar.session.row.leading` / `.hover` 两个 slot 只能由声明者(原生列表)渲染,覆盖层无法借用;`cron` 规则按宿主的原文形式 `Cron {expression}（zone）` 显示,不做人类可读的 cron 预览;catalog 字段若在后续版本改名,这两处会静默不显示,不影响面板其它部分。
+- 定时任务的行首时钟与悬浮段由插件读取 `remote.schedule.catalog()` 后自绘:宿主的 `sidebar.session.row.leading` / `.hover` 两个 slot 只能由声明者(原生列表)渲染,覆盖层无法借用;`cron` 规则按宿主的原文形式 `Cron {expression}（zone）` 显示,不做人类可读的 cron 预览。注意命名空间是**独立的 cordis 服务**(`ctx.get('remote.schedule')`),不是 `remote` 的属性——后者未在 `inject` 里声明时会抛 `cannot get property "remote.schedule" without inject`,按属性读会把"服务存在"误判成"服务缺失"(2633ab8 即因此实测不生效);解析失败时插件会 `console.warn` 一次,便于定位。catalog 字段若在后续版本改名,这两处不显示,不影响面板其它部分。
 
 许可证:MIT。第三方致谢见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
