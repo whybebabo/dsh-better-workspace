@@ -1473,7 +1473,9 @@ test('dragging a session onto another session reorders them', async () => {
   const order = [...container.querySelectorAll('.dts-row--session .dts-row__text')].map((node) => node.textContent);
   assert.equal(order.indexOf('会话 2') < order.indexOf('会话 1'), true, 'the dropped row follows its target');
   const saved = JSON.parse(window.localStorage.getItem('dsh-better-workspace:prefs:v1')).sessionOrder;
-  assert.deepEqual(saved[WORKSPACE], ['ses_2', 'ses_1', 'ses_0']);
+  // The whole workspace order is persisted (not just the rows one topic section happened to
+  // show), so a reorder can never drop a session out of the manual order.
+  assert.deepEqual(saved[WORKSPACE], ['ses_0', 'ses_2', 'ses_1']);
 });
 
 test('a session drag opts a sibling row into the reorder drop and clears the hint on dragend', async () => {
@@ -2050,6 +2052,52 @@ test('the registration only injects slots and declares no foreign seats', async 
   assert.equal(options.name, 'shell.overlay', 'it registers in the overlay layer');
   assert.equal(options.children, undefined, 'it declares no child seats');
   assert.equal(typeof options.inject, 'function', 'and injects the host actions');
+});
+
+test('clicking the menu trigger again closes the popover', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const trigger = find('.dts-header .dts-iconbtn[aria-label="创建"]');
+  assert.ok(trigger, 'the create trigger exists');
+
+  await act(async () => {
+    trigger.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  assert.ok(document.querySelector('.dts-pop--create'), 'the first click opens the menu');
+
+  // A real pointer fires pointerdown before click. Treating the trigger as "outside" closed
+  // the menu on pointerdown and the click reopened it, so it could never be dismissed.
+  await act(async () => {
+    trigger.dispatchEvent(new window.Event('pointerdown', { bubbles: true }));
+    trigger.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  assert.equal(document.querySelector('.dts-pop--create'), null, 'the second click closes it');
+});
+
+test('the rename dialog gives focus back to the element that opened it', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const row = find('.dts-row--session', '会话 1');
+  // The row is a focusable treeitem; make it the active element the way a click would.
+  row.focus();
+  assert.equal(document.activeElement, row, 'the row holds focus before the dialog opens');
+
+  await act(async () => {
+    row.dispatchEvent(new window.Event('dblclick', { bubbles: true }));
+  });
+  await tick();
+  assert.ok(document.querySelector('.dts-dialog'), 'the dialog opened');
+
+  await act(async () => {
+    document.querySelector('.dts-dialog').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+  await tick();
+  assert.equal(document.querySelector('.dts-dialog'), null, 'Escape closes it');
+  // Before the fix the restore target was the dialog's own input, so focus fell to <body>.
+  assert.notEqual(document.activeElement, document.body, 'focus does not fall back to the body');
+  assert.equal(document.activeElement, row, 'and it returns to the row');
 });
 
 test('double-clicking a session row opens the rename dialog', async () => {

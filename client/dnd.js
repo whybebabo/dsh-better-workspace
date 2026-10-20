@@ -76,9 +76,16 @@ export function sessionReorderVerdict(drag, target) {
   return { ok: true, reason: null };
 }
 
-/** Reads the dropped ids, preferring the structured payload and falling back to plain text. */
+/**
+ * Reads the dropped ids from our own MIME type only.
+ *
+ * A `text/plain` fallback is deliberately *not* used: a file dragged in from the desktop
+ * arrives as its filename (`README.md`), which passes the session-id shape check, so it would
+ * be filed as a phantom assignment in the host's sidecar. Only a payload this panel wrote can
+ * name sessions.
+ */
 export function readDragPayload(dataTransfer) {
-  const raw = dataTransfer?.getData?.(DND_MIME) || dataTransfer?.getData?.('text/plain') || '';
+  const raw = dataTransfer?.getData?.(DND_MIME) || '';
   if (!raw) return [];
   const candidates = (() => {
     try {
@@ -86,12 +93,10 @@ export function readDragPayload(dataTransfer) {
       const ids = Array.isArray(parsed) ? parsed : parsed?.ids;
       if (Array.isArray(ids)) return ids;
     } catch {
-      /* not JSON — fall through to the plain-text list */
+      /* not JSON: not a payload we produced */
     }
-    return raw.split(',').map((entry) => (typeof entry === 'string' ? entry.trim() : entry));
+    return [];
   })();
-  // A drop writes assignments, so foreign payloads (a dragged file, another app's text) must
-  // yield nothing rather than a plausible-looking id.
   return [...new Set(candidates.filter((id) => typeof id === 'string' && SESSION_ID_RE.test(id)))];
 }
 

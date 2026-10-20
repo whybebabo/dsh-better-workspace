@@ -145,11 +145,13 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, allSelected,
   );
 }
 
-function SectionHeader({ section, group, selectMode, selectedIds, pending, onToggleCollapse, onToggleSection, onMenu, onFilter, onDropSessions, onRename, reorder }) {
-  // The provisional New Session row has no record to archive or file, so it never joins a
-  // batch selection.
-  const ids = section.rows.filter((row) => !row.blank).map((row) => row.id);
+function SectionHeader({ section, group, selectMode, selectedIds, pending, onToggleCollapse, onToggleSection, onMenu, onFilter, onDropSessions, onRename, reorder, selectableIds }) {
+  // Only rows the user can actually see may be selected by the header checkbox. Using the
+  // full `section.rows` here meant "select all" on an over-REVEAL_LIMIT group silently
+  // grabbed rows that were never rendered — and a batch delete then targeted them.
+  const ids = selectableIds ?? section.rows.filter((row) => !row.blank).map((row) => row.id);
   const selectedCount = ids.filter((id) => selectedIds.has(id)).length;
+  const hidden = Math.max(0, section.rows.filter((row) => !row.blank).length - ids.length);
   const [dropState, setDropState] = React.useState('idle');
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState(section.name ?? '');
@@ -226,11 +228,12 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
         }
         if (!droppable) return;
         const verdict = evaluateDrop(currentDrag(), targetOf(section, group));
-        // A cross-workspace hover is not a target at all: no preventDefault, no drop cursor.
-        if (!verdict.ok && verdict.reason === 'cross-workspace') return;
+        // Only an accepted drop opens the channel. Accepting every drag (including foreign
+        // files from the desktop) is what would let an unrelated payload through.
+        if (!verdict.ok) return;
         event.preventDefault();
-        event.dataTransfer.dropEffect = verdict.ok ? 'move' : 'none';
-        setDropState(verdict.ok ? 'ok' : 'no');
+        event.dataTransfer.dropEffect = 'move';
+        setDropState('ok');
       }}
       onDragLeave={() => setDropState('idle')}
       onDrop={(event) => {
@@ -241,6 +244,10 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
           return;
         }
         if (!droppable) return;
+        // No drag context means this drop did not start in this panel: ignore it entirely
+        // rather than inventing a workspace scope for it.
+        const drag = currentDrag();
+        if (!drag) return;
         event.preventDefault();
         const dropped = readDragPayload(event.dataTransfer);
         const verdict = evaluateDrop({ ids: dropped, workspaceId: currentDrag()?.workspaceId }, targetOf(section, group));
@@ -259,7 +266,7 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
             indeterminate={selectedCount > 0 && selectedCount < ids.length}
             disabled={ids.length === 0}
             onChange={() => onToggleSection(ids, selectedCount === ids.length)}
-            label={`${label} 全选`}
+            label={hidden > 0 ? `${label} 全选(仅已显示的 ${ids.length} 条,另有 ${hidden} 条未展开)` : `${label} 全选`}
           />
         </span>
       ) : (
@@ -385,6 +392,7 @@ const Section = React.memo(function Section({ section, group, schedules, selectM
         group={group}
         selectMode={selectMode}
         selectedIds={selectedIds}
+        selectableIds={visible.filter((row) => !row.blank).map((row) => row.id)}
         pending={section.kind === 'topic' && pendingTopicId === section.id}
         onToggleCollapse={onToggleCollapse}
         onToggleSection={onToggleSection}

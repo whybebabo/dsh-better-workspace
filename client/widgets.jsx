@@ -245,24 +245,38 @@ export function StateMark({ state, className }) {
   );
 }
 
-/** Anchored dropdown surface. `anchor` is a DOMRect from the caller's button. */
-export function Popover({ anchor, onClose, children, align = 'left', width = 220, className }) {
+/**
+ * Anchored dropdown surface. `anchor` may be a DOMRect or the trigger element itself.
+ *
+ * Passing the element is preferred: its rect is measured at render time (so a scrolled or
+ * resized trigger stays aligned) and the trigger can be excluded from the outside-pointer
+ * test. Without that exclusion a toggling trigger closes the popover on pointerdown and
+ * reopens it on the following click, making the menu appear impossible to dismiss.
+ */
+export function Popover({ anchor, anchorEl, onClose, children, align = 'left', width = 220, className }) {
   const ref = React.useRef(null);
-  useOutsidePointer(true, [ref], onClose);
+  const trigger = anchorEl ?? (typeof anchor?.nodeType === 'number' ? anchor : null);
+  const triggerRef = React.useRef(trigger);
+  triggerRef.current = trigger;
+  useOutsidePointer(true, [ref, triggerRef], onClose);
   useEscape(true, onClose);
-  if (!anchor) return null;
+  const rect = anchor && typeof anchor.nodeType === 'number'
+    ? anchor.getBoundingClientRect()
+    : anchor;
+  if (!rect) return null;
+  const anchorRect = rect;
   const viewportWidth = typeof window === 'undefined' ? 1280 : window.innerWidth;
   const viewportHeight = typeof window === 'undefined' ? 800 : window.innerHeight;
-  const left = align === 'right' ? Math.max(8, Math.min(anchor.right - width, viewportWidth - width - 8)) : Math.max(8, Math.min(anchor.left, viewportWidth - width - 8));
-  const spaceBelow = viewportHeight - anchor.bottom;
-  const openUp = spaceBelow < 220 && anchor.top > spaceBelow;
-  const top = openUp ? undefined : anchor.bottom + 4;
-  const bottom = openUp ? viewportHeight - anchor.top + 4 : undefined;
+  const left = align === 'right' ? Math.max(8, Math.min(anchorRect.right - width, viewportWidth - width - 8)) : Math.max(8, Math.min(anchorRect.left, viewportWidth - width - 8));
+  const spaceBelow = viewportHeight - anchorRect.bottom;
+  const openUp = spaceBelow < 220 && anchorRect.top > spaceBelow;
+  const top = openUp ? undefined : anchorRect.bottom + 4;
+  const bottom = openUp ? viewportHeight - anchorRect.top + 4 : undefined;
   return (
     <div
       ref={ref}
       className={cx('dts-pop', className)}
-      style={{ position: 'fixed', left, width, top, bottom, maxHeight: Math.max(160, (openUp ? anchor.top : spaceBelow) - 12) }}
+      style={{ position: 'fixed', left, width, top, bottom, maxHeight: Math.max(160, (openUp ? anchorRect.top : spaceBelow) - 12) }}
       role="dialog"
       aria-modal="false"
     >
@@ -293,13 +307,20 @@ export function MenuItem({ children, onSelect, danger = false, disabled = false,
 export function Dialog({ title, description, children, footer, onClose, width = 420, className }) {
   const ref = React.useRef(null);
   useEscape(true, onClose);
+  // Captured during the first render, i.e. before React's autoFocus moves focus into the
+  // dialog. Reading it in a passive effect would capture the dialog's own input, so closing
+  // the dialog would drop focus onto <body> and keyboard users would lose their place.
+  const restoreRef = React.useRef(typeof document === 'undefined' ? null : document.activeElement);
   React.useEffect(() => {
     const node = ref.current;
     const first = node?.querySelector('input') ?? node?.querySelector('button');
-    if (first) setTimeout(() => first.focus({ preventScroll: true }), 30);
-    const previous = document.activeElement;
+    const timer = first ? setTimeout(() => first.focus({ preventScroll: true }), 30) : null;
+    const previous = restoreRef.current;
     return () => {
-      if (previous && typeof previous.focus === 'function') previous.focus({ preventScroll: true });
+      if (timer) clearTimeout(timer);
+      if (previous && previous.isConnected && typeof previous.focus === 'function') {
+        previous.focus({ preventScroll: true });
+      }
     };
   }, []);
   return (

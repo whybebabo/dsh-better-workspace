@@ -263,7 +263,9 @@ export function OverlayPanel({ actions, schedules }) {
         .catch(() => { /* stays in the default bucket; the row menu can still move it */ })
         .finally(() => auto.busy.delete(id));
     }
-  });
+    // Only a new session list (or workspace list) can introduce a blank to file. Without this
+    // dependency array the whole scan ran on every render — each hover, toast and keystroke.
+  }, [list, options, store, state.workspaces]);
 
   const activeTopic = React.useMemo(() => {
     if (!prefs.topicFilter) return null;
@@ -482,6 +484,30 @@ export function OverlayPanel({ actions, schedules }) {
     return group ? group.sections.filter((section) => section.kind !== 'archived').flatMap((section) => section.rows) : [];
   };
 
+  /**
+   * Every session id the workspace owns, independent of the current search/topic/archived
+   * filters. Manual order is persisted against this set so reordering while filtered cannot
+   * demote the rows the user cannot see.
+   */
+  const allSessionIdsInWorkspace = (workspaceId) => {
+    const option = options.find((entry) => entry.workspaceId === workspaceId);
+    const known = list.byId ?? {};
+    const ids = [];
+    const seen = new Set();
+    for (const id of option?.sessionIds ?? []) {
+      if (seen.has(id) || !known[id]) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+    for (const session of Object.values(known)) {
+      if (!session || seen.has(session.id)) continue;
+      if (session.cwd !== option?.path) continue;
+      seen.add(session.id);
+      ids.push(session.id);
+    }
+    return ids.filter((id) => !known[id]?.blank);
+  };
+
   const finishBatch = (next) => {
     const merged = mergeOutcomes(outcome, next);
     if (merged.failed.length === 0 && merged.needsStop.length === 0) {
@@ -547,7 +573,10 @@ export function OverlayPanel({ actions, schedules }) {
         .catch((error) => flash(error?.message ?? String(error), 'bad'));
       return;
     }
-    const ids = rowsInWorkspace(row.workspaceId).filter((entry) => !entry.blank).map((entry) => entry.id);
+    // The reorder baseline must be the workspace's *whole* session set, not the rows the
+    // current search/filter happens to show: `orderBy` pushes ids it does not find to the
+    // end, so reordering while filtered would permanently demote every hidden row.
+    const ids = allSessionIdsInWorkspace(row.workspaceId);
     setPrefs({ sessionOrder: { ...(prefs.sessionOrder ?? {}), [row.workspaceId]: moveWithin(ids, dropped[0], row.id, position) } });
   };
 
@@ -1014,10 +1043,13 @@ export function OverlayPanel({ actions, schedules }) {
         )}
 
         {state.readOnly ? <div className="dts-banner dts-banner--warn">{t('state.readonly')}</div> : null}
-        {state.error === 'conflict' ? (
+        {state.error ? (
           <div className="dts-banner dts-banner--warn">
-            {t('state.conflict')}
-            <button type="button" className="dts-banner__close" onClick={store.dismissError}>
+            {/* Every failure gets a visible line: a write rejected as read-only, a 5xx, an
+                unparsable response. Before this, only `conflict` rendered and the rest were
+                invisible — the user just saw "nothing happened". */}
+            {state.error === 'conflict' ? t('state.conflict') : state.error}
+            <button type="button" className="dts-banner__close" onClick={store.dismissError} aria-label={t('action.close')}>
               <Icon name="close" />
             </button>
           </div>

@@ -142,7 +142,9 @@ export function Header({
           label={t('workspace.current')}
           title={t('workspace.current')}
           active={Boolean(prefs.workspaceFilter)}
-          onClick={(event) => setDropdown(dropdown ? null : event.currentTarget.getBoundingClientRect())}
+          // The element (not just its rect) is kept so the popover can tell a click on its own
+          // trigger from a click outside: otherwise toggling the button reopened the menu.
+          onClick={(event) => setDropdown(dropdown ? null : event.currentTarget)}
         >
           <Icon name="chevronDown" size={14} />
         </IconButton>
@@ -169,7 +171,7 @@ export function Header({
           label={t('action.create')}
           title={t('action.create')}
           active={Boolean(create)}
-          onClick={(event) => setCreate(create ? null : event.currentTarget.getBoundingClientRect())}
+          onClick={(event) => setCreate(create ? null : event.currentTarget)}
         >
           <Icon name="plus" size={16} />
         </IconButton>

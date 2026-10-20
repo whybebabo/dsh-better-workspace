@@ -39,11 +39,20 @@ test('the payload round-trips through dataTransfer', () => {
 });
 
 test('foreign payloads degrade safely instead of throwing', () => {
-  assert.deepEqual(readDragPayload({ getData: () => 'ses_a, ses_b' }), ['ses_a', 'ses_b'], 'plain text list');
   assert.deepEqual(readDragPayload({ getData: (type) => (type === DND_MIME ? '{"ids":["ses_a",42,null,""]}' : '') }), ['ses_a'], 'non-strings dropped');
   assert.deepEqual(readDragPayload({ getData: () => '{ broken' }), [], 'unparsable garbage');
   assert.deepEqual(readDragPayload(undefined), []);
   assert.deepEqual(readDragPayload({ getData: () => '' }), []);
+});
+
+test('a plain-text or file payload is never read as session ids', () => {
+  // Dragging a file from the desktop arrives as its name, and `README.md`, `package.json` and
+  // `12345` all look like valid session ids. Only a payload this panel wrote may name
+  // sessions, otherwise an external drop files a phantom assignment in the sidecar.
+  const foreign = (text) => ({ getData: (type) => (type === DND_MIME ? '' : text) });
+  for (const text of ['README.md', 'package.json', 'notes.txt', '12345', 'A', 'ses_a, ses_b']) {
+    assert.deepEqual(readDragPayload(foreign(text)), [], `ignores ${JSON.stringify(text)}`);
+  }
 });
 
 test('setData failures do not break the drag', () => {

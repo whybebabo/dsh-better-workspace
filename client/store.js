@@ -148,24 +148,55 @@ export function createPanelStore() {
     return state.workspaces[workspaceId]?.assignments ?? {};
   }
 
-  /** Applies a host mutation result, then reloads so derived counts match the document. */
-  async function runMutation(invoker) {
-    patch({ busy: 'saving' });
-    try {
-      const outcome = await invoker(state.revision);
-      patch({ busy: null, revision: outcome.revision });
-      await load();
-      return outcome;
-    } catch (error) {
-      patch({ busy: null });
-      if (error instanceof ApiError && (error.code === 'revision-conflict' || error.status === 409)) {
+  /**
+   * Writes are serialized. Each one carries `state.revision`, so two mutations started from
+   * the same snapshot would race: the second used to be rejected as a 409 and silently
+   * dropped (auto-filing two new sessions is exactly that case). Chaining them means each
+   * request sees the revision the previous one produced.
+   */
+  let mutationQueue = Promise.resolve();
+  function enqueue(task) {
+    const run = mutationQueue.then(task, task);
+    // Keep the chain alive after a rejection; callers still observe their own failure.
+    mutationQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  /**
+   * Applies a host mutation result, then reloads so derived counts match the document.
+   * A failure also refreshes the document: `readOnly` / `warning` are only otherwise written
+   * on a successful load, so a store that turned read-only mid-session would keep offering
+   * edits and never show the banner.
+   */
+  function runMutation(invoker) {
+    return enqueue(async () => {
+      patch({ busy: 'saving' });
+      try {
+        const outcome = await invoker(state.revision);
+        patch({ busy: null, revision: outcome.revision });
         await load();
-        patch({ error: 'conflict' });
-        throw Object.assign(error, { reloadHint: true });
+        return outcome;
+      } catch (error) {
+        patch({ busy: null });
+        const conflict = error instanceof ApiError && (error.code === 'revision-conflict' || error.status === 409);
+        // A read-only / storage failure is a *state* change, not just a message: reload so the
+        // banner reflects it. Conflicts reload too (another window moved the document on).
+        if (conflict || isStateFailure(error)) await load().catch(() => {});
+        patch({ error: conflict ? 'conflict' : error instanceof ApiError ? error.message : String(error) });
+        if (conflict) throw Object.assign(error, { reloadHint: true });
+        throw error;
       }
-      patch({ error: error instanceof ApiError ? error.message : String(error) });
-      throw error;
-    }
+    });
+  }
+
+  /** Errors that mean "the document itself is unusable", so the panel must re-read it. */
+  function isStateFailure(error) {
+    const code = error instanceof ApiError ? error.code : '';
+    return code === 'store-read-only'
+      || code === 'store-unreadable'
+      || code === 'store-write-failed'
+      || code === 'store-locked'
+      || error?.status === 503;
   }
 
   const createTopic = (input) => runMutation((revision) => api.createTopic({ ...input, expectedRevision: revision }));
