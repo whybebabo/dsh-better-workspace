@@ -37,6 +37,7 @@ export function marqueePlan(element, { speed = 42 } = {}) {
 
 export const SessionRow = React.memo(function SessionRow({
   row,
+  schedule = null,
   query = '',
   selectMode = false,
   selected = false,
@@ -182,6 +183,18 @@ export const SessionRow = React.memo(function SessionRow({
           <StateMark state={row.status} className="dts-row__status" />
           {silentStatusLabel ? <span className="dts-visually-hidden">{silentStatusLabel}</span> : null}
         </>
+      ) : !row.blank && !row.archived && schedule?.length > 0 ? (
+        // Stock rule: the leading 16px cell shows the scheduled-task clock only while the row
+        // itself is idle — a pending request, live work or an unread completion keeps its dot.
+        <span
+          className="dts-row__status dts-row__schedule"
+          role="img"
+          aria-label={t('schedule.markAria', { count: schedule.length })}
+          title={t('schedule.markAria', { count: schedule.length })}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <Icon name="clock" size={14} />
+        </span>
       ) : null}
 
       <span className="dts-row__title">

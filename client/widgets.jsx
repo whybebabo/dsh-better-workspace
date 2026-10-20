@@ -46,6 +46,7 @@ const HOST_ICONS = {
   warning: 'IconWarningTriangleOutlineRegular',
   fork: 'IconBranchOutlineRegular',
   caret: 'IconTriangleRightFillRegular',
+  clock: 'IconClockOutlineRegular',
 };
 
 function fallbackIcon(name, size = 16) {
@@ -87,6 +88,7 @@ const FALLBACK_PATHS = {
   fork: ['M2.5 8h4.2c1 0 1.6-.3 2.2-.9L11.6 4.4', 'M2.5 8h4.2c1 0 1.6.3 2.2.9l2.7 2.7'],
   ellipsis: ['M3.2 8h.01', 'M8 8h.01', 'M12.8 8h.01'],
   caret: ['M5.5 3 11 8l-5.5 5Z'],
+  clock: ['M8 1.8a6.2 6.2 0 1 0 0 12.4A6.2 6.2 0 0 0 8 1.8Z', 'M8 4.6V8l2.4 1.4'],
 };
 
 /** Re-renders the caller whenever the UI language changes and returns the active id. */

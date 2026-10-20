@@ -331,7 +331,7 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
   );
 }
 
-const Section = React.memo(function Section({ section, group, selectMode, selectedIds, now, query, pendingTopicId, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleCollapse, onToggleSection, onFilter, onDropSessions, onRename, onDropOnRow, reorder }) {
+const Section = React.memo(function Section({ section, group, schedules, selectMode, selectedIds, now, query, pendingTopicId, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleCollapse, onToggleSection, onFilter, onDropSessions, onRename, onDropOnRow, reorder }) {
   const [revealed, setRevealed] = React.useState(false);
   // Selecting is about existing records; hide the provisional New Session placeholder while
   // the batch toolbar is active instead of offering a checkbox that cannot do anything.
@@ -344,6 +344,7 @@ const Section = React.memo(function Section({ section, group, selectMode, select
         <SessionRow
           key={row.id}
           row={row}
+          schedule={schedules?.get?.(row.id) ?? null}
           now={now}
           query={query}
           selectMode={selectMode}
@@ -402,6 +403,7 @@ export function TopicTree({
   tree,
   prefs,
   selection,
+  schedules,
   now,
   onOpenSession,
   onMenu,
@@ -498,6 +500,7 @@ export function TopicTree({
                       <Section
                         section={shownSection}
                         group={group}
+                        schedules={schedules}
                         selectMode={selectMode}
                         selectedIds={selectedIds}
                         now={now}

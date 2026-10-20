@@ -22,6 +22,7 @@ import { CreateTopicDialog, EditTopicDialog, DeleteTopicDialog, MoveToTopicDialo
 import { BatchResultDialog, DeleteSessionsDialog } from './results.jsx';
 import { t } from './i18n.js';
 import { formatRelative } from './time.js';
+import { scheduleHover, schedulesOf } from './schedule.js';
 import { shortcutHint } from './shortcut-hints.js';
 
 function useSnapshot(source) {
@@ -37,7 +38,7 @@ function useSnapshot(source) {
   return value;
 }
 
-export function OverlayPanel({ actions }) {
+export function OverlayPanel({ actions, schedules }) {
   const language = useLanguage();
   const store = React.useMemo(() => createPanelStore(), []);
   const [state, setState] = React.useState(() => store.getState());
@@ -50,11 +51,18 @@ export function OverlayPanel({ actions }) {
   const [composer, setComposer] = React.useState({ container: null, workspaceTitle: null });
   const [composerMenu, setComposerMenu] = React.useState(null);
   const [hint, setHint] = React.useState(null);
+  const [tipTop, setTipTop] = React.useState(null);
+  /** Opening a card clears the last measurement so the first paint cannot inherit it. */
+  const openHint = React.useCallback((next) => {
+    setTipTop(null);
+    setHint(next);
+  }, []);
   const [now, setNow] = React.useState(() => Date.now());
   const [pendingTopic, setPendingTopic] = React.useState(null);
   const [dropHint, setDropHint] = React.useState(null);
   /** Transient collapse focus while a workspace/topic is dragged; never persisted. */
   const [dragFocus, setDragFocus] = React.useState(null);
+  const tipRef = React.useRef(null);
   const pendingRef = React.useRef(null);
   /** Blank-session watcher: the first ready snapshot primes the set, so reloads never re-file. */
   const autoFileRef = React.useRef({ primed: false, seen: new Set(), busy: new Set() });
@@ -64,8 +72,14 @@ export function OverlayPanel({ actions }) {
   const sessionSnapshot = useSnapshot(actions.sessionStore);
   const sessionStatuses = useSnapshot(actions.sessionStatusStore);
   const workspaceSnapshot = useSnapshot(actions.workspaceStore);
+  const scheduleSnapshot = useSnapshot(schedules);
+  const schedulesById = scheduleSnapshot?.bySession ?? null;
 
   React.useEffect(() => store.subscribe(() => setState(store.getState())), [store]);
+  React.useEffect(() => {
+    // The catalog is read only once the panel is on screen; the store coalesces refreshes.
+    schedules?.start?.();
+  }, [schedules]);
   React.useEffect(() => {
     store.load();
   }, [store]);
@@ -73,6 +87,19 @@ export function OverlayPanel({ actions }) {
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(timer);
   }, []);
+  // A scheduled-task card is taller than the old three-line tooltip; measure it once laid out
+  // and keep the bottom edge on screen (the inline style only carries the unmeasured guess).
+  React.useLayoutEffect(() => {
+    if (!hint) {
+      if (tipTop !== null) setTipTop(null);
+      return;
+    }
+    const node = tipRef.current;
+    if (!node) return;
+    const maxTop = window.innerHeight - node.offsetHeight - 8;
+    const next = Math.round(Math.max(8, Math.min(hint.rect.top - 2, maxTop)));
+    if (next !== tipTop) setTipTop(next);
+  }, [hint, now, scheduleSnapshot, tipTop]);
   React.useEffect(() => () => {
     clearTimeout(timersRef.current.toast);
     clearTimeout(timersRef.current.arm);
@@ -935,6 +962,10 @@ export function OverlayPanel({ actions }) {
           : { tone: 'idle', label: t('session.state.idle') }
     : null;
 
+  // Stock hover order: title, relative time, this Session's scheduled tasks, then status.
+  const hintSchedule = hint ? schedulesOf(scheduleSnapshot, hint.row.id) : null;
+  const hintTasks = hintSchedule?.length ? scheduleHover(hintSchedule, now) : null;
+
   return (
     <div className={cx('dts-overlay', menu || dialog ? 'has-floating' : null)} style={style} data-reason={geom.reason}>
       <div className="dts-panel">
@@ -998,13 +1029,14 @@ export function OverlayPanel({ actions }) {
             tree={tree}
             prefs={prefs}
             selection={selectedIds}
+            schedules={schedulesById}
             now={now}
             onOpenSession={openSession}
             onMenu={handleMenu}
             onArchive={(row) => runBatch(row.archived ? 'unarchive' : 'archive', [row.id])}
             onPin={(row) => runBatch(row.pinned ? 'unpin' : 'pin', [row.id])}
             onRenameSession={(row) => setDialog({ type: 'renameSession', row })}
-            onHint={setHint}
+            onHint={openHint}
             onHintEnd={() => setHint(null)}
             onToggleWorkspaceCollapse={(key) => store.toggleInList('collapsedWorkspaces', key)}
             onToggleTopicCollapse={(key) => store.toggleInList('collapsedTopics', key)}
@@ -1175,23 +1207,47 @@ export function OverlayPanel({ actions }) {
       {composerPopover}
       {hint ? (
         <div
+          ref={tipRef}
           className="dts-tip"
           style={{
             // Stock placement: flush to the right of the row, top-aligned with it.
-            top: Math.round(Math.max(8, Math.min(hint.rect.top - 2, window.innerHeight - 170))),
+            top: tipTop ?? Math.round(Math.max(8, Math.min(hint.rect.top - 2, window.innerHeight - 170))),
             left: Math.round(Math.min(hint.rect.right + 8, window.innerWidth - 252)),
           }}
           role="tooltip"
         >
           <div className="dts-tip__title">{hint.row.title}</div>
-          {hint.row.blank ? null : <div className="dts-tip__meta">{formatRelative(hint.row.updatedAt, now)}</div>}
+          {hint.row.blank ? null : <div className="dts-tip__time">{formatRelative(hint.row.updatedAt, now)}</div>}
+          {hintTasks ? (
+            <div className="dts-tip__tasks">
+              {hintTasks.tasks.map((task) => (
+                <div className="dts-tip__task" key={task.id}>
+                  <span className="dts-tip__taskIcon" aria-hidden="true">
+                    <Icon name="clock" size={12} />
+                  </span>
+                  <span className="dts-tip__taskBody">
+                    <span className="dts-tip__taskName">{task.name}</span>
+                    <span className="dts-tip__taskTiming">
+                      {`${task.frequency} · `}
+                      <time dateTime={task.scheduledAt}>{task.absolute}</time>
+                      {' '}
+                      <span className="dts-tip__taskRelative">{task.relative}</span>
+                    </span>
+                  </span>
+                </div>
+              ))}
+              {hintTasks.omitted > 0 ? (
+                <div className="dts-tip__omitted">{t('schedule.more', { count: hintTasks.omitted })}</div>
+              ) : null}
+            </div>
+          ) : null}
           {hint.row.archived ? (
-            <div className="dts-tip__meta dts-tip__badge">
+            <div className="dts-tip__status">
               <Icon name="archive" size={14} />
               {t('topic.archived')}
             </div>
           ) : (
-            <div className="dts-tip__meta dts-tip__badge">
+            <div className="dts-tip__status">
               {hintStatus ? <StateMark state={hintStatus.tone} className="dts-tip__state" /> : null}
               {hintStatus?.label}
             </div>

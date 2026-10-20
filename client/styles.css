@@ -745,6 +745,17 @@
   transform: translateY(-50%);
 }
 
+/* Scheduled-task clock: the same leading cell as the status dot, shown only while idle.
+   The cell stops 4px short of the title, the stock row's slot-to-title gap, so a 14px glyph
+   does not crowd the text the way a 10px status dot can. */
+.dts-row--session > .dts-row__schedule {
+  left: calc(var(--dts-indent) - 20px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--dsw-alias-label-tertiary, #81858c);
+}
+
 .dts-state-dot {
   position: relative;
   display: inline-block;
@@ -1559,36 +1570,99 @@
 }
 
 /* ---------- session hover card ---------- */
-/* Mirrors the stock tooltip: dark surface, title, relative time, and state or archive badge. */
+/* Mirrors the stock hover card: 244px dark surface, title, relative time, scheduled tasks,
+   then the state or archive badge. */
 .dts-tip {
   position: fixed;
   z-index: 1500;
-  width: max-content;
-  max-width: 244px;
+  box-sizing: border-box;
+  width: 244px;
   padding: 12px 16px;
   border-radius: var(--dsw-radius-lg, 16px);
-  background: var(--dsw-alias-tooltip-bg, #2c2c2e);
+  background: var(--dsw-hovercard-bg, #2c2c2e);
   color: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   font-size: 14px;
-  line-height: 1.55;
-  box-shadow: 0 10px 28px rgba(15, 17, 21, 0.24);
+  line-height: 20px;
+  box-shadow: var(--dsw-shadow-lv3, 0 10px 28px rgba(15, 17, 21, 0.24));
   pointer-events: none;
 }
 
 .dts-tip__title {
+  color: #fff;
+  font-size: 14px;
+  line-height: 20px;
   overflow-wrap: anywhere;
 }
 
-.dts-tip__meta {
-  margin-top: 6px;
-  color: rgba(255, 255, 255, 0.55);
-  font-size: 13px;
+.dts-tip__time {
+  color: #cfd3d6;
+  font-size: 12px;
+  line-height: 16px;
 }
 
-.dts-tip__badge {
+/* Scheduled tasks, seated between the relative time and the status line like the stock card. */
+.dts-tip__tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dts-tip__task {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dts-tip__taskIcon {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  flex: none;
+  color: #cfd3d6;
+}
+
+.dts-tip__taskBody {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.dts-tip__taskName {
+  color: #fff;
+  font-size: 12px;
+  line-height: 16px;
+  overflow-wrap: break-word;
+}
+
+.dts-tip__taskTiming {
+  color: #cfd3d6;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.dts-tip__taskRelative {
+  color: #adb2b8;
+  overflow-wrap: anywhere;
+}
+
+.dts-tip__omitted {
+  color: #adb2b8;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.dts-tip__status {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  color: #adb2b8;
+  font-size: 12px;
+  line-height: 20px;
 }
 
 .dts-tip__state {

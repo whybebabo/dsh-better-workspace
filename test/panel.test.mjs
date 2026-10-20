@@ -43,6 +43,9 @@ let workspaceDeleteCalls = [];
 let sessionRefreshCalls = 0;
 /** Per-test override for `pinSession`, so a click can move the host's pin set. */
 let pinImpl;
+/** Global scheduled-task catalog the fake Remote face answers with. */
+let scheduleCatalog;
+let scheduleReaders;
 
 function makeSessions(count, offset = 0) {
   const byId = {};
@@ -267,6 +270,18 @@ function applyPlugin(mod) {
         };
       }
       if (name === 'layout') return { toggleSidebar() { toggleSidebarCalls += 1; } };
+      if (name === 'remote') {
+        return {
+          schedule: {
+            async catalog() {
+              scheduleReaders += 1;
+              return { ok: true, value: scheduleCatalog };
+            },
+          },
+          // The schedule plugin subscribes to this invalidation; one disposer is enough here.
+          $on: () => () => {},
+        };
+      }
       throw new Error(`no such service: ${name}`);
     },
     slots: {
@@ -307,6 +322,8 @@ beforeEach(async () => {
   workspaceRenameCalls = [];
   workspaceDeleteCalls = [];
   sessionRefreshCalls = 0;
+  scheduleCatalog = [];
+  scheduleReaders = 0;
   const sessionsFixture = makeSessions(3);
   sessionSource = makeSource(sessionsFixture);
   sessionStatusSource = makeSource(new Map());
@@ -376,6 +393,70 @@ test('the bundle mounts over the workspace region and inert the native list', as
   assert.equal(document.querySelector('[class*="_regionArea"]').getAttribute('aria-hidden'), 'true');
   assert.ok(find('.dts-row--topic', '设计'));
   assert.equal(container.querySelectorAll('.dts-row--session').length, 3);
+});
+
+test('scheduled sessions keep the stock clock mark and hover task block', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  scheduleCatalog = [{
+    id: 'sch_one',
+    sessionId: 'ses_0',
+    status: 'active',
+    kind: 'daily',
+    title: '每天早上发送问候',
+    prompt: '问候',
+    time: '09:00:00.000',
+    timeZone: 'Asia/Shanghai',
+    scheduledAt: new Date(Date.now() + 21 * 3_600_000).toISOString(),
+  }];
+  await mount();
+  await tick();
+
+  assert.equal(scheduleReaders, 1, 'one catalog read serves every row');
+  const marked = find('.dts-row--session', '会话 0');
+  const mark = marked.querySelector('.dts-row__schedule');
+  assert.ok(mark, 'the idle row shows the clock in its leading cell');
+  assert.equal(mark.getAttribute('aria-label'), '1 个自动化任务');
+  assert.equal(find('.dts-row--session', '会话 1').querySelector('.dts-row__schedule'), null, 'only the task session is marked');
+
+  await act(async () => {
+    marked.dispatchEvent(new window.MouseEvent('mouseover', { bubbles: true, view: window }));
+  });
+  await tick(520);
+
+  const tip = findAnywhere('.dts-tip');
+  assert.ok(tip, 'the hover card opened');
+  assert.equal(tip.querySelectorAll('.dts-tip__task').length, 1);
+  assert.match(tip.textContent, /每天早上发送问候/);
+  assert.match(tip.textContent, /每天 09:00（UTC\+08:00/, 'the rule keeps the host frequency copy');
+  assert.match(tip.textContent, /\(21小时后\)|\(20小时后\)/, 'the distance sits in parentheses like the stock card');
+});
+
+test('a running session keeps its status dot and the hover block still lists the task', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  sessionStatusSource.set(new Map([['ses_0', { running: true }]]));
+  scheduleCatalog = [{
+    id: 'sch_one',
+    sessionId: 'ses_0',
+    status: 'active',
+    kind: 'every',
+    title: '构建巡检',
+    everySeconds: 3_600,
+    scheduledAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+  }];
+  await mount();
+  await tick();
+
+  const row = find('.dts-row--session', '会话 0');
+  assert.equal(row.querySelector('.dts-row__schedule'), null, 'live work keeps the leading cell');
+  assert.ok(row.querySelector('[data-state="ongoing"]'), 'the status dot wins the cell');
+
+  await act(async () => {
+    row.dispatchEvent(new window.MouseEvent('mouseover', { bubbles: true, view: window }));
+  });
+  await tick(520);
+  const tip = findAnywhere('.dts-tip');
+  assert.match(tip.textContent, /构建巡检/);
+  assert.match(tip.textContent, /1小时一次/);
 });
 
 test('dragging a session onto a topic files it there', async () => {

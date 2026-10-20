@@ -13,6 +13,7 @@
  */
 import { createHostActions } from './actions.js';
 import { OverlayPanel } from './overlay.jsx';
+import { createScheduleStore } from './schedule.js';
 import { setLanguage } from './i18n.js';
 import css from './styles.css';
 
@@ -85,9 +86,11 @@ export function apply(ctx) {
 
 function boot(ctx) {
   const actions = createHostActions(ctx);
+  const schedules = createScheduleStore(ctx);
 
   ctx.effect(() => applyStyles(), 'dsh-better-workspace: styles');
   ctx.effect(() => watchLanguage(ctx), 'dsh-better-workspace: language');
+  ctx.effect(() => () => schedules.dispose(), 'dsh-better-workspace: schedules');
 
   ctx.slots.inject('shell.overlay', () => ctx.slots.register(
     {
@@ -95,7 +98,7 @@ function boot(ctx) {
       id: 'topic-sidebar-panel',
       order: 40,
       label: () => '分组',
-      inject: () => ({ actions }),
+      inject: () => ({ actions, schedules }),
     },
     OverlayPanel,
   ));
