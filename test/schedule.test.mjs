@@ -91,24 +91,38 @@ test('the shared store reads once and follows schedule/changed', async () => {
   let records = [daily];
   let reads = 0;
   const listeners = new Map();
+  // The real Client exposes each namespace as its own Cordis service (`remote.schedule`),
+  // while `remote` itself only carries the forwarded events. Reading `remote.schedule` as a
+  // *property* of the facade throws without an `inject` entry, so the store must never do it
+  // — that throw used to be swallowed and blanked both native surfaces.
+  const facade = {
+    get schedule() {
+      throw new Error('cannot get property "remote.schedule" without inject');
+    },
+    $on(event, listener) {
+      listeners.set(event, listener);
+      return () => listeners.delete(event);
+    },
+  };
   const ctx = {
-    get: (name) => (name === 'remote' ? {
-      schedule: {
-        async catalog() {
-          reads += 1;
-          return { ok: true, value: records };
-        },
-      },
-      $on(event, listener) {
-        listeners.set(event, listener);
-        return () => listeners.delete(event);
-      },
-    } : null),
+    get: (name) => {
+      if (name === 'remote.schedule') {
+        return {
+          async catalog() {
+            reads += 1;
+            return { ok: true, value: records };
+          },
+        };
+      }
+      if (name === 'remote') return facade;
+      return null;
+    },
     on: () => () => {},
   };
   const store = createScheduleStore(ctx);
   await store.start();
   assert.equal(reads, 1, 'one global read serves the whole panel');
+  assert.equal(store.getSnapshot().status, 'ready', 'the namespace service answered the catalog');
   assert.deepEqual(scheduleHover(store.getSnapshot().bySession.get('ses_1'), Date.now()).tasks.map((task) => task.name), ['每天早上发送问候']);
 
   records = [];
@@ -116,5 +130,20 @@ test('the shared store reads once and follows schedule/changed', async () => {
   await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(reads, 2, 'the invalidation re-reads the catalog');
   assert.equal(store.getSnapshot().bySession.size, 0, 'ended tasks leave the row');
+  store.dispose();
+});
+
+test('a composition without the schedule plugin stays silent instead of throwing', async () => {
+  const store = createScheduleStore({
+    // The service never mounts: `ctx.get` answers undefined, and the facade guard may throw.
+    get: () => {
+      throw new Error('cannot get property "remote.schedule" without inject');
+    },
+    on: () => () => {},
+  });
+  await store.start();
+  assert.equal(store.getSnapshot().status, 'idle');
+  assert.equal(store.getSnapshot().settled, false);
+  assert.equal(store.getSnapshot().bySession.size, 0);
   store.dispose();
 });

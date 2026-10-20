@@ -25,11 +25,23 @@ const UNITS = [
   SECOND,
 ];
 
-/** Read one optional service without letting a missing/renamed entry take the panel down. */
+/**
+ * Resolve one optional service.
+ *
+ * A namespace that this plugin did not declare in `inject`, that has not mounted yet, or
+ * that the composition omits answers `null` — the clock and the hover block are decoration
+ * and must never take the panel down. The reason is still logged once, because the bug this
+ * guards against is precisely an *expected* service silently reading as absent.
+ */
+const warned = new Set();
 function service(ctx, name) {
   try {
     return ctx.get?.(name) ?? null;
-  } catch {
+  } catch (error) {
+    if (!warned.has(name)) {
+      warned.add(name);
+      console.warn(`[dsh-better-workspace] cannot resolve ${name}: ${error?.message ?? error}`);
+    }
     return null;
   }
 }
@@ -69,7 +81,6 @@ export function createScheduleStore(ctx) {
   const listeners = new Set();
   let started = false;
   let disposed = false;
-  let remote = null;
   let reading = null;
   let dirty = false;
   let offChanged = null;
@@ -87,14 +98,29 @@ export function createScheduleStore(ctx) {
     }
   };
 
+  /**
+   * The `remote.schedule` namespace.
+   *
+   * `remote` is a Cordis **service**, and each namespace is registered as its own service
+   * (`remote.schedule`). Reading `ctx.get('remote').schedule` therefore throws
+   * `cannot get property "remote.schedule" without inject` — the facade proxy only exposes
+   * namespaces to a plugin that declared them in `inject`, and it *throws* rather than
+   * returning undefined. That throw used to be swallowed here, so the catalog never loaded
+   * and both native surfaces stayed blank. Only the dotted service name resolves.
+   */
   const scheduleFace = () => {
-    try {
-      if (!remote) remote = service(ctx, 'remote');
-      return remote?.schedule ?? service(ctx, 'remote.schedule');
-    } catch {
-      // A lazy Remote face may throw until its namespace mounts; treat it as absent.
-      return null;
-    }
+    const namespace = service(ctx, 'remote.schedule');
+    if (namespace && typeof namespace.catalog === 'function') return namespace;
+    return null;
+  };
+
+  /**
+   * The event face: `remote` itself. `schedule/changed` is forwarded on the Remote service,
+   * which is a different object from the namespace.
+   */
+  const eventFace = () => {
+    const face = service(ctx, 'remote');
+    return face && typeof face.$on === 'function' ? face : null;
   };
 
   /**
@@ -151,9 +177,10 @@ export function createScheduleStore(ctx) {
   };
 
   const attach = () => {
-    if (remote && typeof remote.$on === 'function' && !offChanged) {
+    const face = eventFace();
+    if (face && !offChanged) {
       try {
-        offChanged = remote.$on('schedule/changed', () => { refresh(); });
+        offChanged = face.$on('schedule/changed', () => { refresh(); });
       } catch {
         offChanged = null;
       }

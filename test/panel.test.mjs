@@ -270,13 +270,21 @@ function applyPlugin(mod) {
         };
       }
       if (name === 'layout') return { toggleSidebar() { toggleSidebarCalls += 1; } };
+      if (name === 'remote.schedule') {
+        // The namespace is its own Cordis service, exactly as the Client assembly mounts it.
+        return {
+          async catalog() {
+            scheduleReaders += 1;
+            return { ok: true, value: scheduleCatalog };
+          },
+        };
+      }
       if (name === 'remote') {
         return {
-          schedule: {
-            async catalog() {
-              scheduleReaders += 1;
-              return { ok: true, value: scheduleCatalog };
-            },
+          // The facade carries forwarded events only. Reaching for a namespace as a property
+          // is a bug: Cordis throws `cannot get property "remote.schedule" without inject`.
+          get schedule() {
+            throw new Error('cannot get property "remote.schedule" without inject');
           },
           // The schedule plugin subscribes to this invalidation; one disposer is enough here.
           $on: () => () => {},
