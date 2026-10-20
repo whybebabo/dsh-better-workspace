@@ -1,5 +1,7 @@
 # dsh-better-workspace
 
+[English](./README.en.md) | 简体中文
+
 `dsh-better-workspace` 是 DeepSeek Harness 的侧边栏**主题分组**插件。它叠加在原生"工作区"区域之上，不替换官方列表：会话仍由宿主管理，插件只在这块区域上重新组织显示，并补上宿主没有的批量操作与安全删除。
 
 有了它，散落在各个工作区里的会话可以按自己的习惯归类：
@@ -14,9 +16,7 @@
 
 ## 界面预览
 
-![dsh-better-workspace 侧边栏：工作区筛选、emoji 分组树、会话状态点与行尾操作](https://raw.githubusercontent.com/whybebabo/dsh-better-workspace/main/docs/assets/preview.png)
-
-> 图片走 GitHub 绝对地址，这样在 npm 包页面上也能显示（`files` 白名单不带 `docs/`，相对路径在 npm 上会变成坏图）。
+![dsh-better-workspace 侧边栏：工作区筛选、emoji 分组树、会话状态点与行尾操作](docs/assets/preview.png)
 
 ## 工作方式
 
