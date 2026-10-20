@@ -683,7 +683,7 @@ export function OverlayPanel({ actions }) {
       <MenuItem key="filter" icon={<Icon name="filter" />} onSelect={() => { setMenu(null); pickTopic(prefs.topicFilter === section.id ? null : section.id, group.workspaceId); }}>
         {t('topic.filter')}
       </MenuItem>,
-      <MenuItem key="select" icon={<Icon name="check" />} onSelect={() => { setMenu(null); setPrefs({ selectMode: true }); store.setSelection(section.rows.map((row) => row.id)); }}>
+      <MenuItem key="select" icon={<Icon name="check" />} onSelect={() => { setMenu(null); setPrefs({ selectMode: true }); store.setSelection(section.rows.filter((row) => !row.blank).map((row) => row.id)); }}>
         {t('topic.batchSelect')}
       </MenuItem>,
       <MenuItem
@@ -737,7 +737,7 @@ export function OverlayPanel({ actions }) {
       onSelect={() => {
         setMenu(null);
         setPrefs({ selectMode: true });
-        store.setSelection(group.sections.flatMap((section) => section.rows.map((row) => row.id)));
+        store.setSelection(group.sections.flatMap((section) => section.rows.filter((row) => !row.blank).map((row) => row.id)));
       }}
     >
       {t('topic.batchSelect')}
@@ -938,24 +938,49 @@ export function OverlayPanel({ actions }) {
   return (
     <div className={cx('dts-overlay', menu || dialog ? 'has-floating' : null)} style={style} data-reason={geom.reason}>
       <div className="dts-panel">
-        <Header
-          prefs={prefs}
-          options={options}
-          topicsFor={topicsWithCounts}
-          activeTopic={activeTopic}
-          onSetPrefs={setPrefs}
-          onPickWorkspace={pickWorkspace}
-          onPickTopic={pickTopic}
-          onAddTopic={(workspaceId, extra) => setDialog({ type: 'create', workspaceId: workspaceId ?? null, ...extra })}
-          onAddWorkspace={addWorkspace}
-          onCreateSession={(workspaceId, topicId) => {
-            // `null` means the user explicitly picked 默认分组 — still arm the claim so the
-            // newest-topic auto-file does not move the blank out of it.
-            startSessionUnderTopic(workspaceId, topicId);
-          }}
-          onNewSession={newSession}
-          onOpenHeaderMenu={(anchor) => setMenu({ type: 'header', anchor })}
-        />
+        {prefs.selectMode ? (
+          <BatchBar
+            count={selectedIds.length}
+            busy={state.busy !== null || progress !== null}
+            progress={progress}
+            hasArchived={selectedRows().some((row) => row.archived)}
+            hasUnarchived={selectedRows().some((row) => !row.archived)}
+            hasUngrouped={selectedRows().some((row) => row.workspaceId === UNGROUPED_WORKSPACE_ID)}
+            deleteAvailable={state.deleteAvailable}
+            onArchive={() => runBatch('archive', selectedIds)}
+            onUnarchive={() => runBatch('unarchive', selectedIds)}
+            onMove={() => {
+              const workspaceId = workspaceOfIds();
+              const movable = selectedRows().filter((row) => row.workspaceId === workspaceId);
+              if (!workspaceId || workspaceId === UNGROUPED_WORKSPACE_ID || movable.length === 0) {
+                flash(t('session.crossWorkspace'), 'bad');
+                return;
+              }
+              setDialog({ type: 'move', ids: movable.map((row) => row.id), workspaceId });
+            }}
+            onDelete={() => setDialog({ type: 'delete', ids: selectedIds })}
+            onExit={() => setPrefs({ selectMode: false })}
+          />
+        ) : (
+          <Header
+            prefs={prefs}
+            options={options}
+            topicsFor={topicsWithCounts}
+            activeTopic={activeTopic}
+            onSetPrefs={setPrefs}
+            onPickWorkspace={pickWorkspace}
+            onPickTopic={pickTopic}
+            onAddTopic={(workspaceId, extra) => setDialog({ type: 'create', workspaceId: workspaceId ?? null, ...extra })}
+            onAddWorkspace={addWorkspace}
+            onCreateSession={(workspaceId, topicId) => {
+              // `null` means the user explicitly picked 默认分组 — still arm the claim so the
+              // newest-topic auto-file does not move the blank out of it.
+              startSessionUnderTopic(workspaceId, topicId);
+            }}
+            onNewSession={newSession}
+            onOpenHeaderMenu={(anchor) => setMenu({ type: 'header', anchor })}
+          />
+        )}
 
         {state.readOnly ? <div className="dts-banner dts-banner--warn">{t('state.readonly')}</div> : null}
         {state.error === 'conflict' ? (
@@ -1003,33 +1028,6 @@ export function OverlayPanel({ actions }) {
           />
         </div>
 
-        {prefs.selectMode ? (
-          <BatchBar
-            count={selectedIds.length}
-            busy={state.busy !== null || progress !== null}
-            progress={progress}
-            hasArchived={selectedRows().some((row) => row.archived)}
-            hasUnarchived={selectedRows().some((row) => !row.archived)}
-            hasUngrouped={selectedRows().some((row) => row.workspaceId === UNGROUPED_WORKSPACE_ID)}
-            deleteAvailable={state.deleteAvailable}
-            onArchive={() => runBatch('archive', selectedIds)}
-            onUnarchive={() => runBatch('unarchive', selectedIds)}
-            onMove={() => {
-              const workspaceId = workspaceOfIds();
-              const movable = selectedRows().filter((row) => row.workspaceId === workspaceId);
-              if (!workspaceId || workspaceId === UNGROUPED_WORKSPACE_ID || movable.length === 0) {
-                flash(t('session.crossWorkspace'), 'bad');
-                return;
-              }
-              setDialog({ type: 'move', ids: movable.map((row) => row.id), workspaceId });
-            }}
-            onDelete={() => setDialog({ type: 'delete', ids: selectedIds })}
-            onClear={() => {
-              setPrefs({ selectMode: false });
-              store.clearSelection();
-            }}
-          />
-        ) : null}
       </div>
 
       {menu && menuItems ? (

@@ -59,6 +59,12 @@ export const SessionRow = React.memo(function SessionRow({
   React.useEffect(() => () => clearTimeout(hintTimer.current), []);
   const startHint = (element) => {
     clearTimeout(hintTimer.current);
+    // While selecting, the row is a checkbox target; the hover card and marquee would only
+    // compete with the selection state.
+    if (selectMode) {
+      setMarquee(null);
+      return;
+    }
     // Native behaviour: hovering a clipped title scrolls it instead of hiding the tail.
     setMarquee(marqueePlan(textRef.current));
     if (!onHint) return;
@@ -68,7 +74,7 @@ export const SessionRow = React.memo(function SessionRow({
   const endHint = () => {
     clearTimeout(hintTimer.current);
     setMarquee(null);
-    onHintEnd?.();
+    if (!selectMode) onHintEnd?.();
   };
   const hint = reorder?.hint;
   const dropBefore = hint?.level === 'session' && hint.id === row.id && hint.position === 'before';
@@ -104,7 +110,7 @@ export const SessionRow = React.memo(function SessionRow({
       // (25.5–41.5px after the marker's left pull); the checkbox in flow takes 22px.
       style={{ '--dts-indent': selectMode ? '19.5px' : '41.5px' }}
       role="treeitem"
-      aria-selected={row.isCurrent}
+      aria-selected={selectMode ? selected : row.isCurrent}
       tabIndex={0}
       draggable={!selectMode && !row.blank && !row.archived}
       onMouseEnter={(event) => startHint(event.currentTarget)}
@@ -157,12 +163,13 @@ export const SessionRow = React.memo(function SessionRow({
         // The desktop build renames on double-click instead of opening twice. A blank row is
         // the provisional New Session and has nothing to rename yet — same as the stock list.
         event.preventDefault();
-        if (row.blank) return;
+        if (row.blank || selectMode) return;
         onRename?.(row);
       }}
       onContextMenu={(event) => {
         event.preventDefault();
-        if (row.blank) return;
+        // A row menu would mix single-session actions into the batch flow.
+        if (row.blank || selectMode) return;
         onMenu({ type: 'session', row, anchor: event.currentTarget.getBoundingClientRect() });
       }}
     >

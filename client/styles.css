@@ -80,6 +80,42 @@
   padding-left: 4px;
 }
 
+/* ---------- selection toolbar ----------
+   Replaces the header while selection mode is on. One row of native icon buttons keeps the
+   narrow sidebar from stacking labelled buttons; hover titles carry the action names. */
+.dts-selectbar__count {
+  min-width: 0;
+  overflow: hidden;
+  padding-left: 4px;
+  color: var(--dsw-alias-label-primary, #0f1115);
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dts-selectbar__hint {
+  margin: 0 4px 2px 34px;
+  color: var(--dsw-alias-label-tertiary, #81858c);
+  font-size: 12px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+
+.dts-selectbar__hint.is-progress {
+  color: var(--dsw-alias-link, #4176e6);
+}
+
+.dts-selectbar__hint.is-error {
+  color: var(--dsw-alias-state-error-primary, #ec1313);
+}
+
+.dts-selectbar__danger:hover:not(:disabled) {
+  color: var(--dsw-alias-state-error-primary, #ec1313);
+  background: var(--dsw-alias-interactive-bg-hover-danger, rgba(236, 19, 19, 0.08));
+}
+
 /* ---------- buttons ---------- */
 .dts-iconbtn {
   display: inline-flex;
@@ -365,8 +401,12 @@
   background: var(--dsw-specific-sidebar-nav-item-active, rgba(38, 49, 72, 0.08));
 }
 
-.dts-row.is-selected {
-  box-shadow: inset 0 0 0 1px var(--dsw-alias-link, #4176e6);
+/* Selection is a soft accent fill, not an outline: the stock list marks the current row with
+   a fill, and an inset ring reads as a focus state. The host's sidebar accent token is the
+   same light blue it uses for an accented active item. */
+.dts-row.is-selected,
+.dts-row.is-selected:hover {
+  background: var(--dsw-specific-sidebar-nav-item-active-accent, #e4edfd);
 }
 
 .dts-row__title {
@@ -469,6 +509,12 @@
 .dts-row:hover .dts-row__actions,
 .dts-row:focus-within .dts-row__actions {
   display: inline-flex;
+}
+
+/* Selection mode owns the row: the per-row menu/archive/pin strip would compete with the
+   checkbox and batch toolbar. The extra .dts-row class outranks the :hover rule above. */
+.dts-tree--selecting .dts-row .dts-row__actions {
+  display: none;
 }
 
 .dts-row--session:hover .dts-row__time,
@@ -1451,33 +1497,7 @@
   color: var(--dsw-alias-label-tertiary, #81858c);
 }
 
-/* ---------- batch bar, banners, misc ---------- */
-.dts-batchbar {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
-  padding: 6px 8px;
-  border-top: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.05));
-  background: var(--dsw-specific-sidebar-fill, #f9fafb);
-}
-
-.dts-batchbar__count {
-  font-size: 12px;
-  color: var(--dsw-alias-label-secondary, #61666b);
-}
-
-.dts-batchbar__progress {
-  font-size: 12px;
-  color: var(--dsw-alias-link, #4176e6);
-}
-
-.dts-batchbar__warn {
-  flex-basis: 100%;
-  font-size: 12px;
-  color: var(--dsw-alias-state-error-primary, #ec1313);
-}
-
+/* ---------- banners, misc ---------- */
 .dts-banner {
   display: flex;
   align-items: center;

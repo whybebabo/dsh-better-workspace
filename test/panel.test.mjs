@@ -1110,7 +1110,7 @@ test('the attach picker labels each row with its current group', async () => {
   assert.equal(labels.some((entry) => entry.group === 'One'), false, 'the workspace title is not repeated on every row');
 });
 
-test('the batch bar greys out actions that conflict with the selection', async () => {
+test('the selection toolbar greys out actions that conflict with the selection', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   window.localStorage.setItem('dsh-better-workspace:prefs:v1', JSON.stringify({ showArchived: true }));
   const base = sessionSource.getSnapshot();
@@ -1135,11 +1135,13 @@ test('the batch bar greys out actions that conflict with the selection', async (
     toggle('归档项2');
   });
   await tick();
-  const buttonByLabel = (label) => [...container.querySelectorAll('.dts-batchbar .dts-btn')].find((node) => node.textContent.trim() === label);
+  const buttonByLabel = (label) => [...container.querySelectorAll('.dts-selectbar .dts-iconbtn')].find((node) => node.getAttribute('aria-label') === label);
+  assert.equal(container.querySelector('.dts-selectbar__count').textContent.trim(), '已选 2 个会话');
   assert.equal(buttonByLabel('归档').disabled, true, 'an archived row in the selection blocks 归档');
   assert.equal(buttonByLabel('取消归档').disabled, true, 'an unarchived row in the selection blocks 取消归档');
   assert.equal(buttonByLabel('移动到分组').disabled, true, 'archived rows cannot be re-filed');
   assert.equal(buttonByLabel('永久删除').disabled, false, 'deleting stays available for both kinds');
+  assert.equal(container.querySelector('.dts-selectbar__hint').textContent.trim(), '已归档与未归档会话不能一起处理');
   await act(async () => {
     toggle('归档项2');
   });
@@ -1147,6 +1149,43 @@ test('the batch bar greys out actions that conflict with the selection', async (
   assert.equal(buttonByLabel('归档').disabled, false, 'unarchived-only selection can archive');
   assert.equal(buttonByLabel('取消归档').disabled, true, 'and still cannot unarchive');
   assert.equal(buttonByLabel('移动到分组').disabled, false);
+  assert.equal(container.querySelector('.dts-selectbar__hint'), null, 'the mixed-state hint clears with the selection');
+});
+
+test('selection mode leaves the provisional New Session out of the batch', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  const base = sessionSource.getSnapshot();
+  sessionSource.set({
+    ...base,
+    current: 'ses_blank',
+    ids: [...base.ids, 'ses_blank'],
+    byId: {
+      ...base.byId,
+      ses_blank: { id: 'ses_blank', displayTitle: '', cwd: 'D:/work/one', updatedAt: Date.now(), blank: true, retainedBy: { mainView: 1 } },
+    },
+  });
+  const workspace = workspaceSource.getSnapshot();
+  workspaceSource.set({ ...workspace, items: [{ ...workspace.items[0], sessionIds: [...base.ids, 'ses_blank'] }] });
+  await mount();
+  assert.ok(find('.dts-row--session', '新会话'), 'the placeholder renders at rest');
+  const headerButton = (title) => [...container.querySelectorAll('.dts-header .dts-iconbtn')].find((node) => node.getAttribute('title') === title);
+  await act(async () => {
+    headerButton('批量选择').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  assert.equal(find('.dts-row--session', '新会话'), undefined, 'the placeholder steps out of the selection list');
+  assert.equal(container.querySelector('.dts-selectbar__count').textContent.trim(), '已选 0 个会话');
+  await act(async () => {
+    find('.dts-row--topic', '默认分组').dispatchEvent(new window.Event('contextmenu', { bubbles: true, cancelable: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')]
+      .find((node) => node.textContent.trim() === '选择此分组全部会话')
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  assert.equal(container.querySelector('.dts-selectbar__count').textContent.trim(), '已选 2 个会话', 'selecting the group skips the placeholder');
 });
 
 test('batch move is disabled when the selection includes an ungrouped session', async () => {
@@ -1172,7 +1211,7 @@ test('batch move is disabled when the selection includes an ungrouped session', 
     toggle('游离会话');
   });
   await tick();
-  const buttonByLabel = (label) => [...container.querySelectorAll('.dts-batchbar .dts-btn')].find((node) => node.textContent.trim() === label);
+  const buttonByLabel = (label) => [...container.querySelectorAll('.dts-selectbar .dts-iconbtn')].find((node) => node.getAttribute('aria-label') === label);
   const move = buttonByLabel('移动到分组');
   assert.equal(move.disabled, true, 'an ungrouped row has no workspace to move within');
   assert.equal(move.title, '未分组会话没有工作区，不能移动到分组');
@@ -1203,7 +1242,7 @@ test('exiting selection mode clears the selection', async () => {
   });
   await tick();
   assert.equal(container.querySelector('.dts-row--session.is-selected'), null, 'no stale highlight survives the exit');
-  assert.equal(container.querySelector('.dts-batchbar'), null);
+  assert.equal(container.querySelector('.dts-selectbar'), null);
 });
 
 test('an empty topic name explains itself once the field is touched', async () => {

@@ -55,6 +55,8 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, allSelected,
   const virtual = Boolean(group.virtual);
   const statusLabel = statusText(group.status, group.statusKind);
   const activeStatus = isActiveWorkspace && !group.collapsed && Boolean(group.status);
+  // While selecting, count the rows a checkbox can actually reach (blanks are hidden).
+  const visibleCount = selectMode ? groupIds.length : group.liveCount;
   const dropBefore = hint?.level === 'workspace' && hint.id === group.workspaceId && hint.position === 'before';
   const dropAfter = hint?.level === 'workspace' && hint.id === group.workspaceId && hint.position === 'after';
   return (
@@ -62,7 +64,7 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, allSelected,
       className={cx('dts-row', 'dts-row--group', group.collapsed && 'is-collapsed', virtual && 'is-virtual', group.status && 'has-status', activeStatus && 'is-active-workspace', dropBefore && 'is-dropbefore', dropAfter && 'is-dropafter')}
       role="treeitem"
       aria-expanded={!group.collapsed}
-      aria-label={statusLabel ? `${group.title} · ${statusLabel} · ${t('workspace.count', { n: group.liveCount })}` : undefined}
+      aria-label={statusLabel ? `${group.title} · ${statusLabel} · ${t('workspace.count', { n: visibleCount })}` : undefined}
       tabIndex={0}
       draggable={!selectMode && !virtual}
       onClick={onToggleCollapse}
@@ -98,6 +100,7 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, allSelected,
             <Checkbox
               checked={groupIds.length > 0 && allSelected}
               indeterminate={selectionCount > 0 && !allSelected}
+              disabled={groupIds.length === 0}
               onChange={onToggleGroup}
               label={`${group.title} 全选`}
             />
@@ -118,7 +121,7 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, allSelected,
         <span className="dts-row__text">{group.title}</span>
       </span>
       <span className="dts-row__aside">
-        <span className="dts-row__count">{t('workspace.count', { n: group.liveCount })}</span>
+        <span className="dts-row__count">{t('workspace.count', { n: visibleCount })}</span>
         {virtual ? null : (
           <span className="dts-row__actions">
             <IconButton
@@ -143,7 +146,9 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, allSelected,
 }
 
 function SectionHeader({ section, group, selectMode, selectedIds, pending, onToggleCollapse, onToggleSection, onMenu, onFilter, onDropSessions, onRename, reorder }) {
-  const ids = section.rows.map((row) => row.id);
+  // The provisional New Session row has no record to archive or file, so it never joins a
+  // batch selection.
+  const ids = section.rows.filter((row) => !row.blank).map((row) => row.id);
   const selectedCount = ids.filter((id) => selectedIds.has(id)).length;
   const [dropState, setDropState] = React.useState('idle');
   const [editing, setEditing] = React.useState(false);
@@ -247,11 +252,12 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
         onDropSessions?.({ ids: dropped, ...targetOf(section, group) });
       }}
     >
-      {selectMode && ids.length > 0 ? (
+      {selectMode ? (
         <span className="dts-row__check" onClick={(event) => event.stopPropagation()}>
           <Checkbox
             checked={ids.length > 0 && selectedCount === ids.length}
             indeterminate={selectedCount > 0 && selectedCount < ids.length}
+            disabled={ids.length === 0}
             onChange={() => onToggleSection(ids, selectedCount === ids.length)}
             label={`${label} 全选`}
           />
@@ -291,7 +297,7 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
         <span className="dts-row__title"><span className="dts-row__text">{label}</span></span>
       )}
       <span className="dts-row__aside">
-        <span className="dts-row__count">{section.total}</span>
+        <span className="dts-row__count">{selectMode ? ids.length : section.total}</span>
         {virtual ? null : (
           <span className="dts-row__actions">
             {section.kind === 'topic' ? (
@@ -327,8 +333,11 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
 
 const Section = React.memo(function Section({ section, group, selectMode, selectedIds, now, query, pendingTopicId, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleCollapse, onToggleSection, onFilter, onDropSessions, onRename, onDropOnRow, reorder }) {
   const [revealed, setRevealed] = React.useState(false);
-  const overflow = section.rows.length > REVEAL_LIMIT;
-  const visible = overflow && !revealed ? section.rows.slice(0, REVEAL_LIMIT) : section.rows;
+  // Selecting is about existing records; hide the provisional New Session placeholder while
+  // the batch toolbar is active instead of offering a checkbox that cannot do anything.
+  const rows = selectMode ? section.rows.filter((row) => !row.blank) : section.rows;
+  const overflow = rows.length > REVEAL_LIMIT;
+  const visible = overflow && !revealed ? rows.slice(0, REVEAL_LIMIT) : rows;
   const body = (
     <>
       {visible.map((row) => (
@@ -436,10 +445,15 @@ export function TopicTree({
   }
 
   return (
-    <div className="dts-tree" role="tree" aria-label={t('section.workspaces')}>
+    <div
+      className={cx('dts-tree', selectMode && 'dts-tree--selecting')}
+      role="tree"
+      aria-label={t('section.workspaces')}
+      aria-multiselectable={selectMode ? true : undefined}
+    >
       {tree.truncated ? <div className="dts-note">{t('search.limit', { n: tree.matched })}</div> : null}
       {tree.groups.map((group) => {
-        const groupIds = group.sections.flatMap((section) => section.rows.map((row) => row.id));
+        const groupIds = group.sections.flatMap((section) => section.rows.filter((row) => !row.blank).map((row) => row.id));
         const groupSelected = groupIds.filter((id) => selectedIds.has(id)).length;
         const groupCollapsed = focus?.level === 'workspace' && group.workspaceId !== focus.id ? true : group.collapsed;
         const shownGroup = groupCollapsed === group.collapsed ? group : { ...group, collapsed: groupCollapsed };
