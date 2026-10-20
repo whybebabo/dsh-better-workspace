@@ -2010,12 +2010,20 @@ test('an archived row keeps the stock menu and only adds permanent delete', asyn
   workspaceSource.set({
     ...workspaceSource.getSnapshot(),
     archivedSessionIds: ['ses_arch'],
+    // Stale host data: a session pinned before it was archived must not keep pin chrome.
+    pinnedSessionIds: ['ses_arch'],
     items: [{ ...workspaceSource.getSnapshot().items[0], sessionIds: [...base.ids, 'ses_arch'] }],
   });
   window.localStorage.setItem('dsh-better-workspace:prefs:v1', JSON.stringify({ showArchived: true }));
   await mount();
   const row = find('.dts-section--archived .dts-row--session', '归档项');
   assert.ok(row, 'the archived bucket is visible');
+  assert.equal(row.querySelector('.dts-row__pin'), null, 'archived rows carry no pin marker');
+  assert.deepEqual(
+    [...row.querySelectorAll('.dts-row__act')].map((node) => node.getAttribute('title')),
+    ['会话操作', '取消归档'],
+    'archived rows carry no pin button',
+  );
   await act(async () => {
     row.querySelector('.dts-row__act').dispatchEvent(new window.Event('click', { bubbles: true }));
   });

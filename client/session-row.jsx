@@ -193,7 +193,7 @@ export const SessionRow = React.memo(function SessionRow({
       {row.blank ? null : (
         <span className="dts-row__aside">
           <span className="dts-row__time">{trailing ?? formatRelative(row.updatedAt, now)}</span>
-          {row.pinned ? (
+          {row.pinned && !row.archived ? (
             <span className="dts-row__pin" role="img" aria-label={t('session.pinned')} title={t('session.pinned')}>
               <Icon name="pinFilled" />
             </span>
@@ -218,19 +218,21 @@ export const SessionRow = React.memo(function SessionRow({
             >
               <Icon name={row.archived ? 'unarchive' : 'archive'} />
             </IconButton>
-            <IconButton
-              label={row.pinned ? t('session.unpin') : t('session.pin')}
-              title={row.pinned ? t('session.unpin') : t('session.pin')}
-              className="dts-row__act"
-              onClick={(event) => {
-                event.stopPropagation();
-                // Release focus: while the row has focus-within the marker would stay hidden.
-                event.currentTarget.blur();
-                onPin?.(row);
-              }}
-            >
-              <Icon name={row.pinned ? 'pinFilled' : 'pin'} />
-            </IconButton>
+            {row.archived ? null : (
+              <IconButton
+                label={row.pinned ? t('session.unpin') : t('session.pin')}
+                title={row.pinned ? t('session.unpin') : t('session.pin')}
+                className="dts-row__act"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  // Release focus: while the row has focus-within the marker would stay hidden.
+                  event.currentTarget.blur();
+                  onPin?.(row);
+                }}
+              >
+                <Icon name={row.pinned ? 'pinFilled' : 'pin'} />
+              </IconButton>
+            )}
           </span>
         </span>
       )}
