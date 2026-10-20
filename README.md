@@ -60,10 +60,10 @@ dsh plugin --profile desktop add @whybebabo/dsh-better-workspace
 不经过 npm，直接从仓库安装某个发布版本：
 
 ```bash
-dsh plugin --profile web add github:whybebabo/dsh-better-workspace#v0.1.0
+dsh plugin --profile web add github:whybebabo/dsh-better-workspace#v0.1.1
 ```
 
-把 `#v0.1.0` 换成你要的 tag。这条路径同样需要 Git 与 pnpm，也不需要克隆仓库。
+把 `#v0.1.1` 换成你要的 tag。这条路径同样需要 Git 与 pnpm，也不需要克隆仓库。
 
 ### 从源码安装
 
@@ -276,14 +276,16 @@ cordis.patch.yml  profile 插桩（enabled / enableDelete 开关）
 
 包名 `@whybebabo/dsh-better-workspace`，`publishConfig.access: public`，`files` 白名单只带 `lib`、`cordis.patch.yml`、`README.md`、`LICENSE` 与 `THIRD_PARTY_NOTICES.md`（源码不入包）。
 
+发布的 `lib/client.js` 必须以**包名**（而不是 `cordis.patch.yml` 里的短 `id`）向 `__ModuleLoader__` 注册：宿主按包名给插件建图，注册 id 对不上就会报 `loaded without registering`，整个 Web 启动失败。`client/build.mjs` 直接从 `package.json` 取这个 id，`test/client-registration.test.mjs` 守住这条约定。
+
 ```bash
 npm run build          # 先构建，包里的 lib/client.js 是产物
 npm pack --dry-run     # 确认文件清单
 npm publish            # 发布到 npm
-git tag v0.1.0 && git push --tags
+git tag v0.1.1 && git push --tags
 ```
 
-打 tag 之后 `dsh plugin add github:whybebabo/dsh-better-workspace#v0.1.0` 这条路径才可用；两者互不影响，同版本号建议一起发布。
+打 tag 之后 `dsh plugin add github:whybebabo/dsh-better-workspace#v0.1.1` 这条路径才可用；两者互不影响，同版本号建议一起发布。
 
 ## 已知边界
 

@@ -60,10 +60,10 @@ dsh plugin --profile desktop add @whybebabo/dsh-better-workspace
 Install a tagged release straight from the repository, without npm:
 
 ```bash
-dsh plugin --profile web add github:whybebabo/dsh-better-workspace#v0.1.0
+dsh plugin --profile web add github:whybebabo/dsh-better-workspace#v0.1.1
 ```
 
-Replace `#v0.1.0` with the tag you want. This path also needs Git and pnpm, and still needs no clone.
+Replace `#v0.1.1` with the tag you want. This path also needs Git and pnpm, and still needs no clone.
 
 ### From source
 
@@ -276,14 +276,16 @@ cordis.patch.yml  Profile patch (the enabled / enableDelete switches)
 
 The package is `@whybebabo/dsh-better-workspace` with `publishConfig.access: public`; the `files` allowlist ships only `lib`, `cordis.patch.yml`, `README.md`, `LICENSE` and `THIRD_PARTY_NOTICES.md` (no source).
 
+The shipped `lib/client.js` must register with `__ModuleLoader__` under the **package name**, not the short `id` in `cordis.patch.yml`: the host builds the plugin graph from the package name, and a mismatched id makes it report `loaded without registering` and fail the whole Web boot. `client/build.mjs` reads that id from `package.json`, and `test/client-registration.test.mjs` pins the contract.
+
 ```bash
 npm run build          # build first: lib/client.js in the package is an artifact
 npm pack --dry-run     # inspect the file list
 npm publish            # publish to npm
-git tag v0.1.0 && git push --tags
+git tag v0.1.1 && git push --tags
 ```
 
-The `github:...#v0.1.0` install path only works once a tag exists; the two are independent, but publish them with the same version.
+The `github:...#v0.1.1` install path only works once a tag exists; the two are independent, but publish them with the same version.
 
 ## Known limits
 

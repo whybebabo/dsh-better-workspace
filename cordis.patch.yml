@@ -1,7 +1,12 @@
 # dsh-better-workspace bundle patch: insert the plugin row into the profile roster.
-# `name` is the installed package (scoped, resolved through node_modules); `id` keeps the
-# short form on purpose — it names the plugin row, the client module and the sidecar
-# directory, so changing it would strand existing topic data.
+# `name` is the installed package (scoped, resolved through node_modules). `id` is the
+# plugin ROW id and also names the sidecar directory, so it keeps the short pre-scope form
+# and changing it would strand existing topic data.
+# The browser half is keyed differently and must NOT be given this id: `@deepseek-ai/
+# dsh-client-modules` addresses a client bundle by the package.json `name` of the row that
+# owns it, so `lib/client.js` registers `@whybebabo/dsh-better-workspace` (build.mjs derives
+# it from package.json). Registering the short row id there makes the loader report
+# "loaded without registering" and the whole Web boot fails with "Failed to load plugins".
 # The node half (exports ".") runs in the host process and owns the topic sidecar
 # plus the /dsh-better-workspace/api routes; `dsh.client.platform` in package.json makes
 # the browser half (exports "./client") load in the web GUI and the Desktop shell.
