@@ -446,27 +446,22 @@
   white-space: nowrap;
 }
 
-/* Hovering a clipped title scrolls it instead of hiding the tail (native list behaviour). */
+/* Hovering a clipped title reveals the tail (native list behaviour): the offset itself is
+   written per frame by `session-row.jsx`, which stops at the far edge. A CSS keyframe
+   animation cannot express "crawl there and rest" without also owning the clock, which is why
+   the old `infinite alternate` rule was replaced instead of being shortened. */
 .dts-row__text.is-marquee {
   text-overflow: clip;
 }
 
 .dts-row__scroll {
   display: inline-block;
-  will-change: transform;
 }
 
+/* Only the row being revealed needs its own compositing layer: `will-change` on every row
+   would reserve one per session in the list. */
 .dts-row__text.is-marquee .dts-row__scroll {
-  animation: dts-marquee var(--dts-marquee-time, 4s) linear 0.45s infinite alternate;
-}
-
-@keyframes dts-marquee {
-  from { transform: translateX(0); }
-  to { transform: translateX(var(--dts-marquee-shift, 0)); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .dts-row__text.is-marquee .dts-row__scroll { animation: none; }
+  will-change: transform;
 }
 
 /* Drop position for row reordering: a hairline where the row would land. */

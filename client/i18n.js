@@ -70,6 +70,7 @@ const zh = {
   'topic.noIcon': '无图标(显示为短横)',
   'topic.filter': '只看此分组',
   'topic.batchSelect': '选择此分组全部会话',
+  'topic.selectHidden': '已选中 {shown} 条;另有 {hidden} 条未显示,展开后再选',
   'topic.delete': '删除分组',
   'topic.deleteConfirm': '删除分组「{name}」?',
   'topic.deleteBody': '仅清除分组关系,{n} 个会话不会被删除,它们会回到「默认」。',
@@ -148,6 +149,8 @@ const zh = {
   'schedule.time.utcPrefix': 'UTC',
   'session.movedTo': '已移动到「{name}」',
   'session.crossWorkspace': '不能跨工作区归组',
+  'session.adopted': '已把 {n} 个会话归回它们的工作区（此前落在未分组里）',
+  'session.adoptRefused': '{n} 个会话无法归位（目录已不存在或被移动），仍留在未分组',
 
   'picker.topic': '把 {n} 个会话移动到分组',
   'picker.newTopic': '新建分组并放入…',
@@ -270,6 +273,7 @@ const en = {
   'topic.noIcon': 'No marker (shown as a dash)',
   'topic.filter': 'Show only this topic',
   'topic.batchSelect': 'Select every session in this topic',
+  'topic.selectHidden': 'Selected {shown}; {hidden} more are not shown yet — expand the bucket to include them',
   'topic.delete': 'Delete topic',
   'topic.deleteConfirm': 'Delete topic “{name}”?',
   'topic.deleteBody': 'Only the grouping is cleared. {n} sessions are kept and move back to “Default”.',
@@ -347,6 +351,8 @@ const en = {
   'schedule.time.locale': 'en',
   'schedule.time.utcPrefix': 'UTC',
   'session.movedTo': 'Moved to “{name}”',
+  'session.adopted': 'Restored {n} session(s) to their workspace (they had fallen into Ungrouped)',
+  'session.adoptRefused': '{n} session(s) could not be restored (their directory is gone or was moved) and stay in Ungrouped',
   'session.crossWorkspace': 'Sessions cannot cross workspaces',
 
   'picker.topic': 'Move {n} sessions to a topic',

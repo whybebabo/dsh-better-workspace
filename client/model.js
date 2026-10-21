@@ -15,6 +15,35 @@ import { t } from './i18n.js';
 import { formatRelative } from './time.js';
 
 export const SEARCH_RESULT_LIMIT = 100;
+/**
+ * How many rows a long bucket mounts before the user asks for the rest. Lives here (not in the
+ * component) because selection must agree with rendering: every "select all" entry point has to
+ * compute the same id set the tree actually put on screen.
+ */
+export const REVEAL_LIMIT = 60;
+/**
+ * The session ids a section is allowed to put into a batch selection, and the ids it is
+ * holding back.
+ *
+ * There is exactly one definition of "selectable" in the panel: rows that were mounted.
+ * A header checkbox, the topic menu and the workspace menu each derived their own set, so a
+ * bucket over `REVEAL_LIMIT` gave 60 / 69 / 70 for the same group and a batch permanent delete
+ * could target rows the user had never seen. Collapsing is different from truncation: it is a
+ * deliberate act with the count still on the header, so a collapsed bucket stays selectable
+ * whole; truncation is a rendering limit the user did not ask for and is reported as hidden.
+ *
+ * @param {object} section - a built section (`rows`, `collapsed`)
+ * @param {{revealed?: boolean}} [options] - whether the user expanded the bucket
+ * @returns {{visible: string[], hidden: string[]}}
+ */
+export function selectableIds(section, { revealed = false } = {}) {
+  // The provisional New Session is a placeholder with no record behind it: never selectable.
+  const rows = (section?.rows ?? []).filter((row) => !row.blank);
+  const all = rows.map((row) => row.id);
+  if (section?.collapsed) return { visible: all, hidden: [] };
+  const limit = revealed ? all.length : Math.min(all.length, REVEAL_LIMIT);
+  return { visible: all.slice(0, limit), hidden: all.slice(limit) };
+}
 /** Reserved id of the per-workspace system group; mirrors `lib/store.js`. */
 export const DEFAULT_TOPIC_ID = 'tp_default';
 /**
@@ -59,6 +88,35 @@ function normalizeWorkspaces(items) {
 export function basename(path) {
   const parts = String(path).replace(/[\\/]+$/, '').split(/[\\/]/);
   return parts[parts.length - 1] || String(path);
+}
+
+/**
+ * Whether two paths name the same directory.
+ *
+ * The workspace record carries the canonical path the host registered (`realpath`, a different
+ * spelling than a session header written earlier), while the session header carries whatever
+ * `cwd` the session was created with. On Windows they differ in casing and separators for the
+ * same directory, and a session whose header does not string-equal its workspace path used to
+ * fall out of that workspace's membership and land in 未分组.
+ *
+ * Case folding is therefore **Windows-only**. The browser cannot ask for the platform, so the
+ * spelling decides: a drive-letter root (`C:\`, `c:/`) is a Windows path, where `D:\Work` and
+ * `d:/work` really are one directory; anything else is treated as case-sensitive, because on
+ * POSIX `/tmp/Alpha` and `/tmp/alpha` are two different workspaces and folding them would render
+ * one session under both.
+ */
+function isWindowsPath(value) {
+  return /^[A-Za-z]:[\\/]/.test(value) || String(value ?? '').includes('\\');
+}
+
+export function samePath(left, right) {
+  const normalize = (value) => {
+    const text = String(value ?? '');
+    const unified = isWindowsPath(text) ? text.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase() : text.replace(/\/+$/, '');
+    return unified;
+  };
+  const a = normalize(left);
+  return a !== '' && a === normalize(right);
 }
 
 /** The session the main conversation view is showing, mirroring the native `mainSessionId`. */
@@ -238,15 +296,28 @@ function aggregateMembers(ids, { byId, archived, current, statuses }) {
  * @param {string} input.query - local search text
  */
 /**
- * Manual drag order: the ids a drag produced lead in that order, anything the user never
- * touched keeps the host's order (sort is stable, so unlisted entries stay put).
+ * Manual drag order, as a permutation of the ids it names — never as an absolute order.
+ *
+ * The stored list is a snapshot of the ids that existed when the user last dragged, so it can
+ * only speak for those. Sorting the whole list by "rank, unknown last" (the old behaviour)
+ * demoted everything the snapshot did not mention: a session created afterwards landed at the
+ * bottom of its bucket instead of the top, which is the opposite of the host — `attachSession`
+ * prepends, so a new session leads its workspace. Here the named ids keep their own slots and
+ * only permute among them; rows the snapshot never met keep the host's position untouched.
  */
 function orderBy(rows, manual, keyOf) {
   if (!Array.isArray(manual) || manual.length === 0) return rows;
   const pick = keyOf ?? ((entry) => entry.id);
-  const rank = new Map();
-  manual.forEach((id, index) => rank.set(id, index));
-  return [...rows].sort((left, right) => (rank.get(pick(left)) ?? Number.MAX_SAFE_INTEGER) - (rank.get(pick(right)) ?? Number.MAX_SAFE_INTEGER));
+  const order = new Map();
+  for (const id of manual) if (!order.has(id)) order.set(id, order.size);
+  const slots = [];
+  for (let index = 0; index < rows.length; index += 1) if (order.has(pick(rows[index]))) slots.push(index);
+  if (slots.length === 0) return rows;
+  const named = rows.filter((row) => order.has(pick(row)));
+  named.sort((left, right) => order.get(pick(left)) - order.get(pick(right)));
+  const next = [...rows];
+  slots.forEach((slot, index) => { next[slot] = named[index]; });
+  return next;
 }
 
 /**
@@ -305,6 +376,16 @@ function pruneCache(cache, liveKeys) {
 
 const sectionCache = new Map();
 const groupCache = new Map();
+
+/**
+ * True when a session's own `cwd` resolves to any registered workspace path. Such a session is
+ * not a stray even if the host has not accounted it yet: it belongs to a workspace, and the
+ * panel shows it under that workspace's header via the straggler rule above.
+ */
+function ungroupedBucketMatches(session, workspacePaths) {
+  for (const path of workspacePaths) if (samePath(session.cwd, path)) return true;
+  return false;
+}
 
 export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topicsOf, assignmentsOf, prefs, query, now }) {
   const workspaces = orderBy(normalizeWorkspaces(items), prefs?.workspaceOrder ?? [], (entry) => entry.workspaceId);
@@ -368,7 +449,7 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
     // Workspace records can lag the session list; anything known but unaccounted for is
     // appended by recency so the panel never hides a session the native list shows.
     const stragglers = Object.values(byId)
-      .filter((session) => session && !seen.has(session.id) && session.cwd === workspace.path)
+      .filter((session) => session && !seen.has(session.id) && samePath(session.cwd, workspace.path))
       .sort((left, right) => relativeKey(left.updatedAt) - relativeKey(right.updatedAt));
     for (const session of stragglers) orderedIds.push(session.id);
     // A drag inside a workspace reorders its sessions; the manual list is a stable overlay
@@ -474,9 +555,9 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
   if (!workspaceFilter && !topicFilter) {
     const accounted = new Set();
     for (const workspace of workspaces) for (const id of workspace.sessionIds ?? []) accounted.add(id);
-    const workspacePaths = new Set(workspaces.map((workspace) => workspace.path).filter(Boolean));
+    const workspacePaths = workspaces.map((workspace) => workspace.path).filter(Boolean);
     const strays = Object.values(byId)
-      .filter((session) => session && !accounted.has(session.id) && !workspacePaths.has(session.cwd) && !archived.has(session.id))
+      .filter((session) => session && !accounted.has(session.id) && !ungroupedBucketMatches(session, workspacePaths) && !archived.has(session.id))
       .sort((left, right) => relativeKey(left.updatedAt) - relativeKey(right.updatedAt));
     const orderedStrays = orderBy(strays.map((session) => session.id), prefs?.sessionOrder?.[UNGROUPED_WORKSPACE_ID], (id) => id);
     const defaultName = t('topic.default');
@@ -565,7 +646,7 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
     const owner = workspaces.find((workspace) => (workspace.sessionIds ?? []).includes(current));
     if (owner) currentWorkspaceId = owner.workspaceId;
     else if (byId[current]?.cwd) {
-      const byPath = workspaces.find((workspace) => workspace.path && workspace.path === byId[current].cwd);
+      const byPath = workspaces.find((workspace) => samePath(workspace.path, byId[current].cwd));
       if (byPath) currentWorkspaceId = byPath.workspaceId;
     }
   }
@@ -604,6 +685,10 @@ export function buildWorkspaceOptions({ items, list, archivedIds }) {
  * The topic a freshly started session belongs to: the workspace's most recently created
  * group. `createdAt` is authoritative when the document carries it; the server appends new
  * topics, so array position is the fallback for older documents.
+ *
+ * Kept exported because it is the honest answer to "which group is newest", but no longer used
+ * by the new-session watcher: topics render oldest-first, so the newest group is usually the
+ * *last* one, and filing a fresh session there put it at the bottom of the workspace.
  */
 export function newestTopic(topics) {
   const list = topics ?? [];

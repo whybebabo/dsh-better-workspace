@@ -17,6 +17,13 @@ const DEFAULT_PREFS = {
   showArchived: false,
   collapsedWorkspaces: [],
   collapsedTopics: [],
+  /**
+   * Buckets the user expanded past the reveal limit, as `workspaceId:sectionKey` composite
+   * keys. Persisted (not component state) because selection must agree with rendering: the
+   * panel's grouping menus derive their selectable ids from this same set, and a state stored
+   * inside `Section` was invisible to them.
+   */
+  revealedBuckets: [],
   selectMode: false,
   // Manual drag order: ids the user placed, everything else keeps the host's order.
   workspaceOrder: [],
@@ -35,6 +42,7 @@ function readPrefs() {
       selectMode: false,
       collapsedWorkspaces: Array.isArray(parsed?.collapsedWorkspaces) ? parsed.collapsedWorkspaces : [],
       collapsedTopics: Array.isArray(parsed?.collapsedTopics) ? parsed.collapsedTopics : [],
+      revealedBuckets: Array.isArray(parsed?.revealedBuckets) ? parsed.revealedBuckets : [],
       workspaceOrder: Array.isArray(parsed?.workspaceOrder) ? parsed.workspaceOrder : [],
       sessionOrder: parsed?.sessionOrder && typeof parsed.sessionOrder === 'object' ? parsed.sessionOrder : {},
     };
@@ -205,6 +213,32 @@ export function createPanelStore() {
   const deleteTopic = (input) => runMutation((revision) => api.deleteTopic({ ...input, expectedRevision: revision }));
   const assign = (input) => runMutation((revision) => api.assign({ ...input, expectedRevision: revision }));
 
+  /**
+   * Asks the host to re-attach sessions whose `cwd` matches a workspace path but which the
+   * host never accounted. This is workspace membership (host data), not the topic sidecar, so
+   * it does not touch the revision and must not be serialized behind the sidecar queue.
+   *
+   * Deliberately silent: a host without the repair services answers `available: false` and the
+   * panel carries on. When something *was* adopted the session/workspace snapshots are refreshed
+   * so the rows move into their workspace immediately. `moved` is the subset this call changed
+   * (a second window can see `adopted` non-empty for a write it did not make), and `failed`
+   * carries the refusals the host reported so the caller can surface them instead of them
+   * vanishing into a log.
+   */
+  async function adoptSessions() {
+    try {
+      const result = await api.adoptSessions();
+      const adopted = Array.isArray(result?.adopted) ? result.adopted : [];
+      const moved = Array.isArray(result?.moved) ? result.moved : adopted;
+      const failed = Array.isArray(result?.failed) ? result.failed : [];
+      if (adopted.length > 0) await load().catch(() => {});
+      return { ...result, adopted, moved, failed };
+    } catch (error) {
+      // Best effort: a repair that fails is not a state change worth a banner.
+      return { available: false, adopted: [], moved: [], failed: [], error: error instanceof ApiError ? error.message : String(error) };
+    }
+  }
+
   function dismissError() {
     patch({ error: null });
   }
@@ -233,6 +267,7 @@ export function createPanelStore() {
     reorderTopics,
     deleteTopic,
     assign,
+    adoptSessions,
     dismissError,
     reconcile,
   };

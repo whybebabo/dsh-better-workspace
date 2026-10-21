@@ -10,13 +10,13 @@ import * as React from 'react';
 import { createPortal } from 'react-dom';
 import { observeComposerSlot, resolveComposerWorkspace } from './composer.js';
 import { observeWorkspaceRegion, setRegionInert, watchRegionModals } from './geometry.js';
-import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, mainSessionId, moveWithin, newestTopic, pendingStatusLabel, topicLabel, UNGROUPED_WORKSPACE_ID } from './model.js';
+import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, mainSessionId, moveWithin, pendingStatusLabel, samePath, selectableIds, topicLabel, UNGROUPED_WORKSPACE_ID } from './model.js';
 import { createPanelStore } from './store.js';
 import { beginReorder, currentDrag, endDrag, readDragPayload, reorderVerdict, sessionReorderVerdict, writeReorderPayload } from './dnd.js';
 import { runSessionAction, mergeOutcomes, BATCH_LIMIT } from './batch.js';
 import { cx, Popover, MenuItem, Icon, StateMark, useLanguage, TopicMark } from './widgets.jsx';
 import { Header } from './header.jsx';
-import { TopicTree } from './topic-tree.jsx';
+import { sectionKey, TopicTree } from './topic-tree.jsx';
 import { BatchBar } from './batch-bar.jsx';
 import { CreateTopicDialog, EditTopicDialog, DeleteTopicDialog, MoveToTopicDialog, RenameSessionDialog, RenameWorkspaceDialog, DeleteWorkspaceDialog } from './dialogs.jsx';
 import { BatchResultDialog, DeleteSessionsDialog } from './results.jsx';
@@ -61,7 +61,7 @@ function useSnapshot(source, enabled = true) {
 const TREE_HANDLER_KEYS = [
   'onOpenSession', 'onMenu', 'onArchive', 'onPin', 'onRenameSession', 'onHint', 'onHintEnd',
   'onToggleWorkspaceCollapse', 'onToggleTopicCollapse', 'onToggleSelection', 'onSelectMany',
-  'onFilterTopic', 'onNewSession', 'onDropSessions', 'onRenameTopic', 'onDropOnRow',
+  'onFilterTopic', 'onNewSession', 'onDropSessions', 'onRenameTopic', 'onDropOnRow', 'onToggleReveal',
 ];
 
 function useStableDispatch(keys) {
@@ -159,6 +159,42 @@ export function OverlayPanel({ actions, schedules }) {
     store.load();
     return undefined;
   }, [store, onScreen]);
+  /**
+   * Workspace membership repair, once per page load.
+   *
+   * The host decides a session's workspace from its artifact `cwd`. A session whose cwd matches
+   * a workspace but which was never accounted (a workspace re-created after deletion, a crash
+   * between the header write and `attachSession`, a session resumed through a non-create path)
+   * is shown by the native list — and by this panel — in the trailing 未分组 bucket. It reads
+   * as "the session moved/disappeared" even though the log is intact, and removing the plugin
+   * leaves it there. The host route re-attaches exactly those sessions through the official
+   * `attachSession`, which re-validates the path and prepends (so the row leads its workspace,
+   * like a freshly started one). Runs once, silently, and only on the first on-screen pass.
+   */
+  const adoptedRef = React.useRef(false);
+  /**
+   * One shared reporter for both call sites (first paint and the manual reload): a moved row is
+   * announced, and a refused one is surfaced too — the host refuses when the session directory
+   * is gone or was moved, which is exactly the case the user can still act on.
+   */
+  const reportAdopt = React.useCallback((result) => {
+    if (!result) return;
+    const moved = result.moved ?? result.adopted ?? [];
+    if (moved.length > 0) {
+      // The host's own list is what the tree is built from; re-read it so the rows move now.
+      try {
+        actions.refreshSessions();
+      } catch { /* optional */ }
+      flash(t('session.adopted', { n: moved.length }));
+    }
+    const failed = Array.isArray(result.failed) ? result.failed : [];
+    if (failed.length > 0) flash(t('session.adoptRefused', { n: failed.length }), 'bad');
+  }, [actions]);
+  React.useEffect(() => {
+    if (!onScreen || adoptedRef.current) return;
+    adoptedRef.current = true;
+    store.adoptSessions().then(reportAdopt);
+  }, [onScreen, reportAdopt, store]);
   React.useEffect(() => {
     if (!onScreen) return undefined;
     // Aligned to the next minute boundary instead of a free-running 30s tick: `now` only feeds
@@ -264,6 +300,23 @@ export function OverlayPanel({ actions, schedules }) {
     [items, list, sessionStatuses, archivedIds, pinnedIds, prefs, state.workspaces, store, language, minuteNow],
   );
 
+  /**
+   * The rows the current selection can still act on.
+   *
+   * Memoized once per render and shared by every consumer (toolbar flags, the move target, the
+   * batch runner): the previous version rebuilt it 5-7 times per render with an `includes()` on
+   * an array, which was O(n·m) and, worse, let the toolbar describe a different selection than
+   * the one the batch actually sent. Declared above the early returns because hooks cannot
+   * follow them.
+   */
+  const selectionSet = React.useMemo(() => new Set(state.selection), [state.selection]);
+  const selectedRows = React.useMemo(
+    () => tree.groups.flatMap((group) => group.sections.flatMap((section) => section.rows)).filter((row) => selectionSet.has(row.id)),
+    [tree, selectionSet],
+  );
+  /** Ids of the selected rows that still exist in the tree — what a batch may be sent. */
+  const liveSelection = React.useMemo(() => selectedRows.map((row) => row.id), [selectedRows]);
+
   // A filter pointing at a closed workspace or a deleted topic must not strand the panel —
   // but only once the workspace list has actually arrived, or the first empty snapshot would
   // wipe the persisted filter on every load.
@@ -285,9 +338,15 @@ export function OverlayPanel({ actions, schedules }) {
    * New-session filing. Two paths share one watcher so a blank is claimed exactly once:
    *
    * - an explicit "new session in this topic" arms `pendingRef`, and that topic wins;
-   * - otherwise a blank the host just created (including the stock top-left 新会话 button)
-   *   lands in the workspace's most recently created topic, which is what the panel shows
-   *   as the current group. A workspace without topics keeps it in the default bucket.
+   * - otherwise the blank stays in the workspace's **default group** unless the panel is
+   *   filtered to a topic, in which case it joins the topic being looked at.
+   *
+   * This used to file every implicit blank into the workspace's most recently *created* topic.
+   * Topics are ordered oldest-first, so "newest topic" is usually the last one: clicking 新会话
+   * dropped the row at the bottom of the workspace, in a group the user was not looking at,
+   * while the stock list puts a new session first in its workspace. The default group is the
+   * first bucket of every workspace and the blank sorts first inside a bucket, so leaving the
+   * row unfiled reproduces the stock placement. Nothing is written to the sidecar for it.
    *
    * The first ready snapshot primes the seen set, so a blank that already existed when the
    * panel mounted (a reload with an unsaved New Session) is never re-filed.
@@ -325,7 +384,7 @@ export function OverlayPanel({ actions, schedules }) {
       timersRef.current.arm = null;
       auto.seen.add(target);
       // `topicId: null` is the explicit "default group" choice: start the session, but keep
-      // the newest-topic auto-filing below out of it.
+      // the topic-filter auto-filing below out of it.
       if (active.topicId === null) return;
       const topic = (store.topicsOf(active.workspaceId) ?? []).find((entry) => entry.id === active.topicId);
       if (!topic) return;
@@ -341,23 +400,31 @@ export function OverlayPanel({ actions, schedules }) {
     const fresh = ids.filter((id) => !auto.seen.has(id));
     const blanks = fresh.filter((id) => byId[id]?.blank && !byId[id]?.parentId && !auto.busy.has(id));
     for (const id of fresh) if (!byId[id]?.blank || byId[id]?.parentId) auto.seen.add(id);
+    // Only an active topic filter gives the implicit path a target. Without one the blank stays
+    // unfiled, which is the default group (first bucket) — the stock list's placement.
+    const filteredWorkspace = prefs.topicFilter
+      ? options.find((option) => (store.topicsOf(option.workspaceId) ?? []).some((entry) => entry.id === prefs.topicFilter)) ?? null
+      : null;
+    const filteredTopic = filteredWorkspace
+      ? (store.topicsOf(filteredWorkspace.workspaceId) ?? []).find((entry) => entry.id === prefs.topicFilter) ?? null
+      : null;
     for (const id of blanks) {
+      auto.seen.add(id);
+      // The virtual default group is where unfiled sessions already live; filing into it
+      // would only materialize the sidecar document for no visible change.
+      if (!filteredTopic || filteredTopic.system) continue;
       // A blank can arrive before the Workspace record accounts for it; `cwd` is the same
       // fallback the tree uses, and an unmatched id simply waits for the next snapshot.
       const workspace = options.find((option) => option.sessionIds.includes(id))
-        ?? options.find((option) => option.path && byId[id]?.cwd === option.path);
-      if (!workspace) continue;
-      const topic = newestTopic(store.topicsOf(workspace.workspaceId));
-      // The virtual default group is where unfiled sessions already live; filing into it
-      // would only materialize the sidecar document.
-      if (!topic || topic.system) {
-        auto.seen.add(id);
-        continue;
-      }
-      auto.seen.add(id);
+        ?? options.find((option) => samePath(option.path, byId[id]?.cwd));
+      // The filter names one workspace: a blank started somewhere else must not be written
+      // into the filtered topic. That would be a cross-workspace assignment — exactly what
+      // the drag guard refuses — and it would make the row vanish from the view it was started
+      // in. Such a blank simply stays unfiled.
+      if (!workspace || workspace.workspaceId !== filteredWorkspace.workspaceId) continue;
       auto.busy.add(id);
       store
-        .assign({ workspaceId: workspace.workspaceId, sessionIds: [id], topicId: topic.id })
+        .assign({ workspaceId: workspace.workspaceId, sessionIds: [id], topicId: filteredTopic.id })
         .catch(() => { /* stays in the default bucket; the row menu can still move it */ })
         .finally(() => auto.busy.delete(id));
     }
@@ -396,6 +463,7 @@ export function OverlayPanel({ actions, schedules }) {
   /** Stable handlers need stable leaves too: these read the store, never the render closure. */
   const toggleWorkspaceCollapse = (key) => store.toggleInList('collapsedWorkspaces', key);
   const toggleTopicCollapse = (key) => store.toggleInList('collapsedTopics', key);
+  const toggleReveal = (key) => store.toggleInList('revealedBuckets', key);
   const closeHint = () => setHint(null);
   /**
    * Adds/removes a whole bucket. Reading the selection from the store instead of the render
@@ -411,10 +479,24 @@ export function OverlayPanel({ actions, schedules }) {
   };
 
   /**
-   * Drag reordering, one level at a time. Workspace order and session order are UI state
-   * (prefs), topic order is data (the sidecar), so all three survive a reload — but only the
-   * topic one is shared with other windows.
+   * The ids a bucket-level "select all" may take.
+   *
+   * One derivation (`model.selectableIds`) feeds the section header, the topic menu and the
+   * workspace menu. They used to each read `section.rows`, so a bucket over the reveal limit
+   * gave 60 / 69 / 70 for the same group and a batch permanent delete could target rows the
+   * user had never seen. Anything held back is reported instead of silently selected.
    */
+  const scopeOf = (group, section) => selectableIds(section, { revealed: (prefs.revealedBuckets ?? []).includes(sectionKey(group, section)) });
+  /** Selects a bucket's visible rows, and says so when the bucket still hides some. */
+  const selectBucket = (group, section) => {
+    const scope = scopeOf(group, section);
+    setPrefs({ selectMode: true });
+    store.setSelection(scope.visible);
+    if (scope.hidden.length > 0) {
+      flash(t('topic.selectHidden', { shown: scope.visible.length, hidden: scope.hidden.length }), 'bad');
+    }
+  };
+
   const positionOf = (event) => {
     const rect = event.currentTarget.getBoundingClientRect();
     return rect.height > 0 && event.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
@@ -624,7 +706,10 @@ export function OverlayPanel({ actions, schedules }) {
     }
     for (const session of Object.values(known)) {
       if (!session || seen.has(session.id)) continue;
-      if (session.cwd !== option?.path) continue;
+      // Same rule the tree uses: a workspace record can lag the session list, and the two
+      // spellings of one path differ on Windows. A strict compare here would silently drop
+      // that session from the order baseline this function is the whole point of.
+      if (!samePath(session.cwd, option?.path)) continue;
       seen.add(session.id);
       ids.push(session.id);
     }
@@ -727,11 +812,17 @@ export function OverlayPanel({ actions, schedules }) {
     }
     setMenu(next);
   };
-  const selectedRows = () => tree.groups.flatMap((group) => group.sections.flatMap((section) => section.rows)).filter((row) => selectedIds.includes(row.id));
+  /**
+   * The rows the current selection can still act on.
+   *
+   * Memoized once per render and shared by every consumer (toolbar flags, the move target, the
+   * batch runner): the previous version rebuilt it 5-7 times per render with an `includes()` on
+   * an array, which was O(n·m) and, worse, let the toolbar describe a different selection than
+   * the one the batch actually sent.
+   */
   const workspaceOfIds = () => {
-    const rows = selectedRows();
     const counts = new Map();
-    for (const row of rows) counts.set(row.workspaceId, (counts.get(row.workspaceId) ?? 0) + 1);
+    for (const row of selectedRows) counts.set(row.workspaceId, (counts.get(row.workspaceId) ?? 0) + 1);
     return [...counts.entries()].sort((left, right) => right[1] - left[1])[0]?.[0] ?? prefs.workspaceFilter ?? null;
   };
 
@@ -862,7 +953,7 @@ export function OverlayPanel({ actions, schedules }) {
       <MenuItem key="filter" icon={<Icon name="filter" />} onSelect={() => { setMenu(null); pickTopic(prefs.topicFilter === section.id ? null : section.id, group.workspaceId); }}>
         {t('topic.filter')}
       </MenuItem>,
-      <MenuItem key="select" icon={<Icon name="check" />} onSelect={() => { setMenu(null); setPrefs({ selectMode: true }); store.setSelection(section.rows.filter((row) => !row.blank).map((row) => row.id)); }}>
+      <MenuItem key="select" icon={<Icon name="check" />} onSelect={() => { setMenu(null); selectBucket(group, section); }}>
         {t('topic.batchSelect')}
       </MenuItem>,
       <MenuItem
@@ -915,8 +1006,14 @@ export function OverlayPanel({ actions, schedules }) {
       icon={<Icon name="check" />}
       onSelect={() => {
         setMenu(null);
+        // Every bucket contributes only what it currently renders; `selectBucket` reports the
+        // buckets that still hide rows instead of widening the selection behind the user's back.
+        const scopes = group.sections.map((section) => scopeOf(group, section));
         setPrefs({ selectMode: true });
-        store.setSelection(group.sections.flatMap((section) => section.rows.filter((row) => !row.blank).map((row) => row.id)));
+        store.setSelection(scopes.flatMap((scope) => scope.visible));
+        const hidden = scopes.reduce((total, scope) => total + scope.hidden.length, 0);
+        const shown = scopes.reduce((total, scope) => total + scope.visible.length, 0);
+        if (hidden > 0) flash(t('topic.selectHidden', { shown, hidden }), 'bad');
       }}
     >
       {t('topic.batchSelect')}
@@ -975,6 +1072,9 @@ export function OverlayPanel({ actions, schedules }) {
       onSelect={() => {
         setMenu(null);
         store.load();
+        // The manual refresh is also where a user retries the membership repair after moving a
+        // directory back into place, so it is not limited to the once-per-page-load call.
+        store.adoptSessions().then(reportAdopt);
         try {
           actions.refreshSessions();
         } catch { /* optional */ }
@@ -1137,6 +1237,7 @@ export function OverlayPanel({ actions, schedules }) {
     onDropSessions: dropSessions,
     onRenameTopic: renameTopic,
     onDropOnRow: dropOnRow,
+    onToggleReveal: toggleReveal,
   });
 
   return (
@@ -1147,22 +1248,22 @@ export function OverlayPanel({ actions, schedules }) {
             count={selectedIds.length}
             busy={state.busy !== null || progress !== null}
             progress={progress}
-            hasArchived={selectedRows().some((row) => row.archived)}
-            hasUnarchived={selectedRows().some((row) => !row.archived)}
-            hasUngrouped={selectedRows().some((row) => row.workspaceId === UNGROUPED_WORKSPACE_ID)}
+            hasArchived={selectedRows.some((row) => row.archived)}
+            hasUnarchived={selectedRows.some((row) => !row.archived)}
+            hasUngrouped={selectedRows.some((row) => row.workspaceId === UNGROUPED_WORKSPACE_ID)}
             deleteAvailable={state.deleteAvailable}
-            onArchive={() => runBatch('archive', selectedIds)}
-            onUnarchive={() => runBatch('unarchive', selectedIds)}
+            onArchive={() => runBatch('archive', liveSelection)}
+            onUnarchive={() => runBatch('unarchive', liveSelection)}
             onMove={() => {
               const workspaceId = workspaceOfIds();
-              const movable = selectedRows().filter((row) => row.workspaceId === workspaceId);
+              const movable = selectedRows.filter((row) => row.workspaceId === workspaceId);
               if (!workspaceId || workspaceId === UNGROUPED_WORKSPACE_ID || movable.length === 0) {
                 flash(t('session.crossWorkspace'), 'bad');
                 return;
               }
               setDialog({ type: 'move', ids: movable.map((row) => row.id), workspaceId });
             }}
-            onDelete={() => setDialog({ type: 'delete', ids: selectedIds })}
+            onDelete={() => setDialog({ type: 'delete', ids: liveSelection })}
             onExit={() => setPrefs({ selectMode: false })}
           />
         ) : (
@@ -1222,6 +1323,7 @@ export function OverlayPanel({ actions, schedules }) {
             onDropSessions={treeHandlers.onDropSessions}
             onRenameTopic={treeHandlers.onRenameTopic}
             onDropOnRow={treeHandlers.onDropOnRow}
+            onToggleReveal={treeHandlers.onToggleReveal}
             reorder={reorder}
             pendingTopicId={pendingTopic}
             currentWorkspaceId={tree.currentWorkspaceId}

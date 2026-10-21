@@ -643,7 +643,7 @@ test('an unrelated session appearing later is not claimed by a pending topic', a
   assert.equal(calls.some((call) => call.url.endsWith('/assign')), false, 'a non-blank session is left alone');
 });
 
-test('a blank from the stock New Session button lands in the newest topic', async () => {
+test('a blank from the stock New Session button stays un-filed, which puts it first', async () => {
   responseOverrides[`${API}/state`] = () => {
     const payload = stateResult();
     payload.result.workspaces = {
@@ -667,11 +667,98 @@ test('a blank from the stock New Session button lands in the newest topic', asyn
   });
   await tick();
 
+  assert.equal(
+    calls.some((call) => call.url.endsWith('/assign')),
+    false,
+    'an implicit new session is not filed into a topic the user was not looking at',
+  );
+  const buckets = [...container.querySelectorAll('.dts-row--topic')].map((node) => node.querySelector('.dts-row__text')?.textContent);
+  assert.deepEqual(buckets, ['默认分组', '设计', '最新分组'], 'and the newest group stays last, where a file would have hidden the row');
+  const firstSection = container.querySelector('.dts-collapse');
+  assert.ok(firstSection.querySelector('.dts-row--session').textContent.includes('新会话'), 'the blank leads the first bucket');
+});
+
+test('a blank created while a topic filter is active joins that topic', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
+  await mount();
+
+  // "Only this topic" — the filter lives in prefs, so drive it through the topic row menu.
+  await act(async () => {
+    find('.dts-row--topic', '设计').dispatchEvent(new window.Event('contextmenu', { bubbles: true, cancelable: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')]
+      .find((node) => node.textContent.includes('只看此分组'))
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+
+  const before = sessionSource.getSnapshot();
+  const created = { id: 'ses_filtered', displayTitle: '', cwd: 'D:/work/one', updatedAt: Date.now(), blank: true, retainedBy: { mainView: 1 } };
+  await act(async () => {
+    sessionSource.set({ ...before, ids: [...before.ids, 'ses_filtered'], byId: { ...before.byId, ses_filtered: created }, current: 'ses_filtered' });
+  });
+  await tick();
+
   const assigns = calls.filter((call) => call.url.endsWith('/assign'));
-  assert.equal(assigns.length, 1, 'the blank is filed exactly once');
-  assert.deepEqual(assigns[0].body.sessionIds, ['ses_fresh']);
-  assert.equal(assigns[0].body.workspaceId, WORKSPACE);
-  assert.equal(assigns[0].body.topicId, 'tp_newest', 'the most recently created topic wins');
+  assert.equal(assigns.length, 1, 'the blank is filed into the topic being looked at');
+  assert.deepEqual(assigns[0].body.sessionIds, ['ses_filtered']);
+  assert.equal(assigns[0].body.topicId, TOPIC);
+});
+
+test('a blank created in another workspace is not written into the filtered topic', async () => {
+  // Two real workspaces: without the workspace guard the blank of `ws_two` would be filed into
+  // `ws_one`'s topic id — a cross-workspace assignment, which is what the drag guard refuses.
+  responseOverrides[`${API}/state`] = () => {
+    const payload = stateResult();
+    payload.result.workspaces = {
+      ...payload.result.workspaces,
+      ws_two: {
+        topics: [{ id: 'tp_default', name: '默认分组', emoji: '', order: -1, createdAt: 0, system: true }],
+        assignments: {},
+      },
+    };
+    return payload;
+  };
+  responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
+  const one = workspaceSource.getSnapshot();
+  workspaceSource.set({
+    ...one,
+    items: [
+      one.items[0],
+      { workspaceId: 'ws_two', path: 'D:/work/two', title: 'Two', sessionIds: ['ses_other_ws'], createdAt: 2, updatedAt: 2 },
+    ],
+  });
+  await mount();
+  await act(async () => {
+    find('.dts-row--topic', '设计').dispatchEvent(new window.Event('contextmenu', { bubbles: true, cancelable: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')]
+      .find((node) => node.textContent.includes('只看此分组'))
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+
+  const before = sessionSource.getSnapshot();
+  const foreign = { id: 'ses_other_ws2', displayTitle: '', cwd: 'D:/work/two', updatedAt: Date.now(), blank: true, retainedBy: { mainView: 1 } };
+  const two = workspaceSource.getSnapshot();
+  workspaceSource.set({
+    ...two,
+    items: two.items.map((item) => (item.workspaceId === 'ws_two' ? { ...item, sessionIds: [...item.sessionIds, 'ses_other_ws2'] } : item)),
+  });
+  await act(async () => {
+    sessionSource.set({ ...before, ids: [...before.ids, 'ses_other_ws2'], byId: { ...before.byId, ses_other_ws2: foreign }, current: 'ses_other_ws2' });
+  });
+  await tick();
+  assert.equal(
+    calls.some((call) => call.url.endsWith('/assign')),
+    false,
+    'filing it into another workspace’s topic is the assignment the drag guard refuses',
+  );
 });
 
 test('a blank restored with the first snapshot is not re-filed', async () => {
@@ -701,6 +788,36 @@ test('the panel follows the host language through <html lang>', async () => {
   assert.ok(findAnywhere('.dts-row--topic', '设计'), 'topic names are user data and keep their original text');
   assert.ok(findAnywhere('.dts-row--topic', 'Default'), 'tree labels re-localize with the panel');
   assert.equal(findAnywhere('.dts-row--topic', '默认分组'), undefined, 'and the old locale is not left behind');
+});
+
+test('the panel asks the host to repair workspace membership once per page load', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/sessions/adopt`] = () => ({ ok: true, result: { available: true, adopted: ['ses_lost', 'ses_lost2'], skipped: 3, failed: [] } });
+  await mount();
+  await tick();
+
+  const adopts = () => calls.filter((call) => call.url.endsWith('/sessions/adopt'));
+  assert.equal(adopts().length, 1, 'a single repair call on the first on-screen pass');
+  assert.equal(sessionRefreshCalls, 1, 'and the host session list is re-read so the rows move');
+  assert.ok(findAnywhere('.dts-toast')?.textContent.includes('2'), 'the user is told how many sessions moved');
+});
+
+test('a failed repair stays silent instead of turning into a banner', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/sessions/adopt`] = () => ({ ok: false, status: 500, statusText: 'boom', error: 'boom', code: 'internal' });
+  await mount();
+  await tick();
+  assert.equal(container.querySelector('.dts-banner'), null, 'a repair that cannot run is not a state change');
+  assert.equal(findAnywhere('.dts-toast'), undefined, 'and it toasts nothing');
+});
+
+test('a hidden panel does not ask for a repair', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  // Rail mode before mount: the overlay never paints, so the once-per-load effect never runs.
+  document.querySelector('.BynINW_frame').setAttribute('data-sidebar-collapsed', '');
+  await mount();
+  await tick(200);
+  assert.equal(calls.some((call) => call.url.endsWith('/sessions/adopt')), false);
 });
 
 test('the panel stays hidden when the native region cannot be measured', async () => {
@@ -1718,7 +1835,7 @@ test('dragging a workspace can drop just above the virtual 未分组 group', asy
   assert.ok(!saved.includes('__ungrouped__'), 'the virtual group never enters the workspace order');
 });
 
-test('a clipped session title scrolls while hovered', async () => {
+test('a clipped session title scrolls once to its end and rests there', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   await mount();
   const proto = window.HTMLElement.prototype;
@@ -1733,13 +1850,46 @@ test('a clipped session title scrolls while hovered', async () => {
     });
     await tick();
     const text = row.querySelector('.dts-row__text');
-    assert.ok(text.classList.contains('is-marquee'), 'a title wider than its box scrolls');
-    assert.equal(row.querySelector('.dts-row__scroll').style.getPropertyValue('--dts-marquee-shift'), '-120px');
+    const scroll = row.querySelector('.dts-row__scroll');
+    assert.ok(text.classList.contains('is-marquee'), 'a title wider than its box reveals its tail');
+    // The reveal crawls at the native 0.03 px/ms; wait long enough for the 120px range to be
+    // exhausted, then assert it *rests* at the far edge instead of bouncing back.
+    await tick(4600);
+    assert.equal(scroll.style.transform, 'translateX(-120px)', 'the reveal stops at the far edge');
+    assert.equal(scroll.dataset.revealed, '', 'and marks itself as fully revealed');
+    const settled = scroll.style.transform;
+    await tick(300);
+    assert.equal(scroll.style.transform, settled, 'it does not scroll back and forth');
     await act(async () => {
       row.dispatchEvent(new window.MouseEvent('mouseout', { bubbles: true, view: window }));
     });
     await tick();
     assert.equal(row.querySelector('.dts-row__text').classList.contains('is-marquee'), false, 'and stops on leave');
+    assert.equal(scroll.style.transform, '', 'leaving returns it to the start in one step');
+  } finally {
+    if (scrollWidth) Object.defineProperty(proto, 'scrollWidth', scrollWidth);
+    else delete proto.scrollWidth;
+    if (clientWidth) Object.defineProperty(proto, 'clientWidth', clientWidth);
+    else delete proto.clientWidth;
+  }
+});
+
+test('a title clipped by less than the dead zone does not move', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const proto = window.HTMLElement.prototype;
+  const scrollWidth = Object.getOwnPropertyDescriptor(proto, 'scrollWidth');
+  const clientWidth = Object.getOwnPropertyDescriptor(proto, 'clientWidth');
+  // 4px of overflow: below the native 8px threshold, where a reveal reads as jitter.
+  Object.defineProperty(proto, 'scrollWidth', { configurable: true, get: () => 124 });
+  Object.defineProperty(proto, 'clientWidth', { configurable: true, get: () => 120 });
+  try {
+    const row = find('.dts-row--session', '会话 1');
+    await act(async () => {
+      row.dispatchEvent(new window.MouseEvent('mouseover', { bubbles: true, view: window }));
+    });
+    await tick();
+    assert.equal(row.querySelector('.dts-row__text').classList.contains('is-marquee'), false);
   } finally {
     if (scrollWidth) Object.defineProperty(proto, 'scrollWidth', scrollWidth);
     else delete proto.scrollWidth;

@@ -61,6 +61,7 @@ export const api = {
   reorderTopics: (payload) => request(`${API}/topics/reorder`, { method: 'POST', body: payload }),
   deleteTopic: (payload) => request(`${API}/topics/delete`, { method: 'POST', body: payload }),
   assign: (payload) => request(`${API}/assign`, { method: 'POST', body: payload }),
+  adoptSessions: () => request(`${API}/sessions/adopt`, { method: 'POST', body: {} }),
   deletePreview: (sessionIds) => request(`${API}/delete/preview`, { method: 'POST', body: { sessionIds } }),
   deleteExecute: (payload) => request(`${API}/delete/execute`, { method: 'POST', body: payload }),
 };

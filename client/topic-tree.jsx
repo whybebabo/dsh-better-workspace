@@ -10,10 +10,15 @@ import * as React from 'react';
 import { cx, Icon, IconButton, Checkbox, IconCaret, IconFolderOpen, IconFolderClose, StateMark, TopicMark } from './widgets.jsx';
 import { SessionRow } from './session-row.jsx';
 import { beginDrag, currentDrag, endDrag, evaluateDrop, readDragPayload, writeDragPayload } from './dnd.js';
-import { pendingStatusLabel } from './model.js';
+import { pendingStatusLabel, REVEAL_LIMIT, selectableIds } from './model.js';
 import { t } from './i18n.js';
 
-export const REVEAL_LIMIT = 60;
+export { REVEAL_LIMIT };
+
+/** The key a bucket's reveal state is filed under (`collapse` uses the same composite key). */
+export function sectionKey(group, section) {
+  return section.kind === 'archived' ? `${group.workspaceId}:archived` : `${group.workspaceId}:${section.id}`;
+}
 
 function sectionLabel(section) {
   if (section.kind === 'archived') return t('topic.archived');
@@ -50,7 +55,7 @@ function targetOf(section, group) {
   return { workspaceId: group.workspaceId, topicId: section.kind === 'topic' ? section.id : null };
 }
 
-function GroupHeader({ group, selectMode, selectionCount, groupIds, allSelected, onToggleGroup, onToggleCollapse, onMenu, onNewSession, isActiveWorkspace, reorder }) {
+function GroupHeader({ group, selectMode, selectionCount, groupIds, groupHidden = 0, allSelected, onToggleGroup, onToggleCollapse, onMenu, onNewSession, isActiveWorkspace, reorder }) {
   const hint = reorder?.hint;
   const virtual = Boolean(group.virtual);
   const statusLabel = statusText(group.status, group.statusKind);
@@ -102,7 +107,7 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, allSelected,
               indeterminate={selectionCount > 0 && !allSelected}
               disabled={groupIds.length === 0}
               onChange={onToggleGroup}
-              label={`${group.title} 全选`}
+              label={groupHidden > 0 ? `${group.title} 全选(仅已显示的 ${groupIds.length} 条,另有 ${groupHidden} 条未展开)` : `${group.title} 全选`}
             />
           </span>
         ) : (
@@ -145,13 +150,14 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, allSelected,
   );
 }
 
-function SectionHeader({ section, group, selectMode, selectedIds, pending, onToggleCollapse, onToggleSection, onMenu, onFilter, onDropSessions, onRename, reorder, selectableIds }) {
-  // Only rows the user can actually see may be selected by the header checkbox. Using the
-  // full `section.rows` here meant "select all" on an over-REVEAL_LIMIT group silently
-  // grabbed rows that were never rendered — and a batch delete then targeted them.
-  const ids = selectableIds ?? section.rows.filter((row) => !row.blank).map((row) => row.id);
+function SectionHeader({ section, group, selectMode, selectedIds, pending, onToggleCollapse, onToggleSection, onMenu, onFilter, onDropSessions, onRename, reorder, selectableIds = [], hidden = 0 }) {
+  // `selectableIds` is the section's visible scope (model.selectableIds — the same derivation
+  // every "select all" entry point uses). A fallback to `section.rows` here is exactly the bug:
+  // it meant "select all" on an over-REVEAL_LIMIT group silently grabbed rows that were never
+  // rendered, and a batch delete then targeted them. An empty default keeps a mis-wired call
+  // site harmless instead of dangerous.
+  const ids = selectableIds;
   const selectedCount = ids.filter((id) => selectedIds.has(id)).length;
-  const hidden = Math.max(0, section.rows.filter((row) => !row.blank).length - ids.length);
   const [dropState, setDropState] = React.useState('idle');
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState(section.name ?? '');
@@ -338,8 +344,7 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
   );
 }
 
-const Section = React.memo(function Section({ section, group, schedules, selectMode, selectedIds, query, pendingTopicId, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleWorkspaceCollapse, onToggleTopicCollapse, onSelectMany, onFilter, onDropSessions, onRename, onDropOnRow, reorder }) {
-  const [revealed, setRevealed] = React.useState(false);
+const Section = React.memo(function Section({ section, group, schedules, selectMode, selectedIds, query, pendingTopicId, revealed, onToggleReveal, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleWorkspaceCollapse, onToggleTopicCollapse, onSelectMany, onFilter, onDropSessions, onRename, onDropOnRow, reorder }) {
   // Selecting is about existing records; hide the provisional New Session placeholder while
   // the batch toolbar is active instead of offering a checkbox that cannot do anything.
   const rows = selectMode ? section.rows.filter((row) => !row.blank) : section.rows;
@@ -348,17 +353,14 @@ const Section = React.memo(function Section({ section, group, schedules, selectM
   // The row identity `collapse` / `select-many` label is a function of the section, so it is
   // derived here rather than passed down as a fresh closure from the tree: a new callback
   // prop on every render is exactly what kept this component's memo from ever matching.
-  const collapseKey = section.kind === 'topic'
-    ? `${group.workspaceId}:${section.id}`
-    : `${group.workspaceId}:archived`;
+  const collapseKey = sectionKey(group, section);
   const onToggleCollapse = React.useCallback(() => {
     if (section.kind === 'topic') onToggleTopicCollapse(collapseKey);
     else onToggleWorkspaceCollapse(collapseKey);
   }, [section.kind, collapseKey, onToggleTopicCollapse, onToggleWorkspaceCollapse]);
-  const selectableIds = React.useMemo(
-    () => visible.filter((row) => !row.blank).map((row) => row.id),
-    [visible],
-  );
+  // The same derivation the panel's menus and toolbar use (model.selectableIds), so the
+  // header checkbox can never select a different set than "select all" in the ⋯ menu.
+  const scope = React.useMemo(() => selectableIds(section, { revealed }), [section, revealed]);
   const onToggleSection = React.useCallback(
     (ids, deselect) => onSelectMany(ids, !deselect),
     [onSelectMany],
@@ -394,7 +396,7 @@ const Section = React.memo(function Section({ section, group, schedules, selectM
         />
       ))}
       {overflow ? (
-        <button type="button" className="dts-reveal" onClick={() => setRevealed((value) => !value)}>
+        <button type="button" className="dts-reveal" onClick={() => onToggleReveal?.(collapseKey)}>
           {revealed ? t('action.collapse') : t('action.showAll', { n: section.rows.length })}
         </button>
       ) : null}
@@ -412,7 +414,8 @@ const Section = React.memo(function Section({ section, group, schedules, selectM
         group={group}
         selectMode={selectMode}
         selectedIds={selectedIds}
-        selectableIds={selectableIds}
+        selectableIds={scope.visible}
+        hidden={scope.hidden.length}
         pending={section.kind === 'topic' && pendingTopicId === section.id}
         onToggleCollapse={onToggleCollapse}
         onToggleSection={onToggleSection}
@@ -448,12 +451,22 @@ export function TopicTree({
   onDropSessions,
   onRenameTopic,
   onDropOnRow,
+  onToggleReveal,
   reorder,
   pendingTopicId,
   currentWorkspaceId,
 }) {
   const selectedIds = React.useMemo(() => new Set(selection), [selection]);
   const selectMode = Boolean(prefs.selectMode);
+  /**
+   * Buckets the user expanded past `REVEAL_LIMIT`.
+   *
+   * Reveal lives in preferences rather than component state because selection depends on it:
+   * the grouping menus in the panel must derive the same selectable set the tree rendered, and
+   * a set stored inside `Section` was invisible to them (that is how the three entry points
+   * came to disagree). Keyed by `sectionKey`, the same composite key collapse uses.
+   */
+  const revealedBuckets = React.useMemo(() => new Set(prefs.revealedBuckets ?? []), [prefs.revealedBuckets]);
   /** During a reorder drag, everything at the same level except the dragged row collapses. */
   const focus = reorder?.focus ?? null;
   const lastRealWorkspace = [...tree.groups].reverse().find((group) => !group.virtual) ?? null;
@@ -482,7 +495,11 @@ export function TopicTree({
     >
       {tree.truncated ? <div className="dts-note">{t('search.limit', { n: tree.matched })}</div> : null}
       {tree.groups.map((group) => {
-        const groupIds = group.sections.flatMap((section) => section.rows.filter((row) => !row.blank).map((row) => row.id));
+        // The same scope the section headers and the panel menus use: a workspace-level
+        // "select all" can no longer reach rows the tree never mounted.
+        const groupScope = group.sections.map((section) => selectableIds(section, { revealed: revealedBuckets.has(sectionKey(group, section)) }));
+        const groupIds = groupScope.flatMap((scope) => scope.visible);
+        const groupHidden = groupScope.reduce((total, scope) => total + scope.hidden.length, 0);
         const groupSelected = groupIds.filter((id) => selectedIds.has(id)).length;
         const groupCollapsed = focus?.level === 'workspace' && group.workspaceId !== focus.id ? true : group.collapsed;
         const shownGroup = groupCollapsed === group.collapsed ? group : { ...group, collapsed: groupCollapsed };
@@ -506,6 +523,7 @@ export function TopicTree({
               selectMode={selectMode}
               selectionCount={groupSelected}
               groupIds={groupIds}
+              groupHidden={groupHidden}
               allSelected={groupIds.length > 0 && groupSelected === groupIds.length}
               onToggleGroup={() => {
                 if (groupSelected === groupIds.length) onSelectMany(groupIds, false);
@@ -533,6 +551,8 @@ export function TopicTree({
                         schedules={schedules}
                         selectMode={selectMode}
                         selectedIds={selectedIds}
+                        revealed={revealedBuckets.has(sectionKey(group, section))}
+                        onToggleReveal={onToggleReveal}
                         query={tree.search}
                         pendingTopicId={pendingTopicId}
                         onOpenSession={onOpenSession}

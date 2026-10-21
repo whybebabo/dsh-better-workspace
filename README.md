@@ -60,10 +60,10 @@ dsh plugin --profile desktop add @whybebabo/dsh-better-workspace
 不经过 npm，直接从仓库安装某个发布版本：
 
 ```bash
-dsh plugin --profile web add github:whybebabo/dsh-better-workspace#v0.1.1
+dsh plugin --profile web add github:whybebabo/dsh-better-workspace#v0.1.2
 ```
 
-把 `#v0.1.1` 换成你要的 tag。这条路径同样需要 Git 与 pnpm，也不需要克隆仓库。
+把 `#v0.1.2` 换成你要的 tag。这条路径同样需要 Git 与 pnpm，也不需要克隆仓库。
 
 ### 从源码安装
 
@@ -157,9 +157,23 @@ Invoke-WebRequest 'http://127.0.0.1:3080/dsh-better-workspace/api/state' | Selec
 
 - **双击**重命名（与桌面端一致）；
 - **悬停**出现原版同款悬浮卡：完整标题、相对时间、空闲/进行中/待回答状态，已归档则显示归档标记；
+- **悬停被截断的标题**：与原生一致，标题以约 30 px/s 匀速滚到末尾后**停在末尾**（不回弹、不来回摆）；移开鼠标立刻回到开头。溢出不足 8px 时不滚（否则看起来像抖动），开启「减少动态效果」时直接跳到末尾；
 - **行尾 hover** 出现 `⋯ / 归档 / 置顶`，悬停时行内时间让位；
 - **拖拽**：拖到别的工作区会拒绝（护栏），拖到别的分组则直接归入；
 - **置顶**会真正上浮到所属分组顶部（按宿主置顶顺序，最近置顶在前）。
+
+### 新建会话落在哪里
+
+- 标题栏 ＋ 的「新会话」/工作区行的 ＋ /rail 上的「新建会话」：会话**不被写入任何分组归属**，因此留在系统默认分组里，并按原生顺序排在该桶最前面——与官方列表一致；
+- 分组菜单的「在此分组下新建会话」、＋→「新会话」里显式选中的分组：先建会话，再把它归入该分组；
+- 正在「只看此分组」时新建：归入当前筛选的那个分组（此时它就是你正在看的地方）；
+- 早先版本会把隐式新建的会话塞进「最近创建的分组」；分组按创建时间升序渲染，那个分组通常排在最后，于是新会话直接掉到了工作区最底部。该行为已移除。
+
+> 默认分组本身也能被拖到别的位置（与原生一致：它只是「不能改名、不能删除」，排序不受限）。把它拖到下面时，不归组的会话会跟着它排在那个位置——这是你自己排的序，不是插件又把新会话送到底部；拖回顶部即可恢复。
+
+### 手动排序与新建会话
+
+拖动会话产生的顺序只对**它点名过的 id** 生效：这些 id 在各自原有的槽位上互相置换，未出现在手动顺序里的会话（例如拖拽之后才新建的那个）保持宿主给的位置，不会被降级到末尾。这样「先手动排一次，再新建会话」不会把新会话挤到列表底部。
 
 ### 批量操作
 
@@ -168,6 +182,8 @@ Invoke-WebRequest 'http://127.0.0.1:3080/dsh-better-workspace/api/state' | Selec
 - 选择混入**已归档**条目时，归档与移动置灰；混入**未归档**条目时取消归档置灰；混入**未分组**会话时移动置灰；
 - 工具栏下方直接说明置灰原因，悬停也有提示；
 - 暂存中的「新会话」占位行不参与批量选择；
+- **「全选」只包含当前显示出来的行**：分组头复选框、分组 ⋯ 菜单、工作区 ⋯ 菜单走同一个派生（`selectableIds`），超过「显示全部 60 条」的分组会提示「已选中 N 条；另有 M 条未显示」，展开后再选即可——不会悄悄把没渲染过的会话带进批量删除；
+- 另一窗口删掉的会话会从批量目标里剔除，不会再让整批停在「失败：no such session」；
 - 退出选择模式自动清空选择。
 
 `/delete/*` 之外的操作逐条执行，失败可重试，逐条返回结果。
@@ -201,6 +217,16 @@ Invoke-WebRequest 'http://127.0.0.1:3080/dsh-better-workspace/api/state' | Selec
 
 **主题规则**：一个会话最多属于一个分组；分组按工作区隔离；删除分组只清除归属；每个工作区（包括尚未写入 sidecar 的新工作区）都有一个虚拟补齐的系统默认分组；归档/取消归档不改变归属；删除会话时同步清理其归属记录。虚拟「未分组」只承接没有工作区的**未归档**会话；已归档会话只出现在所属工作区的「已归档」桶里。
 
+### 工作区归属自愈
+
+会话属于哪个工作区由宿主决定：artifact header 的 `cwd` 规范化后等于某个工作区路径，就应被该工作区的 `sessionIds` 记账。宿主只在自己的 `session.create` 路径上做这件事，以下情形会留下「cwd 对得上、但没人记账」的会话：
+
+- 工作区被删除后又重建（`sessionIds` 随旧记录一起清掉）；
+- header 写完、`attachSession` 之前宿主崩溃或窗口被关；
+- 会话经由其它路径恢复（例如沿用了旧的 blank 记录）。
+
+原生列表把这类会话当作「没有工作区承接」，显示在末尾的「未分组」里。这不丢数据，但看起来就像丢了——尤其卸载插件后仍停在未分组。插件在面板首次上屏时调用一次 `/sessions/adopt`，只用宿主的官方 `workspace.attachSession(id)` 把**这些且仅这些**会话归位（该命令会重新校验 `cwd`、拒绝不匹配、并把 id 前插，所以归位后正好落在工作区最前面，和新建会话一样）。子智能体、已归档会话、已有归属的会话、`cwd` 无法解析的会话一律不碰；被宿主拒绝的逐条记入 `failed`，不强行写。面板会提示「已把 N 个会话归回它们的工作区」。
+
 ## 宿主路由
 
 前缀 `/dsh-better-workspace/api`，同时注册到 `webServer`（浏览器）与 `connection.fetch`（Desktop 无端口 carrier，客户端走 `/api/...`）。仅接受本机回环 + 同源请求。
@@ -213,6 +239,7 @@ Invoke-WebRequest 'http://127.0.0.1:3080/dsh-better-workspace/api/state' | Selec
 | `POST` | `/topics/delete` | 删除分组（会话回到默认分组） |
 | `POST` | `/topics/reorder` | 重排分组顺序 |
 | `POST` | `/assign` | 把会话归入分组 |
+| `POST` | `/sessions/adopt` | 把「cwd 属于某工作区、宿主却没记账」的会话归回该工作区（幂等，可反复调用） |
 | `POST` | `/delete/preview` | 逐条给出删除判定 |
 | `POST` | `/delete/execute` | 执行删除 |
 
@@ -251,15 +278,19 @@ DSH 不提供删除会话的宿主命令，插件自行实现，规则是"宁可
 ```bash
 npm install
 npm run build     # esbuild -> lib/client.js（window.__ModuleLoader__.load 壳，外部化 react/react-dom/宿主 primitives）
-npm run check     # node --check 校验 Node 端三个文件
-npm test          # 155 项
+npm run check     # 真正加载 lib/*.js 的模块图并核对产物注册 id（不是 node --check）
+npm test          # 206 项
 ```
 
 `client/` 是源码，`lib/client.js` 是产物（已随包发布，勿手改）。测试里的 `react`/`react-dom`/`jsdom` 只是**开发依赖**：产物运行时 `require('react')` 用的是宿主已加载的实例（与 DSH 0.2.1 同为 React 18.3.1），不会打包第二份 React。
 
-`test/` 覆盖：sidecar 的锁/原子写/revision/损坏恢复、树派生与状态汇总、批量归档分类、删除安全边界、拖拽与改名、面板在 jsdom 下的集成渲染（直接加载**构建产物**，伪造布局与 `fetch`）、定时任务频率与悬浮段、中英键集对称。
+`test/` 覆盖：sidecar 的锁/原子写/revision/损坏恢复、**跨进程**并发写（fork 两个真实 node 进程）、树派生与状态汇总、选择性范围（`selectableIds`，三个"全选"入口共用同一派生）、批量归档分类、删除安全边界（含 preview 与 execute 之间换目录的确定性竞态、隔离区创建失败）、拖拽与改名、面板在 jsdom 下的集成渲染（直接加载**构建产物**，伪造布局与 `fetch`）、定时任务频率与悬浮段、中英键集对称。
 
-本轮的每一条安全修复都做过**变异自检**：把实现改回旧行为，对应测试必须变红。改完安全相关的代码后建议照做一遍——只加 happy-path 用例而不做这一步，很容易得到"看起来被守护、实际删掉也全绿"的测试（本轮审查就发现了 6 处这样的断言）。
+本轮的每一条安全修复都做过**变异自检**：把实现改回旧行为，对应测试必须变红。改完安全相关的代码后建议照做一遍——只加 happy-path 用例而不做这一步，很容易得到"看起来被守护、实际删掉也全绿"的测试（第二轮审查 56 次变异里仍有 21 次存活，见 `review/round2/`）。
+
+本轮的 6 条行为修复各自都有守护测试，并且都用变异法复核过：`orderBy` 回退成"未列出的一律后置"、`samePath` 回退成严格相等、隐式新会话回退成归入最新分组、跨工作区护栏去掉、marquee 回退成来回摆、以及死区阈值归零——每一条都会让对应测试变红。
+
+> 变异脚本本身也要验证：第一版因为工作区是 CRLF（`\n}\n` 锚点匹配不到）与注入点落在 `continue` 之后，曾报出两个**假绿**。现在脚本会先确认锚点命中、变异后仍能构建、并且目标测试确实**跑过并失败**，否则记为"检查无效"而不是通过。改代码后若要复跑这类自检，请照这三条来核对，不要只看脚本打印的 ok。
 
 ### 目录结构
 
@@ -282,10 +313,10 @@ cordis.patch.yml  profile 插桩（enabled / enableDelete 开关）
 npm run build          # 先构建，包里的 lib/client.js 是产物
 npm pack --dry-run     # 确认文件清单
 npm publish            # 发布到 npm
-git tag v0.1.1 && git push --tags
+git tag v0.1.2 && git push --tags
 ```
 
-打 tag 之后 `dsh plugin add github:whybebabo/dsh-better-workspace#v0.1.1` 这条路径才可用；两者互不影响，同版本号建议一起发布。
+打 tag 之后 `dsh plugin add github:whybebabo/dsh-better-workspace#v0.1.2` 这条路径才可用；两者互不影响，同版本号建议一起发布。
 
 ## 已知边界
 
@@ -298,6 +329,8 @@ git tag v0.1.1 && git push --tags
 - 侧栏的内联改名、拖拽排序等交互依赖浏览器原生 DOM/junction 行为，jsdom 只能覆盖结构而不覆盖视觉（"状态让位"是纯 CSS，删掉规则测试也不会红，靠人眼验收）；
 - 定时任务的行首时钟与悬浮段由插件读取 `remote.schedule.catalog()` 后自绘：宿主的 `sidebar.session.row.leading` / `.hover` 两个 slot 只能由声明者（原生列表）渲染，覆盖层无法借用；`cron` 规则按宿主的原文形式 `Cron {expression}（zone）` 显示，不做人类可读的 cron 预览。注意命名空间是**独立的 cordis 服务**（`ctx.get('remote.schedule')`），不是 `remote` 的属性——后者未在 `inject` 里声明时会抛 `cannot get property "remote.schedule" without inject`，按属性读会把"服务存在"误判成"服务缺失"；解析失败时插件会 `console.warn` 一次，便于定位。catalog 字段若在后续版本改名，这两处不显示，不影响面板其它部分；
 - npm 上装的是打包产物；要跟 `main` 分支或改代码，用上面的源码安装并 `npm run build`；
+- 工作区归属自愈用的是宿主的 `workspace.attachSession`，它按 `realpath` 校验 `cwd`：会话目录已被删掉或挪走时归位会被拒绝（面板不会强行写），这类会话继续留在未分组，可手动移入分组但不会改变工作区归属；`workspaceRegistry` / `sessionPersistence` 缺失时该路由返回 `available: false`，面板静默跳过；
+- 「新建会话留在默认分组」依赖宿主把新会话标记为 `blank` 且把它放进 `workspace.sessionIds`；不满足时它仍会被正常显示，只是不保证首个桶的位置；
 
 ## 许可证
 

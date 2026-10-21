@@ -6,6 +6,7 @@
 import * as React from 'react';
 import { cx, Checkbox, Icon, IconButton, StateMark } from './widgets.jsx';
 import { formatRelative } from './time.js';
+import { marqueePlan } from './marquee.js';
 import { pendingStatusLabel } from './model.js';
 import { endDrag, currentDrag, sessionReorderVerdict } from './dnd.js';
 import { t } from './i18n.js';
@@ -25,16 +26,11 @@ function highlight(title, query) {
 }
 
 /**
- * Marquee plan for a title wider than its box: the shift is the overflow, and the duration
- * keeps a constant reading speed so short titles do not crawl and long ones do not sprint.
+ * One row. The title reveal is driven by `requestAnimationFrame` rather than a CSS keyframe
+ * animation: the native list crawls to the far edge and *rests* there, while the old
+ * `animation: … infinite alternate` bounced the title back and forth for as long as the
+ * pointer stayed on the row. The math lives in `marquee.js`.
  */
-export function marqueePlan(element, { speed = 42 } = {}) {
-  if (!element) return null;
-  const overflow = element.scrollWidth - element.clientWidth;
-  if (overflow <= 1) return null;
-  return { shift: -overflow, duration: Math.min(12, Math.max(2.4, overflow / speed)) };
-}
-
 export const SessionRow = React.memo(function SessionRow({
   row,
   schedule = null,
@@ -56,33 +52,92 @@ export const SessionRow = React.memo(function SessionRow({
 }) {
   const hintTimer = React.useRef(null);
   const textRef = React.useRef(null);
-  const [marquee, setMarquee] = React.useState(null);
-  React.useEffect(() => () => clearTimeout(hintTimer.current), []);
+  const scrollRef = React.useRef(null);
+  const frameRef = React.useRef(0);
+  const [marquee, setMarquee] = React.useState(false);
+  React.useEffect(() => () => {
+    clearTimeout(hintTimer.current);
+    cancelAnimationFrame(frameRef.current);
+  }, []);
+  /** Cancels the reveal and puts the title back at its start in one step. */
+  const resetReveal = () => {
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    scroll.style.transform = '';
+    delete scroll.dataset.revealed;
+  };
+  /**
+   * Native behaviour: hovering a clipped title crawls it to its far edge and stops there.
+   * `prefers-reduced-motion` jumps straight to the far edge (the title is still readable);
+   * nothing moves for a title that fits, or is clipped by less than the dead zone.
+   */
   const startHint = (element) => {
     clearTimeout(hintTimer.current);
     // While selecting, the row is a checkbox target; the hover card and marquee would only
     // compete with the selection state.
     if (selectMode) {
-      setMarquee(null);
+      // Entering selection mode replaces the title with a checkbox target, so an in-flight
+      // reveal must be cancelled and the offset cleared — otherwise the frame loop keeps
+      // writing transforms under a row the user can no longer read.
+      cancelAnimationFrame(frameRef.current);
+      frameRef.current = 0;
+      resetReveal();
+      setMarquee(false);
       return;
     }
-    // Native behaviour: hovering a clipped title scrolls it instead of hiding the tail.
-    setMarquee(marqueePlan(textRef.current));
+    const node = textRef.current;
+    const scroll = scrollRef.current;
+    const plan = marqueePlan(node);
+    cancelAnimationFrame(frameRef.current);
+    if (!plan || !scroll) {
+      setMarquee(false);
+    } else {
+      const reduce = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+        && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const place = (offset) => {
+        scroll.style.transform = offset === 0 ? '' : `translateX(${-offset}px)`;
+        // `dataset.x = undefined` would write the literal string "undefined"; delete instead.
+        if (offset >= plan.range) scroll.dataset.revealed = '';
+        else delete scroll.dataset.revealed;
+      };
+      setMarquee(true);
+      if (reduce) {
+        place(plan.range);
+      } else {
+        place(0);
+        // Accumulate deltas from the frame timestamps themselves (like the native marquee)
+        // instead of subtracting a `performance.now()` baseline: the rAF clock and the
+        // performance timeline only share an origin inside a real page.
+        let previous = null;
+        let offset = 0;
+        const step = (now) => {
+          if (previous !== null && now > previous) offset += (now - previous) * plan.pxPerMs;
+          previous = now;
+          const drawn = Math.min(plan.range, Math.round(offset));
+          place(drawn);
+          // Stop at the far edge: the title rests under the pointer instead of scrolling back.
+          if (drawn < plan.range) frameRef.current = requestAnimationFrame(step);
+        };
+        frameRef.current = requestAnimationFrame(step);
+      }
+    }
     if (!onHint) return;
     const rect = element.getBoundingClientRect();
     hintTimer.current = setTimeout(() => onHint({ row, rect }), 480);
   };
   const endHint = () => {
     clearTimeout(hintTimer.current);
-    setMarquee(null);
+    cancelAnimationFrame(frameRef.current);
+    frameRef.current = 0;
+    // Leaving returns the title to the start in one step: an animated way back would meet the
+    // resting ellipsis with text still travelling.
+    resetReveal();
+    setMarquee(false);
     if (!selectMode) onHintEnd?.();
   };
   const hint = reorder?.hint;
   const dropBefore = hint?.level === 'session' && hint.id === row.id && hint.position === 'before';
   const dropAfter = hint?.level === 'session' && hint.id === row.id && hint.position === 'after';
-  const scrollStyle = marquee
-    ? { '--dts-marquee-shift': `${marquee.shift}px`, '--dts-marquee-time': `${marquee.duration}s` }
-    : undefined;
   // Native order: a pending interaction replaces the timestamp with its compact label;
   // archived and provisional rows never carry a live status marker.
   const trailing = row.pendingKind ? pendingStatusLabel(row.pendingKind, true) : null;
@@ -199,7 +254,7 @@ export const SessionRow = React.memo(function SessionRow({
 
       <span className="dts-row__title">
         <span ref={textRef} className={cx('dts-row__text', marquee && 'is-marquee')}>
-          <span className="dts-row__scroll" style={scrollStyle}>{highlight(row.title, query)}</span>
+          <span ref={scrollRef} className="dts-row__scroll">{highlight(row.title, query)}</span>
         </span>
       </span>
 

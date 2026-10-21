@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTree, buildWorkspaceOptions, mainSessionId, basename, moveWithin, newestTopic, DEFAULT_TOPIC_ID, UNGROUPED_WORKSPACE_ID } from '../client/model.js';
+import { buildTree, buildWorkspaceOptions, mainSessionId, basename, samePath, moveWithin, newestTopic, DEFAULT_TOPIC_ID, UNGROUPED_WORKSPACE_ID } from '../client/model.js';
 
 const WS_A = 'ws_a';
 const WS_B = 'ws_b';
@@ -345,16 +345,42 @@ test('moveWithin places the dragged id next to its target', () => {
   assert.deepEqual(moveWithin(['a', 'b'], 'a', 'zz', 'after'), ['a', 'b'], 'an unknown target changes nothing');
 });
 
-test('a manual order overlays the host order without dropping late entries', () => {
+test('a manual order permutes only the ids it names and leaves the rest in place', () => {
   const reordered = buildTree({ ...fixture(), prefs: { workspaceOrder: [WS_B, WS_A] }, query: '' });
   assert.deepEqual(reordered.groups.map((group) => group.workspaceId), [WS_B, WS_A]);
 
   const sessions = buildTree({ ...fixture(), prefs: { sessionOrder: { [WS_A]: ['ses_3', 'ses_2', 'ses_1'] } }, query: '' });
   assert.deepEqual(flatten(sessions.groups.find((group) => group.workspaceId === WS_A)), ['ses_3', 'ses_2', 'ses_1']);
 
-  // Ids the manual list never met keep the host order behind the ones it does know.
-  const partial = buildTree({ ...fixture(), prefs: { sessionOrder: { [WS_A]: ['ses_3'] } }, query: '' });
-  assert.deepEqual(flatten(partial.groups.find((group) => group.workspaceId === WS_A)), ['ses_3', 'ses_1', 'ses_2']);
+  // Ids the manual list never met keep the slot the host gave them instead of sinking to the
+  // end: `ses_3` is pinned (so the host leads with it in the default bucket) and the manual
+  // order does not name it, so it must stay first while `ses_2`/`ses_1` swap behind it.
+  const partial = buildTree({ ...fixture(), prefs: { sessionOrder: { [WS_A]: ['ses_2', 'ses_1'] } }, query: '' });
+  assert.deepEqual(flatten(partial.groups.find((group) => group.workspaceId === WS_A)), ['ses_3', 'ses_2', 'ses_1']);
+});
+
+test('a session created after a drag keeps its host position instead of sinking to the bottom', () => {
+  // `attachSession` prepends, so a brand-new session is first in the workspace's own order.
+  const created = { id: 'ses_new', displayTitle: '刚建的会话', cwd: 'D:/work/alpha', updatedAt: 999 };
+  const base = fixture();
+  const items = [
+    { ...base.items[0], sessionIds: ['ses_new', ...base.items[0].sessionIds] },
+    base.items[1],
+  ];
+  const list = { ...base.list, ids: ['ses_new', ...base.list.ids], byId: { ...base.list.byId, ses_new: created } };
+  // A manual order saved before `ses_new` existed.
+  const built = buildTree({
+    ...base,
+    items,
+    list,
+    // Pinning would lead the bucket anyway and hide what this test is about.
+    pinnedIds: [],
+    prefs: { sessionOrder: { [WS_A]: ['ses_2', 'ses_3', 'ses_1'] } },
+    query: '',
+  });
+  const rows = flatten(built.groups.find((group) => group.workspaceId === WS_A));
+  assert.equal(rows[0], 'ses_new', 'the unnamed new session keeps the front slot the host gave it');
+  assert.deepEqual(rows.slice(1), ['ses_2', 'ses_3', 'ses_1'], 'and the named ids still permute among themselves');
 });
 
 test('workspace options carry live and archived counts', () => {
@@ -370,6 +396,67 @@ test('workspace options carry live and archived counts', () => {
 test('an unlabeled workspace falls back to its path basename', () => {
   const options = buildWorkspaceOptions({ items: [{ workspaceId: 'ws_x', path: 'D:/work/nova', sessionIds: [] }], list: { byId: {} }, archivedIds: [] });
   assert.equal(options[0].title, 'nova');
+});
+
+test('workspace paths compare by spelling, separator and case', () => {
+  assert.equal(samePath('D:\\work\\alpha', 'D:/work/alpha'), true);
+  assert.equal(samePath('D:\\work\\alpha\\', 'D:/work/alpha'), true, 'a trailing separator is not a different directory');
+  assert.equal(samePath('d:\\WORK\\Alpha', 'D:/work/alpha'), true, 'Windows casing cannot split a workspace');
+  assert.equal(samePath('D:/work/alpha', 'D:/work/beta'), false);
+  assert.equal(samePath('', ''), false, 'two missing paths are not "the same workspace"');
+  assert.equal(samePath(undefined, 'D:/work/alpha'), false);
+});
+
+test('POSIX paths stay case-sensitive, because they name different directories', () => {
+  // Folding these would put one session under two workspaces (a real regression, reproduced
+  // before this rule existed).
+  assert.equal(samePath('/tmp/Alpha', '/tmp/alpha'), false);
+  assert.equal(samePath('/tmp/alpha/', '/tmp/alpha'), true, 'a trailing slash is still the same directory');
+  assert.equal(samePath('/tmp/a\\b', '/tmp/a/b'), false, 'a backslash is a legal filename character on POSIX');
+});
+
+test('a session in a case-only-different POSIX workspace renders exactly once', () => {
+  const items = [
+    { workspaceId: 'ws_upper', path: '/tmp/Alpha', title: 'Upper', sessionIds: [] },
+    { workspaceId: 'ws_lower', path: '/tmp/alpha', title: 'Lower', sessionIds: [] },
+  ];
+  const built = buildTree({
+    items,
+    list: { ids: ['s1'], byId: { s1: { id: 's1', displayTitle: 'case only', cwd: '/tmp/alpha', updatedAt: 1 } }, current: 's1', phase: 'ready' },
+    statuses: new Map(),
+    archivedIds: [],
+    pinnedIds: [],
+    topicsOf: () => [],
+    assignmentsOf: () => ({}),
+    prefs: {},
+    query: '',
+  });
+  const carriers = built.groups
+    .filter((group) => group.sections.some((section) => section.rows.some((row) => row.id === 's1')))
+    .map((group) => group.workspaceId);
+  assert.deepEqual(carriers, ['ws_lower'], 'only the exact-case workspace shows it');
+});
+
+test('a session whose cwd spells its workspace path differently still joins that workspace', () => {
+  const base = fixture();
+  const items = [
+    { ...base.items[0], sessionIds: ['ses_1'], path: 'D:\\work\\ALPHA' },
+    base.items[1],
+  ];
+  const list = {
+    ...base.list,
+    ids: [...base.list.ids, 'ses_spelled'],
+    byId: {
+      ...base.list.byId,
+      // The host has not accounted this one; its cwd only matches on the normalized spelling.
+      ses_spelled: { id: 'ses_spelled', displayTitle: '拼写不同的会话', cwd: 'D:/work/alpha', updatedAt: 9 },
+    },
+  };
+  const built = buildTree({ ...base, items, list, prefs: {}, query: '' });
+  const alpha = built.groups.find((group) => group.workspaceId === WS_A);
+  assert.ok(flatten(alpha).includes('ses_spelled'), 'the session is shown under its workspace');
+  const ungrouped = built.groups.find((group) => group.workspaceId === UNGROUPED_WORKSPACE_ID);
+  assert.equal(ungrouped, undefined, 'and not in the trailing 未分组 bucket');
 });
 
 test('the newest topic follows createdAt, then append order for older documents', () => {
