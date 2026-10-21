@@ -16,7 +16,7 @@
 
 ## 界面预览
 
-![dsh-better-workspace 侧边栏：工作区筛选、emoji 分组树、会话状态点与行尾操作](docs/assets/preview.png)
+![dsh-better-workspace 侧边栏：工作区筛选、emoji 分组树、会话状态点与行尾操作](https://cdn.jsdelivr.net/gh/whybebabo/dsh-better-workspace@main/docs/assets/preview.png)
 
 ## 工作方式
 
@@ -299,13 +299,13 @@ lib/              Node 端：入口、sidecar 存储、删除、会话文件解�
 client/           浏览器端源码（.js 逻辑层 + .jsx 组件层 + styles.css）
 lib/client.js     构建产物，由 client/build.mjs 生成
 test/             node --test 用例
-docs/assets/      README 截图
+docs/assets/      README 截图（不进 npm 包，README 用 raw 绝对地址引用）
 cordis.patch.yml  profile 插桩（enabled / enableDelete 开关）
 ```
 
 ### 发布
 
-包名 `@whybebabo/dsh-better-workspace`，`publishConfig.access: public`，`files` 白名单只带 `lib`、`cordis.patch.yml`、`README.md`、`LICENSE` 与 `THIRD_PARTY_NOTICES.md`（源码不入包）。
+包名 `@whybebabo/dsh-better-workspace`，`publishConfig.access: public`，`files` 白名单只带 `lib`、`cordis.patch.yml`、`README.md`、`README.en.md`、`LICENSE` 与 `THIRD_PARTY_NOTICES.md`（源码不入包；`docs/` 也不入包，所以预览图用 GitHub raw 绝对地址，否则 npmjs 页面上会是 404）。
 
 发布的 `lib/client.js` 必须以**包名**（而不是 `cordis.patch.yml` 里的短 `id`）向 `__ModuleLoader__` 注册：宿主按包名给插件建图，注册 id 对不上就会报 `loaded without registering`，整个 Web 启动失败。`client/build.mjs` 直接从 `package.json` 取这个 id，`test/client-registration.test.mjs` 守住这条约定。
 
