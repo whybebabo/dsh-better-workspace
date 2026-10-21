@@ -398,3 +398,97 @@ test('the highlighted folder follows the workspace filter, then the open session
   assert.equal(filtered.currentWorkspaceId, WS_B, 'a filter wins: the folder the user is looking at');
   assert.deepEqual(filtered.groups.map((group) => group.workspaceId), [WS_B]);
 });
+
+/**
+ * Reference stability is what makes `React.memo` on Section / SessionRow do anything at all:
+ * a fresh row object per build re-rendered every mounted row for a list publish, a status flip
+ * or a 30s tick (measured: 1500 rows ≈ 55–63 ms per trigger with zero DOM change). These
+ * assertions fail if the caching is removed or its fingerprint stops covering a field.
+ */
+test('an unchanged build returns the same row, section and group objects', () => {
+  const first = buildTree({ ...fixture(), prefs: {}, query: '', now: 1_700_000_000_000 });
+  const second = buildTree({ ...fixture(), prefs: {}, query: '', now: 1_700_000_000_000 });
+  assert.equal(second.groups.length, first.groups.length);
+  for (const [index, group] of first.groups.entries()) {
+    assert.equal(second.groups[index], group, 'the group object is reused');
+    for (const [sectionIndex, section] of group.sections.entries()) {
+      assert.equal(second.groups[index].sections[sectionIndex], section, 'the section object is reused');
+      for (const [rowIndex, row] of section.rows.entries()) {
+        assert.equal(second.groups[index].sections[sectionIndex].rows[rowIndex], row, 'the row object is reused');
+      }
+    }
+  }
+});
+
+test('a tick inside the same minute reuses rows, a new minute does not', () => {
+  const base = 1_700_000_040_000; // an exact minute boundary
+  // The shared fixture's `updatedAt` values are epoch-adjacent, so their label would read
+  // "N 年" and never vary. This case needs sessions updated seconds ago: that is the only
+  // time the label has minute precision worth skipping a tick for.
+  const byId = {
+    ses_recent_a: { id: 'ses_recent_a', displayTitle: '刚说过话', cwd: 'D:/work/alpha', updatedAt: base - 30_000 },
+    ses_recent_b: { id: 'ses_recent_b', displayTitle: '两分钟前', cwd: 'D:/work/alpha', updatedAt: base - 120_000 },
+  };
+  const items = [{ workspaceId: WS_A, path: 'D:/work/alpha', title: 'Alpha', sessionIds: Object.keys(byId), createdAt: 1, updatedAt: 10 }];
+  const input = {
+    items,
+    list: { ids: Object.keys(byId), byId, current: 'ses_recent_a', phase: 'ready' },
+    archivedIds: [],
+    pinnedIds: [],
+    topicsOf: () => [],
+    assignmentsOf: () => ({}),
+    prefs: {},
+    query: '',
+  };
+  const early = buildTree({ ...input, now: base + 1_000 });
+  const late = buildTree({ ...input, now: base + 45_000 });
+  const nextMinute = buildTree({ ...input, now: base + 65_000 });
+  const rowsOf = (built) => built.groups.flatMap((group) => group.sections.flatMap((section) => section.rows));
+  assert.deepEqual(rowsOf(late), rowsOf(early), 'same minute: identical row objects');
+  const previous = rowsOf(early);
+  const changed = rowsOf(nextMinute).filter((row, index) => row !== previous[index]);
+  assert.ok(changed.length > 0, 'a new minute produces new labels, so those rows must be rebuilt');
+  assert.notEqual(changed[0].timeLabel, previous.find((row) => row.id === changed[0].id).timeLabel);
+});
+
+test('a changed field rebuilds only the affected row', () => {
+  const input = { ...fixture(), prefs: {}, query: '', now: 1_700_000_000_000 };
+  const before = buildTree(input);
+  const byId = { ...input.list.byId, ses_2: { ...input.list.byId.ses_2, displayTitle: '改名之后' } };
+  const after = buildTree({ ...input, list: { ...input.list, byId } });
+  const rowsOf = (built) => built.groups.flatMap((group) => group.sections.flatMap((section) => section.rows));
+  const previous = rowsOf(before);
+  const next = rowsOf(after);
+  const rebuilt = next.filter((row, index) => row !== previous[index]);
+  assert.deepEqual(rebuilt.map((row) => row.id), ['ses_2'], 'only the renamed row is new');
+  assert.equal(rebuilt[0].title, '改名之后');
+});
+
+test('a status flip rebuilds the row it touches and the sections above it', () => {
+  const input = { ...fixture(), prefs: {}, query: '', now: 1_700_000_000_000 };
+  const before = buildTree(input);
+  const statuses = new Map([['ses_3', { running: true }]]);
+  const after = buildTree({ ...input, statuses });
+  const alphaBefore = before.groups.find((group) => group.workspaceId === WS_A);
+  const alphaAfter = after.groups.find((group) => group.workspaceId === WS_A);
+  assert.notEqual(alphaAfter, alphaBefore, 'the workspace aggregate changed');
+  const rowsOf = (group) => group.sections.flatMap((section) => section.rows);
+  const rebuilt = rowsOf(alphaAfter).filter((row, index) => row !== rowsOf(alphaBefore)[index]);
+  assert.deepEqual(rebuilt.map((row) => row.id), ['ses_3'], 'exactly one row is rebuilt');
+  assert.equal(rebuilt[0].running, true);
+});
+
+test('the row cache does not grow with sessions the host dropped', () => {
+  const input = { ...fixture(), prefs: {}, query: '', now: 1_700_000_000_000 };
+  buildTree(input);
+  const items = input.items.map((item) => ({ ...item, sessionIds: item.sessionIds.filter((id) => id !== 'ses_3') }));
+  const byId = { ...input.list.byId };
+  delete byId.ses_3;
+  const shrunk = buildTree({ ...input, items, list: { ...input.list, byId, ids: Object.keys(byId) } });
+  assert.equal(shrunk.groups.some((group) => group.sections.some((section) => section.rows.some((row) => row.id === 'ses_3'))), false);
+  // Build it back: the re-added row must be rebuilt rather than resurrect an evicted cache entry.
+  const restored = buildTree(input);
+  const row = restored.groups.find((group) => group.workspaceId === WS_A).sections.flatMap((section) => section.rows).find((entry) => entry.id === 'ses_3');
+  assert.ok(row, 'the row comes back');
+  assert.equal(row.id, 'ses_3');
+});

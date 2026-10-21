@@ -338,13 +338,38 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
   );
 }
 
-const Section = React.memo(function Section({ section, group, schedules, selectMode, selectedIds, now, query, pendingTopicId, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleCollapse, onToggleSection, onFilter, onDropSessions, onRename, onDropOnRow, reorder }) {
+const Section = React.memo(function Section({ section, group, schedules, selectMode, selectedIds, query, pendingTopicId, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleWorkspaceCollapse, onToggleTopicCollapse, onSelectMany, onFilter, onDropSessions, onRename, onDropOnRow, reorder }) {
   const [revealed, setRevealed] = React.useState(false);
   // Selecting is about existing records; hide the provisional New Session placeholder while
   // the batch toolbar is active instead of offering a checkbox that cannot do anything.
   const rows = selectMode ? section.rows.filter((row) => !row.blank) : section.rows;
   const overflow = rows.length > REVEAL_LIMIT;
   const visible = overflow && !revealed ? rows.slice(0, REVEAL_LIMIT) : rows;
+  // The row identity `collapse` / `select-many` label is a function of the section, so it is
+  // derived here rather than passed down as a fresh closure from the tree: a new callback
+  // prop on every render is exactly what kept this component's memo from ever matching.
+  const collapseKey = section.kind === 'topic'
+    ? `${group.workspaceId}:${section.id}`
+    : `${group.workspaceId}:archived`;
+  const onToggleCollapse = React.useCallback(() => {
+    if (section.kind === 'topic') onToggleTopicCollapse(collapseKey);
+    else onToggleWorkspaceCollapse(collapseKey);
+  }, [section.kind, collapseKey, onToggleTopicCollapse, onToggleWorkspaceCollapse]);
+  const selectableIds = React.useMemo(
+    () => visible.filter((row) => !row.blank).map((row) => row.id),
+    [visible],
+  );
+  const onToggleSection = React.useCallback(
+    (ids, deselect) => onSelectMany(ids, !deselect),
+    [onSelectMany],
+  );
+  // One stable handler for every row instead of a fresh arrow inside the map: `SessionRow`
+  // is memoized, and an inline `onDragStart` made each row's props new on every render.
+  const onRowDragStart = React.useCallback((row, event) => {
+    beginDrag({ ids: [row.id], workspaceId: row.workspaceId, fromTopicId: row.topicId });
+    writeDragPayload(event.dataTransfer, [row.id]);
+    event.dataTransfer.effectAllowed = 'move';
+  }, []);
   const body = (
     <>
       {visible.map((row) => (
@@ -352,17 +377,12 @@ const Section = React.memo(function Section({ section, group, schedules, selectM
           key={row.id}
           row={row}
           schedule={schedules?.get?.(row.id) ?? null}
-          now={now}
           query={query}
           selectMode={selectMode}
           selected={selectedIds.has(row.id)}
           onOpen={onOpenSession}
           onToggleSelect={onToggleSelection}
-          onDragStart={(row, event) => {
-            beginDrag({ ids: [row.id], workspaceId: row.workspaceId, fromTopicId: row.topicId });
-            writeDragPayload(event.dataTransfer, [row.id]);
-            event.dataTransfer.effectAllowed = 'move';
-          }}
+          onDragStart={onRowDragStart}
           onDropOnRow={onDropOnRow}
           reorder={reorder}
           onMenu={onMenu}
@@ -392,7 +412,7 @@ const Section = React.memo(function Section({ section, group, schedules, selectM
         group={group}
         selectMode={selectMode}
         selectedIds={selectedIds}
-        selectableIds={visible.filter((row) => !row.blank).map((row) => row.id)}
+        selectableIds={selectableIds}
         pending={section.kind === 'topic' && pendingTopicId === section.id}
         onToggleCollapse={onToggleCollapse}
         onToggleSection={onToggleSection}
@@ -412,7 +432,6 @@ export function TopicTree({
   prefs,
   selection,
   schedules,
-  now,
   onOpenSession,
   onMenu,
   onArchive,
@@ -478,6 +497,9 @@ export function TopicTree({
         return (
           <React.Fragment key={group.workspaceId}>
             <div className={cx('dts-group', groupCollapsed && 'is-collapsed')}>
+              {/* GroupHeader is not memoized, so its inline handlers cost one element each
+                  rather than one subtree: rebuilding them here is cheaper than threading
+                  stable callbacks through the group map. */}
               <GroupHeader
               group={shownGroup}
               isActiveWorkspace={group.workspaceId === currentWorkspaceId}
@@ -511,7 +533,6 @@ export function TopicTree({
                         schedules={schedules}
                         selectMode={selectMode}
                         selectedIds={selectedIds}
-                        now={now}
                         query={tree.search}
                         pendingTopicId={pendingTopicId}
                         onOpenSession={onOpenSession}
@@ -522,12 +543,9 @@ export function TopicTree({
                         onRenameSession={onRenameSession}
                         onHint={onHint}
                         onHintEnd={onHintEnd}
-                        onToggleCollapse={() =>
-                          section.kind === 'topic'
-                            ? onToggleTopicCollapse(`${group.workspaceId}:${section.id}`)
-                            : onToggleWorkspaceCollapse(`${group.workspaceId}:archived`)
-                        }
-                        onToggleSection={(ids, deselect) => onSelectMany(ids, !deselect)}
+                        onToggleWorkspaceCollapse={onToggleWorkspaceCollapse}
+                        onToggleTopicCollapse={onToggleTopicCollapse}
+                        onSelectMany={onSelectMany}
                         onFilter={onFilterTopic}
                         onDropSessions={onDropSessions}
                         onRename={onRenameTopic}

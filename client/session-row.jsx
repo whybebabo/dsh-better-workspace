@@ -205,7 +205,9 @@ export const SessionRow = React.memo(function SessionRow({
 
       {row.blank ? null : (
         <span className="dts-row__aside">
-          <span className="dts-row__time">{trailing ?? formatRelative(row.updatedAt, now)}</span>
+          {/* The label is precomputed into the row (see `makeRow`), so a tick that lands in the
+              same minute leaves this prop identical and the memo can skip the row entirely. */}
+          <span className="dts-row__time">{trailing ?? row.timeLabel ?? formatRelative(row.updatedAt, now)}</span>
           {row.pinned && !row.archived ? (
             <span className="dts-row__pin" role="img" aria-label={t('session.pinned')} title={t('session.pinned')}>
               <Icon name="pinFilled" />

@@ -81,6 +81,8 @@ export function createScheduleStore(ctx) {
   const listeners = new Set();
   let started = false;
   let disposed = false;
+  /** Off screen: subscriptions released, snapshot retained. See `pause()`/`resume()`. */
+  let paused = false;
   let reading = null;
   let dirty = false;
   let offChanged = null;
@@ -128,11 +130,11 @@ export function createScheduleStore(ctx) {
    * bounded retry is enough — a composition without it never answers and must stay silent.
    */
   const retryLater = () => {
-    if (disposed || retryTimer || attempts >= 5) return;
+    if (disposed || paused || retryTimer || attempts >= 5) return;
     attempts += 1;
     retryTimer = setTimeout(() => {
       retryTimer = null;
-      if (disposed) return;
+      if (disposed || paused) return;
       if (!scheduleFace()) {
         retryLater();
         return;
@@ -195,6 +197,22 @@ export function createScheduleStore(ctx) {
     }
   };
 
+  /** Detaches both invalidations without forgetting that the store was ever started. */
+  const detach = () => {
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+    // A retry armed while paused must not resurrect the subscriptions behind it.
+    attempts = 0;
+    try {
+      offChanged?.();
+    } catch { /* already torn down */ }
+    try {
+      offReset?.();
+    } catch { /* already torn down */ }
+    offChanged = null;
+    offReset = null;
+  };
+
   return {
     getSnapshot: () => snapshot,
     subscribe(listener) {
@@ -203,7 +221,32 @@ export function createScheduleStore(ctx) {
     },
     /** Idempotent; safe to call from the panel's mount effect. */
     start() {
-      if (started || disposed) return undefined;
+      if (started || disposed || paused) return undefined;
+      started = true;
+      if (!scheduleFace()) {
+        retryLater();
+        return undefined;
+      }
+      attach();
+      return refresh();
+    },
+    /**
+     * Suspends the catalog while the panel is off screen: the two invalidations are released
+     * and no retry is armed, so a hidden overlay costs nothing. The last snapshot is kept, so
+     * resuming paints the rows the user last saw instead of blanking them for one roundtrip.
+     *
+     * `paused` is checked by `start()` itself, not just by the caller: otherwise an effect
+     * that re-runs while hidden would restart the whole thing.
+     */
+    pause() {
+      if (disposed || paused) return;
+      paused = true;
+      detach();
+    },
+    /** Re-attaches and re-reads; a pause/resume cycle must never leave `started` false. */
+    resume() {
+      if (disposed || !paused) return undefined;
+      paused = false;
       started = true;
       if (!scheduleFace()) {
         retryLater();

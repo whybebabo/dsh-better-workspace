@@ -25,22 +25,66 @@ import { formatRelative } from './time.js';
 import { scheduleHover, schedulesOf } from './schedule.js';
 import { shortcutHint } from './shortcut-hints.js';
 
-function useSnapshot(source) {
+/**
+ * Mirrors a host snapshot store into React state.
+ *
+ * `enabled: false` releases the subscription without unmounting the hook. A hidden overlay
+ * must not re-render on every host list publish — the session controller republishes the
+ * whole list for each wire-visible projection change, so a rail-collapsed panel would have
+ * been re-rendering (to `null`) several times per turn for nothing. Re-enabling re-reads the
+ * current snapshot in the same effect, so nothing is missed while suspended.
+ */
+function useSnapshot(source, enabled = true) {
   const [value, setValue] = React.useState(() => (typeof source?.getSnapshot === 'function' ? source.getSnapshot() : undefined));
   React.useEffect(() => {
     if (!source || typeof source.subscribe !== 'function') return undefined;
+    if (!enabled) return undefined;
     setValue(typeof source.getSnapshot === 'function' ? source.getSnapshot() : undefined);
     const unsubscribe = source.subscribe((next) => setValue(typeof next === 'function' ? next() : next ?? source.getSnapshot?.()));
     return () => {
       if (typeof unsubscribe === 'function') unsubscribe();
     };
-  }, [source]);
+  }, [source, enabled]);
   return value;
+}
+
+/**
+ * Stable-identity dispatch for the tree's callback props.
+ *
+ * `Section` and `SessionRow` are memoized, so every callback they receive has to keep its
+ * identity across renders or the memo never matches — a fresh arrow per render re-authored
+ * all 1500 rows for a hover, a status flip or the 30s tick (measured; see
+ * review/perf/PERF-REVIEW.md). Each handler is still written as a plain closure over the
+ * current render and registered through `publish` at the end of that render, so the frozen
+ * dispatcher always forwards to the newest closure and nothing can capture stale state.
+ */
+const TREE_HANDLER_KEYS = [
+  'onOpenSession', 'onMenu', 'onArchive', 'onPin', 'onRenameSession', 'onHint', 'onHintEnd',
+  'onToggleWorkspaceCollapse', 'onToggleTopicCollapse', 'onToggleSelection', 'onSelectMany',
+  'onFilterTopic', 'onNewSession', 'onDropSessions', 'onRenameTopic', 'onDropOnRow',
+];
+
+function useStableDispatch(keys) {
+  const latest = React.useRef(null);
+  const frozen = React.useRef(null);
+  if (frozen.current === null) {
+    const dispatchers = {};
+    for (const key of keys) {
+      // `latest.current` is always the handlers object registered by the most recent render.
+      dispatchers[key] = (...args) => latest.current?.[key]?.(...args);
+    }
+    frozen.current = dispatchers;
+  }
+  const publish = React.useCallback((handlers) => { latest.current = handlers; }, []);
+  return [frozen.current, publish];
 }
 
 export function OverlayPanel({ actions, schedules }) {
   const language = useLanguage();
   const store = React.useMemo(() => createPanelStore(), []);
+  // Identity-stable callbacks for the memoized tree; the closures themselves are re-registered
+  // on every render (see `useStableDispatch`).
+  const [treeHandlers, publishTreeHandlers] = useStableDispatch(TREE_HANDLER_KEYS);
   const [state, setState] = React.useState(() => store.getState());
   const [geom, setGeom] = React.useState({ visible: false, rect: null, reason: 'init', regionEl: null });
   const [menu, setMenu] = React.useState(null);
@@ -69,24 +113,77 @@ export function OverlayPanel({ actions, schedules }) {
   /** Panel-owned timers. Both must die with the overlay, or they outlive it and keep firing. */
   const timersRef = React.useRef({ toast: null, arm: null });
 
-  const sessionSnapshot = useSnapshot(actions.sessionStore);
-  const sessionStatuses = useSnapshot(actions.sessionStatusStore);
+  /**
+   * "On screen" is the one condition every resident subscription and timer below hangs off.
+   *
+   * The two `return null`s in this component sit *after* the hooks, so a rail-collapsed or
+   * narrow-viewport panel still ran its store subscription, minute timer, catalog retries and
+   * schedule invalidation while painting nothing. This is deliberately computed from
+   * `geom.visible` alone — not from `state.ready` — because the geometry observer is what
+   * brings the panel back; gating it on readiness would deadlock the first paint.
+   */
+  const onScreen = Boolean(geom.visible);
+
+  const sessionSnapshot = useSnapshot(actions.sessionStore, onScreen);
+  const sessionStatuses = useSnapshot(actions.sessionStatusStore, onScreen);
+  /**
+   * The workspace list stays subscribed while hidden: the rail bridge uses it as its input.
+   * "添加工作区" from the collapsed rail keeps the host's picker in the rail and expands the
+   * sidebar once the new workspace lands — that transition is detected right here, so
+   * suspending this one would silently break the rail (caught by
+   * `the collapsed rail routes its new session and search through the panel`).
+   */
   const workspaceSnapshot = useSnapshot(actions.workspaceStore);
-  const scheduleSnapshot = useSnapshot(schedules);
+  const scheduleSnapshot = useSnapshot(schedules, onScreen);
   const schedulesById = scheduleSnapshot?.bySession ?? null;
 
-  React.useEffect(() => store.subscribe(() => setState(store.getState())), [store]);
+  React.useEffect(() => {
+    if (!onScreen) return undefined;
+    return store.subscribe(() => setState(store.getState()));
+  }, [store, onScreen]);
   React.useEffect(() => {
     // The catalog is read only once the panel is on screen; the store coalesces refreshes.
+    // Suspending it releases the two host invalidations, so a hidden rail costs nothing.
+    if (!onScreen) {
+      schedules?.pause?.();
+      return undefined;
+    }
+    schedules?.resume?.();
     schedules?.start?.();
-  }, [schedules]);
+    return undefined;
+  }, [schedules, onScreen]);
   React.useEffect(() => {
+    // A hidden panel does not need the sidecar document; `store.load()` on resume refreshes it,
+    // so a rail-collapsed window stops issuing this GET entirely.
+    if (!onScreen) return undefined;
     store.load();
-  }, [store]);
+    return undefined;
+  }, [store, onScreen]);
   React.useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(timer);
-  }, []);
+    if (!onScreen) return undefined;
+    // Aligned to the next minute boundary instead of a free-running 30s tick: `now` only feeds
+    // minute-precision labels, so polling twice a minute re-rendered the whole tree for a
+    // string that could not change. Setting state to the same minute is dropped by React.
+    let timer = null;
+    const arm = () => {
+      const delay = 60_000 - (Date.now() % 60_000) + 20;
+      timer = setTimeout(() => {
+        setNow(Date.now());
+        arm();
+      }, delay);
+    };
+    // Re-arm on every resume so a panel that was hidden across a minute boundary is repainted
+    // immediately rather than after up to a minute of stale labels.
+    setNow(Date.now());
+    arm();
+    return () => clearTimeout(timer);
+  }, [onScreen]);
+  /**
+   * The tree only reads `now` through minute-precision labels, so a 30s tick inside the same
+   * minute must not re-render anything. Quantizing here (instead of inside the row) is what
+   * makes the row fingerprints stable across those ticks.
+   */
+  const minuteNow = Math.floor(now / 60_000) * 60_000;
   // A scheduled-task card is taller than the old three-line tooltip; measure it once laid out
   // and keep the bottom edge on screen (the inline style only carries the unmeasured guess).
   React.useLayoutEffect(() => {
@@ -162,8 +259,9 @@ export function OverlayPanel({ actions, schedules }) {
         assignmentsOf: store.assignmentsOf,
         prefs,
         query: prefs.searchOpen ? prefs.search : '',
+        now: minuteNow,
       }),
-    [items, list, sessionStatuses, archivedIds, pinnedIds, prefs, state.workspaces, store, language],
+    [items, list, sessionStatuses, archivedIds, pinnedIds, prefs, state.workspaces, store, language, minuteNow],
   );
 
   // A filter pointing at a closed workspace or a deleted topic must not strand the panel —
@@ -295,6 +393,23 @@ export function OverlayPanel({ actions, schedules }) {
     return store.setPrefs(changes);
   };
 
+  /** Stable handlers need stable leaves too: these read the store, never the render closure. */
+  const toggleWorkspaceCollapse = (key) => store.toggleInList('collapsedWorkspaces', key);
+  const toggleTopicCollapse = (key) => store.toggleInList('collapsedTopics', key);
+  const closeHint = () => setHint(null);
+  /**
+   * Adds/removes a whole bucket. Reading the selection from the store instead of the render
+   * closure means a stale `selectedIds` can never resurrect an id the user just removed.
+   */
+  const selectMany = (ids, on) => {
+    const current = new Set(store.getState().selection);
+    for (const id of ids) {
+      if (on) current.add(id);
+      else current.delete(id);
+    }
+    store.setSelection([...current]);
+  };
+
   /**
    * Drag reordering, one level at a time. Workspace order and session order are UI state
    * (prefs), topic order is data (the sidecar), so all three survive a reload — but only the
@@ -305,6 +420,14 @@ export function OverlayPanel({ actions, schedules }) {
     return rect.height > 0 && event.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
   };
 
+  /**
+   * `reorder` is a prop of both memoized components, so it may only change when a drag does.
+   * `options` is rebuilt on every list publish, and depending on it here made the whole tree
+   * re-render for a workspace-drop that could not have moved anything — read it through a ref
+   * that the render keeps current instead.
+   */
+  const optionsRef = React.useRef(options);
+  optionsRef.current = options;
   const reorder = React.useMemo(() => ({
     hint: dropHint,
     focus: dragFocus,
@@ -344,7 +467,7 @@ export function OverlayPanel({ actions, schedules }) {
       endDrag();
       const position = forcedPosition ?? positionOf(event);
       if (level === 'workspace') {
-        setPrefs({ workspaceOrder: moveWithin(options.map((option) => option.workspaceId), drag.id, target.id, position) });
+        setPrefs({ workspaceOrder: moveWithin(optionsRef.current.map((option) => option.workspaceId), drag.id, target.id, position) });
         return;
       }
       const ids = (store.topicsOf(drag.workspaceId) ?? []).map((topic) => topic.id);
@@ -357,7 +480,7 @@ export function OverlayPanel({ actions, schedules }) {
       setDropHint(null);
       setDragFocus(null);
     },
-  }), [dropHint, dragFocus, options]);
+  }), [dropHint, dragFocus, store]);
 
   /**
    * Collapsed sidebar (the rail). The host keeps its own 新建会话 / 添加工作区 / 搜索会话
@@ -995,6 +1118,27 @@ export function OverlayPanel({ actions, schedules }) {
   const hintSchedule = hint ? schedulesOf(scheduleSnapshot, hint.row.id) : null;
   const hintTasks = hintSchedule?.length ? scheduleHover(hintSchedule, now) : null;
 
+  // Registered during render (not in an effect) so the frozen dispatcher is already current
+  // when the tree below renders with it on this very pass.
+  publishTreeHandlers({
+    onOpenSession: openSession,
+    onMenu: handleMenu,
+    onArchive: (row) => runBatch(row.archived ? 'unarchive' : 'archive', [row.id]),
+    onPin: (row) => runBatch(row.pinned ? 'unpin' : 'pin', [row.id]),
+    onRenameSession: (row) => setDialog({ type: 'renameSession', row }),
+    onHint: openHint,
+    onHintEnd: closeHint,
+    onToggleWorkspaceCollapse: toggleWorkspaceCollapse,
+    onToggleTopicCollapse: toggleTopicCollapse,
+    onToggleSelection: store.toggleSelection,
+    onSelectMany: selectMany,
+    onFilterTopic: (topicId, workspaceId) => pickTopic(prefs.topicFilter === topicId ? null : topicId, workspaceId),
+    onNewSession: newSession,
+    onDropSessions: dropSessions,
+    onRenameTopic: renameTopic,
+    onDropOnRow: dropOnRow,
+  });
+
   return (
     <div className={cx('dts-overlay', menu || dialog ? 'has-floating' : null)} style={style} data-reason={geom.reason}>
       <div className="dts-panel">
@@ -1062,30 +1206,22 @@ export function OverlayPanel({ actions, schedules }) {
             prefs={prefs}
             selection={selectedIds}
             schedules={schedulesById}
-            now={now}
-            onOpenSession={openSession}
-            onMenu={handleMenu}
-            onArchive={(row) => runBatch(row.archived ? 'unarchive' : 'archive', [row.id])}
-            onPin={(row) => runBatch(row.pinned ? 'unpin' : 'pin', [row.id])}
-            onRenameSession={(row) => setDialog({ type: 'renameSession', row })}
-            onHint={openHint}
-            onHintEnd={() => setHint(null)}
-            onToggleWorkspaceCollapse={(key) => store.toggleInList('collapsedWorkspaces', key)}
-            onToggleTopicCollapse={(key) => store.toggleInList('collapsedTopics', key)}
-            onToggleSelection={store.toggleSelection}
-            onSelectMany={(ids, on) => {
-              const current = new Set(store.getState().selection);
-              for (const id of ids) {
-                if (on) current.add(id);
-                else current.delete(id);
-              }
-              store.setSelection([...current]);
-            }}
-            onFilterTopic={(topicId, workspaceId) => pickTopic(prefs.topicFilter === topicId ? null : topicId, workspaceId)}
-            onNewSession={newSession}
-            onDropSessions={dropSessions}
-            onRenameTopic={renameTopic}
-            onDropOnRow={dropOnRow}
+            onOpenSession={treeHandlers.onOpenSession}
+            onMenu={treeHandlers.onMenu}
+            onArchive={treeHandlers.onArchive}
+            onPin={treeHandlers.onPin}
+            onRenameSession={treeHandlers.onRenameSession}
+            onHint={treeHandlers.onHint}
+            onHintEnd={treeHandlers.onHintEnd}
+            onToggleWorkspaceCollapse={treeHandlers.onToggleWorkspaceCollapse}
+            onToggleTopicCollapse={treeHandlers.onToggleTopicCollapse}
+            onToggleSelection={treeHandlers.onToggleSelection}
+            onSelectMany={treeHandlers.onSelectMany}
+            onFilterTopic={treeHandlers.onFilterTopic}
+            onNewSession={treeHandlers.onNewSession}
+            onDropSessions={treeHandlers.onDropSessions}
+            onRenameTopic={treeHandlers.onRenameTopic}
+            onDropOnRow={treeHandlers.onDropOnRow}
             reorder={reorder}
             pendingTopicId={pendingTopic}
             currentWorkspaceId={tree.currentWorkspaceId}

@@ -12,6 +12,7 @@
  * the hover strip immediately covers.
  */
 import { t } from './i18n.js';
+import { formatRelative } from './time.js';
 
 export const SEARCH_RESULT_LIMIT = 100;
 /** Reserved id of the per-workspace system group; mirrors `lib/store.js`. */
@@ -127,13 +128,54 @@ function aggregateStatus(rows) {
   return { state: done ? 'done' : ongoing ? 'ongoing' : null, kind: null };
 }
 
-function makeRow(session, { current, archived, pinned, workspaceId, topicId, topicName, topicEmoji, statuses }) {
+/**
+ * Reference-stable row objects.
+ *
+ * `SessionRow` is `React.memo`, but a fresh object per build defeated it: every list
+ * publish, status flip and 30s tick produced new `row` props and re-rendered every mounted
+ * row (measured: 1500 rows ≈ 55–63 ms per trigger, DOM unchanged afterwards). The host's own
+ * session list solves this the same way — `SessionManager.entryCache` reuses the previous
+ * entry when every compared field matches, with the comment "or every SessionListItem memo
+ * misses on every refresh".
+ *
+ * Reuse is only sound when *every* field the row exposes is unchanged, so the fingerprint
+ * carries all of them plus the localized strings (a language switch must produce new rows).
+ * The cache is per-module and pruned to the ids seen by the last build, so a long-lived
+ * panel cannot accumulate rows for sessions the host dropped.
+ */
+const rowCache = new Map();
+const rowFields = (row) => [
+  row.id,
+  row.title,
+  row.updatedAt,
+  row.timeLabel,
+  row.running,
+  row.completed,
+  row.pendingKind,
+  row.status,
+  row.blank,
+  row.isCurrent,
+  row.archived,
+  row.pinned,
+  row.workspaceId,
+  row.workspaceTitle,
+  row.topicId,
+  row.topicName,
+  row.topicEmoji,
+].join('\u0000');
+
+function makeRow(session, { current, archived, pinned, workspaceId, workspaceTitle, topicId, topicName, topicEmoji, statuses, now }) {
   const title = session?.blank ? t('session.blank') : session?.displayTitle || session?.title || session?.id || '';
   const status = readStatus(session, statuses);
-  return {
+  const updatedAt = session.updatedAt ?? 0;
+  const row = {
     id: session.id,
     title: String(title),
-    updatedAt: session.updatedAt ?? 0,
+    updatedAt,
+    // The relative label is rendered per row on every tick today, which forces the whole
+    // tree through React for a string that only changes once a minute. It is computed here
+    // from a minute-quantized `now`, so the row cache can skip a tick that changes nothing.
+    timeLabel: formatRelative(updatedAt, now),
     running: status.running,
     completed: status.completed,
     pendingKind: status.pendingKind,
@@ -143,28 +185,46 @@ function makeRow(session, { current, archived, pinned, workspaceId, topicId, top
     archived: archived.has(session.id),
     pinned: pinned.has(session.id),
     workspaceId,
-    workspaceTitle: null,
+    workspaceTitle: workspaceTitle ?? null,
     topicId: topicId ?? null,
     topicName: topicName ?? null,
     topicEmoji: topicEmoji ?? null,
   };
+  // Blanks are provisional rows whose content changes as the host fills them in; caching them
+  // would only ever be a hit for a row the user cannot act on, so keep that path allocation-only.
+  if (row.blank) return row;
+  const key = rowFields(row);
+  const cached = rowCache.get(row.id);
+  if (cached !== undefined && cached.key === key) return cached.row;
+  const entry = { key, row };
+  rowCache.set(row.id, entry);
+  return row;
 }
 
 /**
  * Workspace-level status is an overview, so it must not shrink when a topic filter or
  * search hides rows: derive it from every live member regardless of the display filters.
+ *
+ * This used to build throwaway row objects just to aggregate three booleans. That both
+ * allocated O(n) garbage per build and fought the row cache (a scratch row and a display row
+ * for the same session carry different fields, so the cache would thrash on every flush).
  */
-function liveStatusRows(ids, { byId, archived, current, pinned, statuses, workspaceId }) {
-  const rows = [];
+function aggregateMembers(ids, { byId, archived, current, statuses }) {
+  let done = false;
+  let ongoing = false;
   for (const id of ids) {
     const session = byId[id];
     if (!session) continue;
     if (session.origin === 'subagent') continue;
     if (session.blank && id !== current) continue;
     if (archived.has(id)) continue;
-    rows.push(makeRow(session, { current, archived, pinned, statuses, workspaceId }));
+    const status = readStatus(session, statuses);
+    // Same precedence as `aggregateStatus`: a pending interaction outranks everything.
+    if (status.pendingKind) return { state: 'warning', kind: status.pendingKind };
+    if (status.completed) done = true;
+    if (status.running) ongoing = true;
   }
-  return rows;
+  return { state: done ? 'done' : ongoing ? 'ongoing' : null, kind: null };
 }
 
 /**
@@ -201,7 +261,52 @@ export function moveWithin(ids, dragId, targetId, position) {
   return next;
 }
 
-export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topicsOf, assignmentsOf, prefs, query }) {
+/**
+ * Section/group reference reuse.
+ *
+ * `Section` is memoized on its `section` and `group` props, so a fresh object per build made
+ * the memo decorative even after the rows themselves became stable. A candidate is compared
+ * against the cached one by a scalar fingerprint plus element-wise identity of its child
+ * array: rows/sections are themselves reused, so "same elements in the same order" really
+ * does mean "nothing the component reads has changed".
+ */
+const SECTION_SCALARS = ['kind', 'id', 'name', 'emoji', 'system', 'bare', 'status', 'statusKind', 'collapsed', 'total'];
+const GROUP_SCALARS = ['workspaceId', 'title', 'path', 'status', 'statusKind', 'liveCount', 'archivedCount', 'topicCount', 'collapsed', 'isSelectedWorkspaceFilter', 'virtual'];
+
+function fingerprintOf(value, keys) {
+  let out = '';
+  for (const key of keys) out += `${value[key] ?? ''}\u0000`;
+  return out;
+}
+
+function sameElements(left, right) {
+  if (left === right) return true;
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) if (left[index] !== right[index]) return false;
+  return true;
+}
+
+/** Returns the cached object when nothing visible changed, otherwise stores and returns the new one. */
+function stabilize(cache, key, value, scalars, childKey) {
+  const fingerprint = fingerprintOf(value, scalars);
+  const cached = cache.get(key);
+  if (cached !== undefined && cached.fingerprint === fingerprint && sameElements(cached.children, value[childKey])) {
+    return cached.value;
+  }
+  cache.set(key, { fingerprint, children: value[childKey], value });
+  return value;
+}
+
+/** Drops cache entries the current build did not touch (closed workspaces, deleted topics). */
+function pruneCache(cache, liveKeys) {
+  if (cache.size <= liveKeys.size) return;
+  for (const key of cache.keys()) if (!liveKeys.has(key)) cache.delete(key);
+}
+
+const sectionCache = new Map();
+const groupCache = new Map();
+
+export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topicsOf, assignmentsOf, prefs, query, now }) {
   const workspaces = orderBy(normalizeWorkspaces(items), prefs?.workspaceOrder ?? [], (entry) => entry.workspaceId);
   const archived = toSet(archivedIds);
   const pinned = toSet(pinnedIds);
@@ -211,6 +316,9 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
   [...pinned].forEach((id, index) => pinnedRank.set(id, index));
   const byId = list?.byId ?? {};
   const current = mainSessionId(list);
+  // Minute-quantized: the label's own precision is minutes, so a tick inside the same minute
+  // must produce identical row fingerprints (and therefore zero re-renders).
+  const minuteNow = Number.isFinite(now) ? Math.floor(now / 60_000) * 60_000 : Date.now();
   const search = String(query ?? '').trim().toLowerCase();
   const workspaceFilter = prefs?.workspaceFilter ?? null;
   const topicFilter = prefs?.topicFilter ?? null;
@@ -286,12 +394,13 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
         archived,
         pinned,
         statuses,
+        now: minuteNow,
         workspaceId: workspace.workspaceId,
+        workspaceTitle: workspace.title,
         topicId: topic?.id ?? DEFAULT_TOPIC_ID,
         topicName: topic ? topicLabel(topic) : null,
         topicEmoji: topic?.emoji ?? '',
       });
-      row.workspaceTitle = workspace.title;
       if (search) {
         const haystack = `${row.title} ${workspace.title} ${workspace.path} ${topic?.name ?? ''}`.toLowerCase();
         if (!haystack.includes(search)) continue;
@@ -317,7 +426,8 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
       const topicRows = live.filter((row) => row.topicId === topic.id);
       if (topicRows.length === 0 && search) continue;
       const status = aggregateStatus(topicRows);
-      sections.push({
+      const key = `${workspace.workspaceId}:${topic.id}`;
+      sections.push(stabilize(sectionCache, key, {
         kind: 'topic',
         id: topic.id,
         name: topicLabel(topic),
@@ -326,23 +436,22 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
         rows: topicRows,
         status: status.state,
         statusKind: status.kind,
-        collapsed: collapsedTopics.has(`${workspace.workspaceId}:${topic.id}`),
+        collapsed: search ? false : collapsedTopics.has(key),
         total: topicRows.length,
-      });
+      }, SECTION_SCALARS, 'rows'));
     }
     if (archivedRows.length > 0) {
-      sections.push({ kind: 'archived', id: '__archived__', name: null, emoji: '', rows: archivedRows, status: null, statusKind: null, collapsed: collapsedWorkspaces.has(`${workspace.workspaceId}:archived`), total: archivedRows.length });
+      const key = `${workspace.workspaceId}:archived`;
+      sections.push(stabilize(sectionCache, key, { kind: 'archived', id: '__archived__', name: null, emoji: '', rows: archivedRows, status: null, statusKind: null, collapsed: search ? false : collapsedWorkspaces.has(key), total: archivedRows.length }, SECTION_SCALARS, 'rows'));
     }
 
-    const workspaceStatus = aggregateStatus(liveStatusRows(finalIds, {
+    const workspaceStatus = aggregateMembers(finalIds, {
       byId,
       archived,
       current,
-      pinned,
       statuses,
-      workspaceId: workspace.workspaceId,
-    }));
-    groups.push({
+    });
+    groups.push(stabilize(groupCache, workspace.workspaceId, {
       workspaceId: workspace.workspaceId,
       title: workspace.title,
       path: workspace.path,
@@ -352,9 +461,9 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
       liveCount: live.length,
       archivedCount: archivedRows.length,
       topicCount: topics.length,
-      collapsed: collapsedWorkspaces.has(workspace.workspaceId),
+      collapsed: search ? false : collapsedWorkspaces.has(workspace.workspaceId),
       isSelectedWorkspaceFilter: workspaceFilter === workspace.workspaceId,
-    });
+    }, GROUP_SCALARS, 'sections'));
   }
 
   // The native browser trails a virtual 未分组 workspace for sessions no workspace
@@ -383,12 +492,13 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
         archived,
         pinned,
         statuses,
+        now: minuteNow,
         workspaceId: UNGROUPED_WORKSPACE_ID,
+        workspaceTitle: t('group.ungrouped'),
         topicId: DEFAULT_TOPIC_ID,
         topicName: defaultName,
         topicEmoji: '',
       });
-      row.workspaceTitle = t('group.ungrouped');
       if (search) {
         const haystack = `${row.title} ${row.workspaceTitle} ${defaultName}`.toLowerCase();
         if (!haystack.includes(search)) continue;
@@ -403,7 +513,7 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
     if (rows.length > 0) {
       sortRows(rows);
       const status = aggregateStatus(rows);
-      const sections = [{
+      const sections = [stabilize(sectionCache, `${UNGROUPED_WORKSPACE_ID}:${DEFAULT_TOPIC_ID}`, {
         kind: 'topic',
         id: DEFAULT_TOPIC_ID,
         name: defaultName,
@@ -417,16 +527,14 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
         statusKind: status.kind,
         collapsed: false,
         total: rows.length,
-      }];
-      const workspaceStatus = aggregateStatus(liveStatusRows(orderedStrays, {
+      }, SECTION_SCALARS, 'rows')];
+      const workspaceStatus = aggregateMembers(orderedStrays, {
         byId,
         archived,
         current,
-        pinned,
         statuses,
-        workspaceId: UNGROUPED_WORKSPACE_ID,
-      }));
-      groups.push({
+      });
+      groups.push(stabilize(groupCache, UNGROUPED_WORKSPACE_ID, {
         workspaceId: UNGROUPED_WORKSPACE_ID,
         title: t('group.ungrouped'),
         path: '',
@@ -436,18 +544,18 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
         liveCount: rows.length,
         archivedCount: 0,
         topicCount: 1,
-        collapsed: collapsedWorkspaces.has(UNGROUPED_WORKSPACE_ID),
+        collapsed: search ? false : collapsedWorkspaces.has(UNGROUPED_WORKSPACE_ID),
         isSelectedWorkspaceFilter: false,
         virtual: true,
-      });
+      }, GROUP_SCALARS, 'sections'));
     }
   }
 
   if (search) {
-    for (const group of groups) {
-      for (const section of group.sections) section.collapsed = false;
-      group.collapsed = false;
-    }
+    // Search opens every bucket, so the *effective* collapsed flag is false for the whole
+    // build. It is folded into the objects below (and therefore their fingerprints) instead
+    // of being patched afterwards: these objects are cached and shared with the previous
+    // build, so mutating one in place would poison the cache for the next tick.
   }
 
   // The tinted folder is the one the user is looking at: the explicit workspace filter when
@@ -462,6 +570,21 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
     }
   }
   const highlightedWorkspaceId = workspaceFilter ?? currentWorkspaceId;
+
+  // A closed workspace or a deleted topic must not leave a cached row/section/group behind:
+  // the module lives as long as the page, so anything unmatched here would never be freed.
+  const liveGroupKeys = new Set(groups.map((group) => group.workspaceId));
+  pruneCache(groupCache, liveGroupKeys);
+  const liveSectionKeys = new Set();
+  const liveRowIds = new Set();
+  for (const group of groups) {
+    for (const section of group.sections) {
+      liveSectionKeys.add(section.kind === 'archived' ? `${group.workspaceId}:archived` : `${group.workspaceId}:${section.id}`);
+      for (const row of section.rows) liveRowIds.add(row.id);
+    }
+  }
+  pruneCache(sectionCache, liveSectionKeys);
+  pruneCache(rowCache, liveRowIds);
 
   return { groups, search, truncated, matched, currentSessionId: current, currentWorkspaceId: highlightedWorkspaceId };
 }

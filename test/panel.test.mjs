@@ -46,6 +46,8 @@ let pinImpl;
 /** Global scheduled-task catalog the fake Remote face answers with. */
 let scheduleCatalog;
 let scheduleReaders;
+/** Live `schedule/changed` listeners; the schedule store releases them while paused. */
+let scheduleSubscribers;
 
 function makeSessions(count, offset = 0) {
   const byId = {};
@@ -94,6 +96,8 @@ function makeSource(value) {
       value = next;
       listeners.forEach((listener) => listener(next));
     },
+    /** Live subscriber count — the only way to observe a suspended `useSnapshot`. */
+    listenerCount: () => listeners.size,
   };
 }
 
@@ -286,8 +290,12 @@ function applyPlugin(mod) {
           get schedule() {
             throw new Error('cannot get property "remote.schedule" without inject');
           },
-          // The schedule plugin subscribes to this invalidation; one disposer is enough here.
-          $on: () => () => {},
+          // The schedule plugin subscribes to this invalidation; tracked live so a test can see
+          // the store release it while the panel is hidden.
+          $on: (event, listener) => {
+            scheduleSubscribers.add(listener);
+            return () => scheduleSubscribers.delete(listener);
+          },
         };
       }
       throw new Error(`no such service: ${name}`);
@@ -332,6 +340,7 @@ beforeEach(async () => {
   sessionRefreshCalls = 0;
   scheduleCatalog = [];
   scheduleReaders = 0;
+  scheduleSubscribers = new Set();
   const sessionsFixture = makeSessions(3);
   sessionSource = makeSource(sessionsFixture);
   sessionStatusSource = makeSource(new Map());
@@ -2194,4 +2203,85 @@ test('the batch result dialog names the sessions that are still running', async 
   assert.equal(entries.length, 1);
   assert.ok(entries[0].includes('会话 0'), `the row keeps the session title, got: ${JSON.stringify(entries[0])}`);
   assert.ok(dialog.textContent.includes('停止并归档'), 'the stop proposal is offered');
+});
+
+/**
+ * A hidden panel used to keep working: the two `return null`s sit after the hooks, so a
+ * rail-collapsed overlay still held the session/status/schedule subscriptions, re-rendered on
+ * every host list publish and kept its minute timer armed — all to paint nothing.
+ *
+ * These count *live subscribers* rather than trusting a render count, because a subscription
+ * that is merely unused still costs one wakeup per host publish.
+ */
+test('a hidden panel releases its session and status subscriptions, and restores them on return', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  assert.ok(find('.dts-overlay'), 'the panel starts on screen');
+  assert.ok(sessionSource.listenerCount() > 0, 'the session list is observed while visible');
+  assert.ok(sessionStatusSource.listenerCount() > 0, 'the status map is observed while visible');
+
+  await act(async () => {
+    document.querySelector('[class*="_regionArea"]').classList.add('_9lTDKa_root');
+    document.querySelector('.BynINW_frame').setAttribute('data-sidebar-collapsed', '');
+  });
+  await tick(1200);
+  assert.equal(find('.dts-overlay'), undefined, 'the cover steps aside in rail mode');
+  assert.equal(sessionSource.listenerCount(), 0, 'the session list subscription is released while hidden');
+  assert.equal(sessionStatusSource.listenerCount(), 0, 'the status subscription is released while hidden');
+  // The rail bridge reads the workspace list to notice "添加工作区", so that one must stay.
+  assert.ok(workspaceSource.listenerCount() > 0, 'the workspace list stays observed: the rail bridge needs it');
+
+  const snapshot = sessionSource.getSnapshot();
+  await act(async () => {
+    sessionSource.set({ ...snapshot, byId: { ...snapshot.byId } });
+  });
+  await tick(60);
+
+  await act(async () => {
+    document.querySelector('[class*="_regionArea"]').classList.remove('_9lTDKa_root');
+    document.querySelector('.BynINW_frame').removeAttribute('data-sidebar-collapsed');
+  });
+  await tick(300);
+  assert.ok(find('.dts-overlay'), 'the cover comes back');
+  assert.ok(sessionSource.listenerCount() > 0, 'the session list is observed again');
+  assert.ok(find('.dts-row--session', '会话 0'), 'and paints the rows it had before hiding');
+  assert.ok(find('.dts-tree'), 'the tree is intact, not blanked');
+});
+
+test('hiding the panel issues no sidecar read and no catalog re-read', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  scheduleCatalog = [];
+  await mount();
+  const stateReads = () => calls.filter((call) => call.url.endsWith(`${API}/state`)).length;
+  // Baselines are taken BEFORE hiding: the hide edge itself is allowed one teardown, so a
+  // baseline captured afterwards would silently absorb the traffic being asserted.
+  assert.ok(stateReads() >= 1, 'the document is read on the first paint');
+  assert.equal(scheduleReaders, 1, 'the catalog is read once while on screen');
+  assert.equal(scheduleSubscribers.size, 1, 'the catalog follows host invalidations while visible');
+
+  await act(async () => {
+    document.querySelector('[class*="_regionArea"]').classList.add('_9lTDKa_root');
+    document.querySelector('.BynINW_frame').setAttribute('data-sidebar-collapsed', '');
+  });
+  await tick(1200);
+  assert.equal(find('.dts-overlay'), undefined, 'the cover steps aside in rail mode');
+
+  const hiddenReads = stateReads();
+  const hiddenCatalogReads = scheduleReaders;
+  const hiddenSubscribers = scheduleSubscribers.size;
+
+  // Idle long enough that a live minute timer or a retry would have to show up.
+  await tick(1500);
+  assert.equal(stateReads(), hiddenReads, 'a hidden panel issues no document reads');
+  assert.equal(scheduleReaders, hiddenCatalogReads, 'and does not keep polling the catalog');
+  assert.equal(scheduleSubscribers.size, hiddenSubscribers, 'and released its host invalidation');
+
+  await act(async () => {
+    document.querySelector('[class*="_regionArea"]').classList.remove('_9lTDKa_root');
+    document.querySelector('.BynINW_frame').removeAttribute('data-sidebar-collapsed');
+  });
+  await tick(400);
+  assert.ok(stateReads() > hiddenReads, 'returning re-reads the document instead of trusting a stale copy');
+  assert.ok(scheduleReaders > hiddenCatalogReads, 'and re-reads the catalog instead of showing stale marks');
+  assert.equal(scheduleSubscribers.size, 1, 'and re-attaches exactly one invalidation');
 });
