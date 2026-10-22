@@ -87,6 +87,7 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, groupHidden 
         reorder?.onDrop?.(event, 'workspace', { id: group.workspaceId, workspaceId: group.workspaceId });
       }}
       onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
           onToggleCollapse();
@@ -107,7 +108,9 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, groupHidden 
               indeterminate={selectionCount > 0 && !allSelected}
               disabled={groupIds.length === 0}
               onChange={onToggleGroup}
-              label={groupHidden > 0 ? `${group.title} 全选(仅已显示的 ${groupIds.length} 条,另有 ${groupHidden} 条未展开)` : `${group.title} 全选`}
+              label={groupHidden > 0
+                ? t('topic.selectAllShown', { name: group.title, shown: groupIds.length, hidden: groupHidden })
+                : t('topic.selectAll', { name: group.title })}
             />
           </span>
         ) : (
@@ -150,7 +153,7 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, groupHidden 
   );
 }
 
-function SectionHeader({ section, group, selectMode, selectedIds, pending, onToggleCollapse, onToggleSection, onMenu, onFilter, onDropSessions, onRename, reorder, selectableIds = [], hidden = 0 }) {
+function SectionHeader({ section, group, selectMode, selectedIds, pending, onToggleCollapse, onToggleSection, onMenu, onFilter, onNewSession, onDropSessions, onRename, reorder, selectableIds = [], hidden = 0 }) {
   // `selectableIds` is the section's visible scope (model.selectableIds — the same derivation
   // every "select all" entry point uses). A fallback to `section.rows` here is exactly the bug:
   // it meant "select all" on an over-REVEAL_LIMIT group silently grabbed rows that were never
@@ -206,10 +209,14 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
       onClick={onToggleCollapse}
       onDoubleClick={(event) => {
         if (section.kind !== 'topic' || section.system) return;
+        // Buttons in the row action strip stop their own dblclick, but keep this guard for
+        // any future control that does not.
+        if (event.target?.closest?.('button, input, label, a, [role="button"]')) return;
         event.stopPropagation();
         setEditing(true);
       }}
       onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
           onToggleCollapse();
@@ -272,7 +279,9 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
             indeterminate={selectedCount > 0 && selectedCount < ids.length}
             disabled={ids.length === 0}
             onChange={() => onToggleSection(ids, selectedCount === ids.length)}
-            label={hidden > 0 ? `${label} 全选(仅已显示的 ${ids.length} 条,另有 ${hidden} 条未展开)` : `${label} 全选`}
+            label={hidden > 0
+              ? t('topic.selectAllShown', { name: label, shown: ids.length, hidden })
+              : t('topic.selectAll', { name: label })}
           />
         </span>
       ) : (
@@ -337,6 +346,15 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
                 <Icon name="ellipsis" />
               </IconButton>
             ) : null}
+            {section.kind === 'topic' ? (
+              <IconButton
+                label={t('topic.newSessionAria', { name: label })}
+                title={t('topic.newSession')}
+                onClick={() => onNewSession?.()}
+              >
+                <Icon name="newChat" />
+              </IconButton>
+            ) : null}
           </span>
         )}
       </span>
@@ -344,7 +362,7 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
   );
 }
 
-const Section = React.memo(function Section({ section, group, schedules, selectMode, selectedIds, query, pendingTopicId, revealed, onToggleReveal, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleWorkspaceCollapse, onToggleTopicCollapse, onSelectMany, onFilter, onDropSessions, onRename, onDropOnRow, reorder }) {
+const Section = React.memo(function Section({ section, group, schedules, selectMode, selectedIds, query, pendingTopicId, revealed, onToggleReveal, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleWorkspaceCollapse, onToggleTopicCollapse, onSelectMany, onFilter, onNewSessionInTopic, onDropSessions, onRename, onDropOnRow, reorder }) {
   // Selecting is about existing records; hide the provisional New Session placeholder while
   // the batch toolbar is active instead of offering a checkbox that cannot do anything.
   const rows = selectMode ? section.rows.filter((row) => !row.blank) : section.rows;
@@ -364,6 +382,10 @@ const Section = React.memo(function Section({ section, group, schedules, selectM
   const onToggleSection = React.useCallback(
     (ids, deselect) => onSelectMany(ids, !deselect),
     [onSelectMany],
+  );
+  const onNewSession = React.useCallback(
+    () => onNewSessionInTopic?.(group.workspaceId, section.id),
+    [onNewSessionInTopic, group.workspaceId, section.id],
   );
   // One stable handler for every row instead of a fresh arrow inside the map: `SessionRow`
   // is memoized, and an inline `onDragStart` made each row's props new on every render.
@@ -421,6 +443,7 @@ const Section = React.memo(function Section({ section, group, schedules, selectM
         onToggleSection={onToggleSection}
         onMenu={onMenu}
         onFilter={onFilter}
+        onNewSession={onNewSession}
         onDropSessions={onDropSessions}
         onRename={onRename}
         reorder={reorder}
@@ -448,6 +471,7 @@ export function TopicTree({
   onSelectMany,
   onFilterTopic,
   onNewSession,
+  onNewSessionInTopic,
   onDropSessions,
   onRenameTopic,
   onDropOnRow,
@@ -567,6 +591,7 @@ export function TopicTree({
                         onToggleTopicCollapse={onToggleTopicCollapse}
                         onSelectMany={onSelectMany}
                         onFilter={onFilterTopic}
+                        onNewSessionInTopic={onNewSessionInTopic}
                         onDropSessions={onDropSessions}
                         onRename={onRenameTopic}
                         onDropOnRow={onDropOnRow}

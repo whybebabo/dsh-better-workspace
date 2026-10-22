@@ -190,6 +190,10 @@ test('search matches title, workspace and topic names and caps results', () => {
 
   const byWorkspaceName = buildTree({ ...fixture(), prefs: {}, query: 'beta' });
   assert.deepEqual(byWorkspaceName.groups.flatMap(flatten), ['ses_9']);
+  assert.deepEqual(byWorkspaceName.groups.map((group) => group.workspaceId), [WS_B], 'a workspace with no match does not render an empty header');
+  const noMatch = buildTree({ ...fixture(), prefs: {}, query: 'nothing-matches' });
+  assert.deepEqual(noMatch.groups, [], 'no matches leaves the tree empty so the empty state can render');
+  assert.equal(noMatch.matched, 0);
 
   const many = { ids: [], byId: {}, current: undefined };
   for (let index = 0; index < 140; index++) {

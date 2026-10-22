@@ -203,14 +203,23 @@ export function observeComposerSlot(onChange) {
  * Resolves the workspace shown in the composer against the known list: the picker exposes a
  * title (and the path as its tooltip), never an id, so match on title or path basename and
  * fall back to the only workspace when that is unambiguous.
+ *
+ * A title is not an identity: two workspaces created from identically named directories carry
+ * the same title. Returning the first match in that case would file the open session into the
+ * wrong sidecar, so an ambiguous match resolves to `null` (the caller prefers the session's
+ * own workspace record and otherwise hides the chip).
  */
+function onlyMatch(matches) {
+  return matches.length === 1 ? matches[0].workspaceId : null;
+}
+
 export function resolveComposerWorkspace(workspaceTitle, options) {
   if (!options?.length) return null;
   if (!workspaceTitle) return options.length === 1 ? options[0].workspaceId : null;
   const needle = String(workspaceTitle).trim().toLowerCase();
-  const exact = options.find((option) => String(option.title).toLowerCase() === needle);
-  if (exact) return exact.workspaceId;
-  const byPath = options.find((option) => String(option.path).toLowerCase().split(/[\\/]/).filter(Boolean).pop() === needle);
-  if (byPath) return byPath.workspaceId;
+  const exact = options.filter((option) => String(option.title).toLowerCase() === needle);
+  if (exact.length > 0) return onlyMatch(exact);
+  const byPath = options.filter((option) => String(option.path).toLowerCase().split(/[\\/]/).filter(Boolean).pop() === needle);
+  if (byPath.length > 0) return onlyMatch(byPath);
   return options.length === 1 ? options[0].workspaceId : null;
 }

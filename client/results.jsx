@@ -88,6 +88,11 @@ export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
   const [ack, setAck] = React.useState(false);
   const [outcome, setOutcome] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
+  const ackId = React.useId();
+  // Closing mid-delete would hide the only per-item report while the writes keep going.
+  const close = () => {
+    if (!busy) onClose();
+  };
 
   const load = React.useCallback(async () => {
     setPhase('preview');
@@ -130,13 +135,15 @@ export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
       id: item.sessionId,
       label: label(item.sessionId),
       tone: item.status === 'deleted' ? 'good' : item.status === 'skipped' ? 'warn' : 'bad',
-      detail: item.status === 'deleted' ? `${t('result.ok', { n: 1 })}${item.subagentsRemoved?.length ? ` · ${item.subagentsRemoved.length} 个子智能体` : ''}` : item.error,
+      detail: item.status === 'deleted'
+        ? `${t('result.ok', { n: 1 })}${item.subagentsRemoved?.length ? ` · ${t('delete.subagentCount', { n: item.subagentsRemoved.length })}` : ''}`
+        : item.error,
     }));
     const failedIds = outcome.items.filter((item) => item.status === 'failed').map((item) => item.sessionId);
     return (
       <Dialog
         title={t('delete.title', { n: ids.length })}
-        onClose={onClose}
+        onClose={close}
         width={460}
         footer={
           <>
@@ -146,7 +153,7 @@ export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
               </Button>
             ) : null}
             <span className="dts-spacer" />
-            <Button variant="primary" onClick={onClose}>
+            <Button variant="primary" disabled={busy} onClick={close}>
               {t('action.done')}
             </Button>
           </>
@@ -155,7 +162,12 @@ export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
         <p className="dts-result__summary">
           {t('delete.results', { ok: outcome.summary.deleted, skipped: outcome.summary.skipped, failed: outcome.summary.failed })}
         </p>
-        {outcome.assignmentCleanup?.failed ? <p className="dts-error">{`主题归属清理失败:${outcome.assignmentCleanup.error}`}</p> : null}
+        {outcome.summary.partial > 0 ? (
+          <p className="dts-result__summary">{t('delete.resultsPartial', { n: outcome.summary.partial })}</p>
+        ) : null}
+        {outcome.assignmentCleanup?.failed ? (
+          <p className="dts-error">{t('delete.cleanupFailed', { error: outcome.assignmentCleanup.error })}</p>
+        ) : null}
         <ItemList entries={entries} emptyText={t('result.none')} />
       </Dialog>
     );
@@ -164,13 +176,13 @@ export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
   return (
     <Dialog
       title={t('delete.title', { n: ids.length })}
-      onClose={onClose}
+      onClose={close}
       width={460}
       footer={
         <>
-          {phase === 'failed' ? <Button onClick={load}>{t('menu.reload')}</Button> : null}
+          {phase === 'failed' ? <Button onClick={load} disabled={busy}>{t('menu.reload')}</Button> : null}
           <span className="dts-spacer" />
-          <Button onClick={onClose} disabled={busy}>
+          <Button onClick={close} disabled={busy}>
             {t('action.cancel')}
           </Button>
           <Button variant="danger" disabled={busy || phase !== 'ready' || !ack || deletable.length === 0} onClick={() => execute(deletable.map((item) => item.sessionId))}>
@@ -203,10 +215,12 @@ export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
               />
             </>
           ) : null}
-          <label className={cx('dts-ack', ack && 'is-on')}>
-            <Checkbox checked={ack} onChange={setAck} label={t('delete.ack')} />
-            <span>{t('delete.ack')}</span>
-          </label>
+          <div className={cx('dts-ack', ack && 'is-on')}>
+            {/* The checkbox is its own label; wrapping it in a second <label> is invalid
+                markup and can toggle it twice in some browsers. */}
+            <Checkbox checked={ack} onChange={setAck} label={t('delete.ack')} id={ackId} />
+            <label htmlFor={ackId}>{t('delete.ack')}</label>
+          </div>
         </>
       ) : null}
     </Dialog>

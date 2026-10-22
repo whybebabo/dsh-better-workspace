@@ -209,6 +209,9 @@ export const SessionRow = React.memo(function SessionRow({
       }}
       onClick={() => (selectMode ? onToggleSelect(row.id) : onOpen(row))}
       onKeyDown={(event) => {
+        // The action strip lives inside this focusable row; its own key handling must not be
+        // turned into "open the session" or cancelled here.
+        if (event.target !== event.currentTarget) return;
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
           if (selectMode) onToggleSelect(row.id);
@@ -218,6 +221,8 @@ export const SessionRow = React.memo(function SessionRow({
       onDoubleClick={(event) => {
         // The desktop build renames on double-click instead of opening twice. A blank row is
         // the provisional New Session and has nothing to rename yet — same as the stock list.
+        // Double-clicks that belong to an action control must not fall through to rename.
+        if (event.target?.closest?.('button, input, label, a, [role="button"]')) return;
         event.preventDefault();
         if (row.blank || selectMode) return;
         onRename?.(row);

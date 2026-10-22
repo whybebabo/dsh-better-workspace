@@ -370,7 +370,6 @@ function stabilize(cache, key, value, scalars, childKey) {
 
 /** Drops cache entries the current build did not touch (closed workspaces, deleted topics). */
 function pruneCache(cache, liveKeys) {
-  if (cache.size <= liveKeys.size) return;
   for (const key of cache.keys()) if (!liveKeys.has(key)) cache.delete(key);
 }
 
@@ -526,6 +525,9 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
       sections.push(stabilize(sectionCache, key, { kind: 'archived', id: '__archived__', name: null, emoji: '', rows: archivedRows, status: null, statusKind: null, collapsed: search ? false : collapsedWorkspaces.has(key), total: archivedRows.length }, SECTION_SCALARS, 'rows'));
     }
 
+    // A search that matched nothing in this workspace must not leave an empty header behind;
+    // with one header per workspace the "no matches" state would otherwise be unreachable.
+    if (search && sections.length === 0) continue;
     const workspaceStatus = aggregateMembers(finalIds, {
       byId,
       archived,
@@ -687,8 +689,8 @@ export function buildWorkspaceOptions({ items, list, archivedIds }) {
  * topics, so array position is the fallback for older documents.
  *
  * Kept exported because it is the honest answer to "which group is newest", but no longer used
- * by the new-session watcher: topics render oldest-first, so the newest group is usually the
- * *last* one, and filing a fresh session there put it at the bottom of the workspace.
+ * by the new-session watcher: an implicit new session stays unfiled in the default group (or
+ * follows the active topic filter), so there is no group to guess.
  */
 export function newestTopic(topics) {
   const list = topics ?? [];

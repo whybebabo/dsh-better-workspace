@@ -111,6 +111,9 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, topic
   const [selected, setSelected] = React.useState(() => new Set());
   const [error, setError] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
+  const close = () => {
+    if (!busy) onClose();
+  };
   const rows = chosen ? (rowsFor?.(chosen) ?? []) : [];
   // The create button greys out on a bad name; the hint explains why instead of leaving the
   // user guessing.
@@ -152,11 +155,11 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, topic
       title={t('topic.new')}
       description={t('topic.createDescription')}
       className="dts-dialog--settings"
-      onClose={onClose}
+      onClose={close}
       width={560}
       footer={
         <>
-          <Button variant="ghost" onClick={onClose}>{t('action.cancel')}</Button>
+          <Button variant="ghost" onClick={close} disabled={busy}>{t('action.cancel')}</Button>
           <Button variant="primary" disabled={busy || Boolean(problem) || !chosen} onClick={submit}>
             {busy ? t('state.loading') : t('action.create')}
           </Button>
@@ -287,14 +290,17 @@ export function EditTopicDialog({ topic, workspaceId, topicsFor, emojis, onSubmi
 
 export function DeleteTopicDialog({ topic, count, onConfirm, onClose }) {
   const [busy, setBusy] = React.useState(false);
+  const close = () => {
+    if (!busy) onClose();
+  };
   return (
     <Dialog
       title={t('topic.deleteConfirm', { name: topic.name })}
-      onClose={onClose}
+      onClose={close}
       width={380}
       footer={
         <>
-          <Button onClick={onClose}>{t('action.cancel')}</Button>
+          <Button onClick={close} disabled={busy}>{t('action.cancel')}</Button>
           <Button
             variant="danger"
             disabled={busy}
@@ -419,9 +425,12 @@ export function RenameSessionDialog({ row, onSubmit, onClose }) {
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(null);
   const trimmed = title.trim();
+  const close = () => {
+    if (!busy) onClose();
+  };
   const commit = async () => {
     if (!trimmed || trimmed === row.title) {
-      onClose();
+      close();
       return;
     }
     setBusy(true);
@@ -436,11 +445,11 @@ export function RenameSessionDialog({ row, onSubmit, onClose }) {
   return (
     <Dialog
       title={t('session.rename')}
-      onClose={onClose}
+      onClose={close}
       width={400}
       footer={
         <>
-          <Button onClick={onClose}>{t('action.cancel')}</Button>
+          <Button onClick={close} disabled={busy}>{t('action.cancel')}</Button>
           <Button variant="primary" disabled={busy || !trimmed} onClick={commit}>
             {t('action.save')}
           </Button>

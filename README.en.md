@@ -145,7 +145,8 @@ Expect `200`, with `ok: true` and your group data under `result.workspaces`.
 
 ### Groups
 
-- **Create** — from the workspace `⋯` menu, or the "new topic and put it in…" item in the header ＋ menu; you can also drag a session onto a group to file it.
+- **Create** — from the workspace `⋯` menu, or the "new topic and put it in…" item in the header ＋ menu; you can also drag a session onto a group to file it. A new group takes the top slot in its workspace's group list, so you do not have to scroll to the bottom to find it.
+- **New session** — the ＋ on a group row starts a session directly in that group (a workspace row's ＋ starts one in that workspace).
 - **Rename** — double-click a group name to edit inline (duplicates and illegal characters are reported immediately, and the save is disabled).
 - **Reorder** — drag a group row; dropping on the upper or lower half of a target row decides the insert position, with an insertion line while dragging.
 - **Only this group** — the filter in a group's `⋯` menu also locks to that group's workspace, so identically named groups never bleed across workspaces.
@@ -165,9 +166,9 @@ Every workspace has a system default group. It cannot be renamed or deleted, but
 ### Where a new session lands
 
 - The header ＋ "new session", a workspace row's ＋, and the rail's "new session" all leave the session with **no group assignment written**, so it stays in the system default group and sorts first inside that bucket — the same placement the official list gives it;
-- A group's "New session in this group" menu item, or an explicitly chosen group in the ＋ flow: the session is created and then filed into that group;
+- A group row's ＋, or an explicitly chosen group in the ＋ flow: the session is created and then filed into that group;
 - Creating one while "only this group" is active files it into that group, since it is the place you are looking at;
-- Earlier versions filed implicit new sessions into the "most recently created group". Groups render oldest-first, so that group is usually the last one, which dropped the new row at the bottom of the workspace. That behavior is gone.
+- Earlier versions filed implicit new sessions into the "most recently created group". Groups used to render oldest-first, so that group was usually the last one, which dropped the new row at the bottom of the workspace. That behavior is gone; a newly created group now leads the list instead.
 
 > The default group itself is still draggable (like the native list: it cannot be renamed or deleted, but it can be reordered). Drag it to the bottom and ungrouped sessions sit down there with it — that is your own ordering, not the plugin pushing new sessions to the end again; drag it back up to restore the placement.
 
@@ -323,7 +324,7 @@ The `github:...#v0.1.2` install path only works once a tag exists; the two are i
 - The **workspace** order is stored in local preferences only, so it is not shared across windows (group order is);
 - The official Workspace header's search/sort buttons are covered; the panel provides its own local search (local matching, not the remote `sessions.search`);
 - The session row menu is drawn by the plugin (it cannot borrow the official entry, see above), but order, wording, icons and shortcut hints match the original item by item; hints come from the host's current default bindings, so rebinding them in settings leaves the hint text stale (the action itself still goes through official commands);
-- "New session in this group" relies on the host marking new sessions as `blank`; if a future version stops doing that it degrades to "not auto-filed" (still movable), never to modifying existing sessions;
+- The group row's ＋ "new session" relies on the host marking new sessions as `blank`; if a future version stops doing that it degrades to "not auto-filed" (still movable), never to modifying existing sessions;
 - Permanent deletion depends on host-internal service names (`sessions`/`agents`/`workspaceRegistry`/`storageDomain` with `session_projcache` and `workspace`), which need re-checking on every DSH major version; if a cleanup service is missing the log is still deleted and failures are recorded in the result;
 - The cross-process "being written" check is a **conservative approximation**: the plugin cannot query the kernel lease from the browser or host process, so it uses the artifact's recent modification time (15-second quiet window). A session that just finished writing may be refused for up to 15 seconds (the preview reports `locked`; retry shortly), and conversely a quiet but still-running session may be missed — this boundary prefers to let something through rather than delete the wrong thing;
 - Inline rename and drag ordering depend on native DOM/junction behaviour; jsdom covers structure but not visuals ("status yields to the caret" is pure CSS, so deleting those rules leaves tests green and needs eyeballing);

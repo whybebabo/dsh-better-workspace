@@ -61,7 +61,7 @@ function useSnapshot(source, enabled = true) {
 const TREE_HANDLER_KEYS = [
   'onOpenSession', 'onMenu', 'onArchive', 'onPin', 'onRenameSession', 'onHint', 'onHintEnd',
   'onToggleWorkspaceCollapse', 'onToggleTopicCollapse', 'onToggleSelection', 'onSelectMany',
-  'onFilterTopic', 'onNewSession', 'onDropSessions', 'onRenameTopic', 'onDropOnRow', 'onToggleReveal',
+  'onFilterTopic', 'onNewSession', 'onNewSessionInTopic', 'onDropSessions', 'onRenameTopic', 'onDropOnRow', 'onToggleReveal',
 ];
 
 function useStableDispatch(keys) {
@@ -115,16 +115,21 @@ export function OverlayPanel({ actions, schedules }) {
 
   /**
    * "On screen" is the one condition every resident subscription and timer below hangs off.
+   * This is deliberately computed from `geom.visible` alone — not from `state.ready` —
+   * because the geometry observer is what brings the panel back; gating it on readiness
+   * would deadlock the first paint.
    *
-   * The two `return null`s in this component sit *after* the hooks, so a rail-collapsed or
-   * narrow-viewport panel still ran its store subscription, minute timer, catalog retries and
-   * schedule invalidation while painting nothing. This is deliberately computed from
-   * `geom.visible` alone — not from `state.ready` — because the geometry observer is what
-   * brings the panel back; gating it on readiness would deadlock the first paint.
+   * The composing chip is the one exception: it is portaled into the host composer rather
+   * than painted inside the covered region, so it stays on screen when the sidebar collapses
+   * to the rail. Its store subscription therefore follows the seat, not the panel.
    */
   const onScreen = Boolean(geom.visible);
+  const composerSeated = Boolean(composer.container);
 
-  const sessionSnapshot = useSnapshot(actions.sessionStore, onScreen);
+  // The composer chip stays mounted while the sidebar is collapsed, so the open-session id it
+  // renders must keep following the host list. Statuses are only needed by the tree, which is
+  // unmounted while hidden, so that subscription still follows the panel alone.
+  const sessionSnapshot = useSnapshot(actions.sessionStore, onScreen || composerSeated);
   const sessionStatuses = useSnapshot(actions.sessionStatusStore, onScreen);
   /**
    * The workspace list stays subscribed while hidden: the rail bridge uses it as its input.
@@ -138,9 +143,9 @@ export function OverlayPanel({ actions, schedules }) {
   const schedulesById = scheduleSnapshot?.bySession ?? null;
 
   React.useEffect(() => {
-    if (!onScreen) return undefined;
+    if (!onScreen && !composerSeated) return undefined;
     return store.subscribe(() => setState(store.getState()));
-  }, [store, onScreen]);
+  }, [store, onScreen, composerSeated]);
   React.useEffect(() => {
     // The catalog is read only once the panel is on screen; the store coalesces refreshes.
     // Suspending it releases the two host invalidations, so a hidden rail costs nothing.
@@ -154,11 +159,13 @@ export function OverlayPanel({ actions, schedules }) {
   }, [schedules, onScreen]);
   React.useEffect(() => {
     // A hidden panel does not need the sidecar document; `store.load()` on resume refreshes it,
-    // so a rail-collapsed window stops issuing this GET entirely.
-    if (!onScreen) return undefined;
+    // so a rail-collapsed window stops issuing this GET entirely. The composer chip is the
+    // exception: it is portaled outside the covered region, so a page that *starts* collapsed
+    // still has to read the document once to know which topic the open session belongs to.
+    if (!onScreen && !composerSeated) return undefined;
     store.load();
     return undefined;
-  }, [store, onScreen]);
+  }, [store, onScreen, composerSeated]);
   /**
    * Workspace membership repair, once per page load.
    *
@@ -341,10 +348,10 @@ export function OverlayPanel({ actions, schedules }) {
    * - otherwise the blank stays in the workspace's **default group** unless the panel is
    *   filtered to a topic, in which case it joins the topic being looked at.
    *
-   * This used to file every implicit blank into the workspace's most recently *created* topic.
-   * Topics are ordered oldest-first, so "newest topic" is usually the last one: clicking 新会话
-   * dropped the row at the bottom of the workspace, in a group the user was not looking at,
-   * while the stock list puts a new session first in its workspace. The default group is the
+   * This used to file every implicit blank into the workspace's most recently *created* topic:
+   * clicking 新会话 dropped the row into a group the user was not looking at (and, before new
+   * topics led the list, often at the bottom of the workspace), while the stock list puts a new
+   * session first in its workspace. The default group is the
    * first bucket of every workspace and the blank sorts first inside a bucket, so leaving the
    * row unfiled reproduces the stock placement. Nothing is written to the sidecar for it.
    *
@@ -439,7 +446,8 @@ export function OverlayPanel({ actions, schedules }) {
       if (found) return { ...found, name: topicLabel(found) };
     }
     return null;
-  }, [prefs.topicFilter, options, state.workspaces, store]);
+    // `topicLabel` reads the module-level language; the memo has to recompute on a switch.
+  }, [prefs.topicFilter, options, state.workspaces, store, language]);
 
   const titles = React.useMemo(() => {
     const map = {};
@@ -612,7 +620,7 @@ export function OverlayPanel({ actions, schedules }) {
         // Expand first, then start exactly like the host's expanded 新会话 button (which calls
         // `startSession()` without a workspace). The blank is still auto-filed by the panel.
         actions.toggleSidebar();
-        actions.startSession();
+        Promise.resolve(actions.startSession()).catch((error) => flash(error?.message ?? String(error), 'bad'));
       } catch (error) {
         flash(error?.message ?? String(error), 'bad');
       }
@@ -660,8 +668,9 @@ export function OverlayPanel({ actions, schedules }) {
     return () => clearTimeout(timer);
   }, [geom.visible, railIntent]);
 
+  // An unusable sidecar owns nothing to paint, including the composer chip: it has no topics
+  // to offer and its writes cannot land.
   if (!state.ready || !state.reachable) return null;
-  if (!geom.visible) return null;
 
   const style = geom.rect ? { left: geom.rect.left, top: geom.rect.top, width: geom.rect.width, height: geom.rect.height } : undefined;
   const pickWorkspace = (workspaceId) => setPrefs({ workspaceFilter: workspaceId, topicFilter: null });
@@ -956,16 +965,6 @@ export function OverlayPanel({ actions, schedules }) {
       <MenuItem key="select" icon={<Icon name="check" />} onSelect={() => { setMenu(null); selectBucket(group, section); }}>
         {t('topic.batchSelect')}
       </MenuItem>,
-      <MenuItem
-        key="new"
-        icon={<Icon name="plus" />}
-        onSelect={() => {
-          setMenu(null);
-          startSessionUnderTopic(group.workspaceId, section.id);
-        }}
-      >
-        {t('topic.newSession')}
-      </MenuItem>,
     ];
     // The default group is system-owned: it can be filtered, filled and selected, but not
     // renamed or deleted.
@@ -1020,9 +1019,6 @@ export function OverlayPanel({ actions, schedules }) {
     </MenuItem>,
     <MenuItem key="add" icon={<Icon name="plus" />} onSelect={() => { setMenu(null); setDialog({ type: 'create', workspaceId: group.workspaceId }); }}>
       {t('action.addTopic')}
-    </MenuItem>,
-    <MenuItem key="new" icon={<Icon name="plus" />} onSelect={() => { setMenu(null); newSession(group.workspaceId); }}>
-      {t('menu.newSession')}
     </MenuItem>,
     <div key="sep" className="dts-menu__sep" role="separator" />,
     <MenuItem
@@ -1086,7 +1082,9 @@ export function OverlayPanel({ actions, schedules }) {
 
   function newSession(workspaceId) {
     try {
-      actions.startSession(workspaceId ?? undefined);
+      const started = actions.startSession(workspaceId ?? undefined);
+      // Host commands may be async; a rejected create must not become an unhandled rejection.
+      Promise.resolve(started).catch((error) => flash(error?.message ?? String(error), 'bad'));
     } catch (error) {
       flash(error?.message ?? String(error), 'bad');
     }
@@ -1113,14 +1111,24 @@ export function OverlayPanel({ actions, schedules }) {
 
   function startSessionUnderTopic(workspaceId, topicId) {
     armTopic(workspaceId, topicId);
-    try {
-      actions.startSession(workspaceId);
-    } catch (error) {
-      pendingRef.current = null;
-      setPendingTopic(null);
-      clearTimeout(timersRef.current.arm);
-      timersRef.current.arm = null;
+    const abandon = (error) => {
+      // Only this arm may be cleared: a newer + click owns `pendingRef` now.
+      const pending = pendingRef.current;
+      if (pending && pending.topicId === topicId && pending.workspaceId === workspaceId) {
+        pendingRef.current = null;
+        setPendingTopic(null);
+        clearTimeout(timersRef.current.arm);
+        timersRef.current.arm = null;
+      }
       flash(error?.message ?? String(error), 'bad');
+    };
+    try {
+      const started = actions.startSession(workspaceId);
+      // Without this, a rejected async create left the arm alive for 90s and the next blank in
+      // the workspace was filed into a topic the user never successfully started.
+      Promise.resolve(started).catch(abandon);
+    } catch (error) {
+      abandon(error);
     }
   }
 
@@ -1140,11 +1148,32 @@ export function OverlayPanel({ actions, schedules }) {
    * the user file it (or move it out) without leaving the input. Rendered into the seat the
    * composer module keeps right after the native workspace picker.
    */
-  const composerWorkspaceId = resolveComposerWorkspace(composer.workspaceTitle, options);
   const composerSessionId = tree.currentSessionId ?? null;
-  const composerTopic = composerWorkspaceId && composerSessionId
-    ? (store.topicsOf(composerWorkspaceId) ?? []).find((entry) => entry.id === ((store.assignmentsOf(composerWorkspaceId) ?? {})[composerSessionId] ?? DEFAULT_TOPIC_ID)) ?? null
+  const composerSession = composerSessionId ? (list.byId ?? {})[composerSessionId] ?? null : null;
+  /**
+   * The composer's picker exposes a *title*, never an id, and titles are not unique (two
+   * folders named "app"). The session itself is the authority: its workspace record or `cwd`
+   * identifies the sidecar bucket the chip may write to. Only a blank session that the host
+   * has not accounted yet falls back to the visible title.
+   */
+  const composerSessionWorkspace = composerSession
+    ? options.find((option) => option.sessionIds.includes(composerSessionId))
+      ?? options.find((option) => samePath(option.path, composerSession.cwd))
+      ?? null
     : null;
+  const composerWorkspaceId = composerSessionWorkspace?.workspaceId
+    ?? resolveComposerWorkspace(composer.workspaceTitle, options);
+  const composerTopics = composerWorkspaceId ? store.topicsOf(composerWorkspaceId) ?? [] : [];
+  const composerAssignedId = composerWorkspaceId && composerSessionId
+    ? (store.assignmentsOf(composerWorkspaceId) ?? {})[composerSessionId] ?? DEFAULT_TOPIC_ID
+    : null;
+  // A stale assignment (topic deleted in another window) falls back to the default group,
+  // matching what the tree does with the same document.
+  const composerTopic = composerAssignedId === null
+    ? null
+    : composerTopics.find((entry) => entry.id === composerAssignedId)
+      ?? composerTopics.find((entry) => entry.id === DEFAULT_TOPIC_ID)
+      ?? null;
 
   const assignCurrent = async (topicId) => {
     setComposerMenu(null);
@@ -1165,7 +1194,9 @@ export function OverlayPanel({ actions, schedules }) {
       aria-haspopup="menu"
       aria-expanded={Boolean(composerMenu)}
       title={t('composer.pickTopic')}
-      onClick={(event) => setComposerMenu(composerMenu ? null : event.currentTarget.getBoundingClientRect())}
+      onClick={(event) => setComposerMenu(
+        composerMenu ? null : { el: event.currentTarget, rect: event.currentTarget.getBoundingClientRect() },
+      )}
     >
       {composerTopic ? <TopicMark emoji={composerTopic.emoji} /> : <Icon name="topic" />}
       <span className="dts-composer-topic__label">{composerTopic ? topicLabel(composerTopic) : t('composer.pickTopic')}</span>
@@ -1175,7 +1206,7 @@ export function OverlayPanel({ actions, schedules }) {
   ) : null;
 
   const composerPopover = composerMenu ? createPortal(
-    <Popover anchor={composerMenu} onClose={() => setComposerMenu(null)} width={240} align="left" className="dts-pop--composer">
+    <Popover anchor={composerMenu.rect} anchorEl={composerMenu.el} onClose={() => setComposerMenu(null)} width={240} align="left" className="dts-pop--composer">
       <div className="dts-pop__head">{t('composer.pickTopic')}</div>
       <div className="dts-pop__list">
         {(composerWorkspaceId ? topicsWithCounts(composerWorkspaceId) : []).map((topic) => (
@@ -1203,6 +1234,20 @@ export function OverlayPanel({ actions, schedules }) {
     </Popover>,
     document.body,
   ) : null;
+
+  /**
+   * A hidden panel owns only the composer chip. That seat lives in the host composer, so it
+   * must outlive a collision with the rail; the tree, dialogs and hover cards all belong to
+   * the covered region and stay unmounted.
+   */
+  if (!geom.visible) {
+    return (
+      <>
+        {composerChip}
+        {composerPopover}
+      </>
+    );
+  }
 
   const hintStatus = hint && !hint.row.archived
     ? hint.row.pendingKind
@@ -1234,6 +1279,7 @@ export function OverlayPanel({ actions, schedules }) {
     onSelectMany: selectMany,
     onFilterTopic: (topicId, workspaceId) => pickTopic(prefs.topicFilter === topicId ? null : topicId, workspaceId),
     onNewSession: newSession,
+    onNewSessionInTopic: startSessionUnderTopic,
     onDropSessions: dropSessions,
     onRenameTopic: renameTopic,
     onDropOnRow: dropOnRow,
@@ -1245,7 +1291,7 @@ export function OverlayPanel({ actions, schedules }) {
       <div className="dts-panel">
         {prefs.selectMode ? (
           <BatchBar
-            count={selectedIds.length}
+            count={liveSelection.length}
             busy={state.busy !== null || progress !== null}
             progress={progress}
             hasArchived={selectedRows.some((row) => row.archived)}
@@ -1320,6 +1366,7 @@ export function OverlayPanel({ actions, schedules }) {
             onSelectMany={treeHandlers.onSelectMany}
             onFilterTopic={treeHandlers.onFilterTopic}
             onNewSession={treeHandlers.onNewSession}
+            onNewSessionInTopic={treeHandlers.onNewSessionInTopic}
             onDropSessions={treeHandlers.onDropSessions}
             onRenameTopic={treeHandlers.onRenameTopic}
             onDropOnRow={treeHandlers.onDropOnRow}

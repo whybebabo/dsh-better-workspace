@@ -38,15 +38,28 @@ test('creates topics, persists them, rotates emoji markers', async () => {
   assert.equal(onDisk.version, 1);
   assert.equal(onDisk.revision, 2);
   assert.equal(onDisk.workspaces.ws_a.topics.length, 3, 'the reserved default group is persisted too');
-  assert.equal(onDisk.workspaces.ws_a.topics[0].id, DEFAULT_TOPIC_ID);
-  assert.equal(onDisk.workspaces.ws_a.topics[0].system, true);
+  assert.equal(onDisk.workspaces.ws_a.topics[0].name, '排查', 'the newest topic leads the list');
+  assert.equal(onDisk.workspaces.ws_a.topics.at(-1).id, DEFAULT_TOPIC_ID);
+  assert.equal(onDisk.workspaces.ws_a.topics.at(-1).system, true);
+});
+
+test('new topics are inserted above the existing ones', async () => {
+  const { store } = await freshStore();
+  const a = (await store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 })).result.topic;
+  const b = (await store.createTopic({ workspaceId: 'ws_a', name: 'B', expectedRevision: 1 })).result.topic;
+  const listed = (await store.snapshot()).workspaces.ws_a.topics;
+  assert.deepEqual(listed.map((topic) => topic.name), ['B', 'A', '默认分组']);
+  assert.ok(listed[0].order < listed[1].order, 'the newcomer takes the lowest order');
+  assert.equal(b.order, a.order - 1, 'each new topic slots in above the previous one');
+  assert.equal(listed.at(-1).order, -1, 'existing orders stay untouched');
 });
 
 test('the default group exists in every snapshot and cannot be renamed or deleted', async () => {
   const { store } = await freshStore();
   const snapshot = await store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 });
   const listed = (await store.snapshot()).workspaces.ws_a.topics;
-  assert.equal(listed[0].id, DEFAULT_TOPIC_ID, 'the default group leads the list');
+  assert.equal(listed[0].name, 'A', 'the new topic leads the list');
+  assert.ok(listed.some((topic) => topic.id === DEFAULT_TOPIC_ID), 'the default group is always present');
 
   await assert.rejects(
     () => store.updateTopic({ workspaceId: 'ws_a', topicId: DEFAULT_TOPIC_ID, name: '改名', expectedRevision: snapshot.revision }),
@@ -275,6 +288,22 @@ test('a store leaves read-only mode after a successful repair write', async () =
   const next = await store.createTopic({ workspaceId: 'ws_a', name: 'D', expectedRevision: repaired.revision });
   assert.equal(next.revision, 3);
   assert.equal((await store.snapshot()).readOnly, false);
+});
+
+test('an external repair clears the read-only snapshot without a write', async () => {
+  const { store } = await freshStore();
+  await store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 });
+  await store.createTopic({ workspaceId: 'ws_a', name: 'B', expectedRevision: 1 });
+  const { writeFile } = await import('node:fs/promises');
+  await writeFile(store.file, '{ truncated', 'utf8');
+  assert.equal((await store.snapshot()).readOnly, true, 'the broken primary is reported');
+
+  // Repair the document outside the store, exactly as a user or a sync tool would.
+  const backup = await readFile(`${store.file}.bak`, 'utf8');
+  await writeFile(store.file, backup, 'utf8');
+  const snapshot = await store.snapshot();
+  assert.equal(snapshot.readOnly, false, 'the next readable snapshot is not stuck on the old corruption');
+  assert.equal(snapshot.warning, null);
 });
 
 test('a write without expectedRevision is refused instead of silently winning', async () => {

@@ -141,6 +141,14 @@ export function IconButton({ label, onClick, children, active = false, disabled 
         event.stopPropagation();
         if (!disabled) onClick?.(event);
       }}
+      // Rows carry their own Enter/Space and double-click handlers. Without these stops a
+      // keyboard activation would open/toggle the row instead of the button, and double-click
+      // on a row action would open the rename dialog behind the action it just performed.
+      // Only activation keys are stopped: host shortcuts (Ctrl/⌘ combinations) still bubble.
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
+      }}
+      onDoubleClick={(event) => event.stopPropagation()}
     >
       {children}
     </button>
@@ -165,20 +173,28 @@ export function Button({ children, onClick, variant = 'default', disabled = fals
   );
 }
 
-export function Checkbox({ checked, indeterminate = false, onChange, label, disabled = false }) {
+export function Checkbox({ checked, indeterminate = false, onChange, label, disabled = false, id }) {
   const ref = React.useRef(null);
   React.useEffect(() => {
     if (ref.current) ref.current.indeterminate = indeterminate && !checked;
   }, [indeterminate, checked]);
   return (
-    <label className={cx('dts-check', disabled && 'is-disabled')} title={label}>
+    <label
+      className={cx('dts-check', disabled && 'is-disabled')}
+      title={label}
+      onDoubleClick={(event) => event.stopPropagation()}
+    >
       <input
         ref={ref}
+        id={id}
         type="checkbox"
         checked={checked}
         disabled={disabled}
-        aria-label={label}
+        aria-label={id ? undefined : label}
         onChange={(event) => onChange?.(event.target.checked)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
+        }}
       />
       <span className="dts-check__box" aria-hidden="true" />
     </label>

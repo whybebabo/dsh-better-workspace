@@ -58,7 +58,6 @@ const zh = {
   'menu.collapseAll': '折叠全部',
   'menu.expandAll': '展开全部',
   'menu.reload': '刷新',
-  'menu.newSession': '在当前工作区新建会话',
 
   'topic.default': '默认分组',
   'topic.archived': '已归档',
@@ -70,6 +69,8 @@ const zh = {
   'topic.noIcon': '无图标(显示为短横)',
   'topic.filter': '只看此分组',
   'topic.batchSelect': '选择此分组全部会话',
+  'topic.selectAll': '{name} 全选',
+  'topic.selectAllShown': '{name} 全选(仅已显示的 {shown} 条,另有 {hidden} 条未展开)',
   'topic.selectHidden': '已选中 {shown} 条;另有 {hidden} 条未显示,展开后再选',
   'topic.delete': '删除分组',
   'topic.deleteConfirm': '删除分组「{name}」?',
@@ -86,6 +87,7 @@ const zh = {
   'topic.emptyHere': '这个工作区还没有分组',
   'topic.moveHere': '新建分组并放入…',
   'topic.newSession': '在此分组下新建会话',
+  'topic.newSessionAria': '在「{name}」下新建会话',
   'topic.dropHere': '拖到这里归入此分组',
   'topic.renameHint': '双击分组名可直接改名',
 
@@ -180,6 +182,9 @@ const zh = {
   'delete.blocked': '有 {n} 个会话被安全检查拦下,不会删除。',
   'delete.runningNote': '正在运行,删除前会先停止',
   'delete.results': '删除完成:成功 {ok} 个,跳过 {skipped} 个,失败 {failed} 个。',
+  'delete.resultsPartial': '部分完成:{n} 个会话已删除,但子智能体未能全部清理。',
+  'delete.subagentCount': '{n} 个子智能体',
+  'delete.cleanupFailed': '主题归属清理失败:{error}',
 
   'result.title': '批量操作结果',
   'result.ok': '成功 {n}',
@@ -261,7 +266,6 @@ const en = {
   'menu.collapseAll': 'Collapse all',
   'menu.expandAll': 'Expand all',
   'menu.reload': 'Refresh',
-  'menu.newSession': 'New session in this workspace',
 
   'topic.default': 'Default',
   'topic.archived': 'Archived',
@@ -273,6 +277,8 @@ const en = {
   'topic.noIcon': 'No marker (shown as a dash)',
   'topic.filter': 'Show only this topic',
   'topic.batchSelect': 'Select every session in this topic',
+  'topic.selectAll': 'Select all in {name}',
+  'topic.selectAllShown': 'Select all in {name} (only {shown} shown; {hidden} more hidden)',
   'topic.selectHidden': 'Selected {shown}; {hidden} more are not shown yet — expand the bucket to include them',
   'topic.delete': 'Delete topic',
   'topic.deleteConfirm': 'Delete topic “{name}”?',
@@ -289,6 +295,7 @@ const en = {
   'topic.emptyHere': 'This workspace has no topics yet',
   'topic.moveHere': 'Create a topic and move there…',
   'topic.newSession': 'New session in this topic',
+  'topic.newSessionAria': 'New session in “{name}”',
   'topic.dropHere': 'Drop here to file into this topic',
   'topic.renameHint': 'Double-click a topic name to rename it',
 
@@ -383,6 +390,9 @@ const en = {
   'delete.blocked': '{n} sessions were held back by the safety checks and will not be deleted.',
   'delete.runningNote': 'Running — it will be stopped first',
   'delete.results': 'Delete finished: {ok} removed, {skipped} skipped, {failed} failed.',
+  'delete.resultsPartial': 'Partially completed: {n} session(s) were deleted, but some subagents could not be cleaned up.',
+  'delete.subagentCount': '{n} subagents',
+  'delete.cleanupFailed': 'Topic assignment cleanup failed: {error}',
 
   'result.title': 'Bulk action results',
   'result.ok': '{n} done',

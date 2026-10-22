@@ -35,8 +35,10 @@ let disposers;
 let slotCalls;
 /** Per-test override for `archiveSession`, so the "needs a stop" path can be exercised. */
 let archiveImpl;
+let startSessionImpl;
 let startSessionCalls = 0;
 let startSessionArgs = [];
+let openSessionCalls = 0;
 let toggleSidebarCalls = 0;
 let workspaceRenameCalls = [];
 let workspaceDeleteCalls = [];
@@ -261,10 +263,11 @@ function applyPlugin(mod) {
       }
       if (name === 'uiWorkspace') {
         return {
-          openSession() {},
+          openSession() { openSessionCalls += 1; },
           startSession(workspaceId) {
             startSessionCalls += 1;
             startSessionArgs.push(workspaceId);
+            return startSessionImpl ? startSessionImpl(workspaceId) : undefined;
           },
           archiveSession: async (id) => (archiveImpl ? archiveImpl(id) : undefined),
           unarchiveSession: async () => {},
@@ -332,8 +335,10 @@ beforeEach(async () => {
   slotCalls = [];
   archiveImpl = null;
   pinImpl = null;
+  startSessionImpl = null;
   startSessionCalls = 0;
   startSessionArgs = [];
+  openSessionCalls = 0;
   toggleSidebarCalls = 0;
   workspaceRenameCalls = [];
   workspaceDeleteCalls = [];
@@ -600,15 +605,16 @@ test('a session started from a topic is filed into it', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
   await mount();
+  const plus = find('.dts-row--topic', '设计').querySelector('.dts-row__actions .dts-iconbtn[title="在此分组下新建会话"]');
+  assert.ok(plus, 'the topic row offers a direct new-session button');
+  assert.equal(plus.getAttribute('aria-label'), '在「设计」下新建会话');
+  assert.equal(plus.querySelector('svg').getAttribute('data-icon'), 'new-chat', 'it uses the native new-session glyph');
   await act(async () => {
-    find('.dts-row--topic', '设计').dispatchEvent(new window.Event('contextmenu', { bubbles: true, cancelable: true }));
+    plus.dispatchEvent(new window.Event('click', { bubbles: true }));
   });
   await tick();
-  const item = [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')].find((node) => node.textContent.includes('在此分组下新建会话'));
-  assert.ok(item, 'the topic menu offers a new session');
-  await act(async () => {
-    item.dispatchEvent(new window.Event('click', { bubbles: true }));
-  });
+  assert.deepEqual(startSessionArgs, [WORKSPACE], 'the button starts the session in the topic workspace');
+  assert.equal(find('.dts-row--topic', '设计').className.includes('is-collapsed'), false, 'and leaves the row expanded');
 
   const before = sessionSource.getSnapshot();
   const created = { id: 'ses_new', displayTitle: '', cwd: 'D:/work/one', updatedAt: Date.now(), blank: true, retainedBy: { mainView: 1 } };
@@ -627,12 +633,7 @@ test('an unrelated session appearing later is not claimed by a pending topic', a
   responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
   await mount();
   await act(async () => {
-    find('.dts-row--topic', '设计').dispatchEvent(new window.Event('contextmenu', { bubbles: true, cancelable: true }));
-  });
-  await tick();
-  const item = [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')].find((node) => node.textContent.includes('在此分组下新建会话'));
-  await act(async () => {
-    item.dispatchEvent(new window.Event('click', { bubbles: true }));
+    find('.dts-row--topic', '设计').querySelector('.dts-row__actions .dts-iconbtn[title="在此分组下新建会话"]').dispatchEvent(new window.Event('click', { bubbles: true }));
   });
   const before = sessionSource.getSnapshot();
   const opened = { id: 'ses_old2', displayTitle: '既有会话', cwd: 'D:/work/one', updatedAt: Date.now(), blank: false };
@@ -931,7 +932,7 @@ test('the workspace menu keeps the native rename and delete commands', async () 
   };
   await openMenu();
   const labels = [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')].map((node) => node.querySelector('.dts-menu__label').textContent.trim());
-  assert.deepEqual(labels, ['工作区:One', '选择此分组全部会话', '新建分组', '在当前工作区新建会话', '重命名', '删除工作区']);
+  assert.deepEqual(labels, ['工作区:One', '选择此分组全部会话', '新建分组', '重命名', '删除工作区'], 'the row + owns the new-session action, not this menu');
 
   await act(async () => {
     [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')].find((node) => node.textContent.trim() === '重命名').dispatchEvent(new window.Event('click', { bubbles: true }));
@@ -964,6 +965,17 @@ test('the workspace menu keeps the native rename and delete commands', async () 
   });
   await tick();
   assert.deepEqual(workspaceDeleteCalls, [WORKSPACE], 'the delete goes through the host workspace service');
+});
+
+test('the topic menu no longer offers a new-session item', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  await act(async () => {
+    find('.dts-row--topic', '设计').dispatchEvent(new window.Event('contextmenu', { bubbles: true, cancelable: true }));
+  });
+  await tick();
+  const labels = [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')].map((node) => node.querySelector('.dts-menu__label').textContent.trim());
+  assert.deepEqual(labels, ['只看此分组', '选择此分组全部会话', '重命名分组', '删除分组'], 'the row + owns the new-session action, not this menu');
 });
 
 test('choosing a workspace in the create menu continues into the topic step', async () => {
@@ -1275,6 +1287,29 @@ test('the workspace row plus starts a new session in that workspace', async () =
   await tick();
   assert.deepEqual(startSessionArgs, [WORKSPACE], 'the plus starts the session in the row workspace');
   assert.equal(document.querySelector('.dts-dialog'), null, 'and never opens the topic dialog');
+});
+
+test('the archived bucket has no new-session button', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  const base = sessionSource.getSnapshot();
+  sessionSource.set({
+    ...base,
+    ids: [...base.ids, 'ses_archived'],
+    byId: { ...base.byId, ses_archived: { id: 'ses_archived', displayTitle: '旧会话', cwd: 'D:/work/one', updatedAt: 1, blank: false } },
+  });
+  workspaceSource.set({ ...workspaceSource.getSnapshot(), archivedSessionIds: ['ses_archived'] });
+  await mount();
+  await act(async () => {
+    container.querySelector('.dts-header .dts-iconbtn[aria-label="更多操作"]').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')].find((node) => node.textContent.includes('显示已归档')).dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const archived = find('.dts-row--topic', '已归档');
+  assert.ok(archived, 'the archived bucket renders');
+  assert.equal(archived.querySelector('.dts-row__actions [title="在此分组下新建会话"]'), null, 'but a bucket is not a topic');
 });
 
 test('the create dialog picks the workspace from a dropdown', async () => {
@@ -2295,6 +2330,173 @@ test('the composer topic chip shows the open session topic and re-files it', asy
   assert.equal(assign.body.topicId, 'tp_default', 'picking the default group files into it');
 });
 
+test('the composer topic chip survives the sidebar collapsing to the rail', async () => {
+  let state = stateResult();
+  responseOverrides[`${API}/state`] = () => state;
+  responseOverrides[`${API}/assign`] = () => {
+    state = stateResult();
+    state.result.workspaces[WORKSPACE].assignments = {};
+    return { ok: true, result: { revision: 6, result: { changed: 1 } } };
+  };
+  await mount();
+  assert.ok(findAnywhere('.dts-composer-topic'), 'the chip starts in the composer');
+
+  const frame = document.querySelector('.BynINW_frame');
+  await act(async () => {
+    frame.setAttribute('data-sidebar-collapsed', '');
+  });
+  await tick(1200);
+  assert.equal(find('.dts-overlay'), undefined, 'the panel itself steps aside for the rail');
+
+  const chip = findAnywhere('.dts-composer-topic');
+  assert.ok(chip, 'the composer chip belongs to the composer, not the hidden panel');
+  assert.match(chip.textContent, /设计/, 'and keeps the open session topic');
+  await act(async () => {
+    chip.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const item = [...document.querySelectorAll('.dts-pop--composer .dts-menu__item')].find((node) => node.textContent.includes('默认分组'));
+  assert.ok(item, 'the topic menu still opens while the panel is hidden');
+  await act(async () => {
+    item.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const assign = calls.find((call) => call.url.endsWith('/assign'));
+  assert.equal(assign.body.topicId, 'tp_default', 'the open session can still be re-filed from the rail');
+  assert.match(findAnywhere('.dts-composer-topic').textContent, /默认分组/, 'and the chip reflects the new topic without reopening the sidebar');
+});
+
+test('a page that starts in rail still mounts the composer chip', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  document.querySelector('.BynINW_frame').setAttribute('data-sidebar-collapsed', '');
+  await mount();
+  await tick(300);
+  assert.equal(find('.dts-overlay'), undefined, 'the panel never paints while the rail owns the sidebar');
+  const chip = findAnywhere('.dts-composer-topic');
+  assert.ok(chip, 'the chip is still seated in the composer');
+  assert.match(chip.textContent, /设计/, 'and the sidecar was read for it despite the initial rail');
+  assert.ok(calls.some((call) => call.url.endsWith(`${API}/state`)), 'the chip triggers the first sidecar read');
+});
+
+test('the hidden chip follows a different open session instead of keeping the old one', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  await act(async () => {
+    document.querySelector('.BynINW_frame').setAttribute('data-sidebar-collapsed', '');
+  });
+  await tick(1200);
+  assert.match(findAnywhere('.dts-composer-topic').textContent, /设计/, 'ses_0 is filed into 设计');
+
+  const snapshot = sessionSource.getSnapshot();
+  await act(async () => {
+    sessionSource.set({ ...snapshot, current: 'ses_1' });
+  });
+  await tick(100);
+  assert.match(findAnywhere('.dts-composer-topic').textContent, /默认分组/, 'the chip now describes ses_1, not the stale one');
+});
+
+test('the composer chip identifies the workspace by the open session, not a duplicated title', async () => {
+  const state = stateResult();
+  state.result.workspaces[WORKSPACE].assignments = {};
+  state.result.workspaces.ws_two = {
+    topics: [
+      { id: 'tp_default', name: '默认分组', emoji: '', order: -1, createdAt: 0, system: true },
+      { id: 'tp_two', name: '二组', emoji: '', order: 0, createdAt: 2 },
+    ],
+    assignments: { ses_0: 'tp_two' },
+  };
+  const baseSessions = sessionSource.getSnapshot();
+  sessionSource.set({
+    ...baseSessions,
+    byId: { ...baseSessions.byId, ses_0: { ...baseSessions.byId.ses_0, cwd: 'D:/work/two' } },
+  });
+  const baseWorkspaces = workspaceSource.getSnapshot();
+  workspaceSource.set({
+    ...baseWorkspaces,
+    items: [
+      { workspaceId: WORKSPACE, path: 'D:/work/one', title: 'One', sessionIds: ['ses_1', 'ses_2'], createdAt: 1, updatedAt: 1 },
+      { workspaceId: 'ws_two', path: 'D:/work/two', title: 'One', sessionIds: ['ses_0'], createdAt: 2, updatedAt: 2 },
+    ],
+  });
+  responseOverrides[`${API}/state`] = () => state;
+  responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
+  await mount();
+
+  const chip = findAnywhere('.dts-composer-topic');
+  assert.match(chip.textContent, /二组/, 'the session record wins over the ambiguous picker title');
+  await act(async () => {
+    chip.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const item = [...document.querySelectorAll('.dts-pop--composer .dts-menu__item')].find((node) => node.textContent.includes('默认分组'));
+  await act(async () => {
+    item.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const assign = calls.find((call) => call.url.endsWith('/assign'));
+  assert.equal(assign.body.workspaceId, 'ws_two', 'the write goes to the workspace that actually owns the session');
+});
+
+test('keyboard activation inside a row does not also open or collapse the row', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const sessionRow = find('.dts-row--session', '会话 1');
+  const menuButton = sessionRow.querySelector('.dts-row__act');
+  menuButton.focus();
+  await act(async () => {
+    menuButton.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  });
+  await tick();
+  assert.equal(openSessionCalls, 0, 'Enter on the ⋯ button must not open the session');
+
+  const topic = find('.dts-row--topic', '设计');
+  const plus = topic.querySelector('.dts-row__actions .dts-iconbtn[title="在此分组下新建会话"]');
+  plus.focus();
+  await act(async () => {
+    plus.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  });
+  await tick();
+  assert.equal(topic.className.includes('is-collapsed'), false, 'Enter on the topic + must not collapse the topic');
+});
+
+test('double-clicking a row action does not fall through to the row rename', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const row = find('.dts-row--session', '会话 1');
+  const menuButton = row.querySelector('.dts-row__act');
+  await act(async () => {
+    menuButton.dispatchEvent(new window.MouseEvent('dblclick', { bubbles: true, cancelable: true, view: window }));
+  });
+  await tick();
+  assert.equal(document.querySelector('.dts-dialog'), null, 'the rename dialog stays closed');
+});
+
+test('a rejected async session start does not claim a later blank into the topic', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
+  startSessionImpl = async () => { throw new Error('host refused'); };
+  await mount();
+  const plus = find('.dts-row--topic', '设计').querySelector('.dts-row__actions .dts-iconbtn[title="在此分组下新建会话"]');
+  await act(async () => {
+    plus.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+
+  const base = sessionSource.getSnapshot();
+  await act(async () => {
+    sessionSource.set({
+      ...base,
+      ids: [...base.ids, 'ses_later'],
+      byId: {
+        ...base.byId,
+        ses_later: { id: 'ses_later', displayTitle: '', cwd: 'D:/work/one', updatedAt: Date.now(), blank: true, retainedBy: { mainView: 1 } },
+      },
+    });
+  });
+  await tick(120);
+  assert.equal(calls.some((call) => call.url.endsWith('/assign')), false, 'the failed arm was cleared, so the new blank stays unfiled');
+});
+
 test('an archived row keeps the stock menu and only adds permanent delete', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   const base = sessionSource.getSnapshot();
@@ -2361,9 +2563,10 @@ test('the batch result dialog names the sessions that are still running', async 
  * every host list publish and kept its minute timer armed — all to paint nothing.
  *
  * These count *live subscribers* rather than trusting a render count, because a subscription
- * that is merely unused still costs one wakeup per host publish.
+ * that is merely unused still costs one wakeup per host publish. The one exception is the
+ * session list: the composer chip outlives the rail and must follow the open session.
  */
-test('a hidden panel releases its session and status subscriptions, and restores them on return', async () => {
+test('a hidden panel releases the status subscription and keeps only the session list the chip needs', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   await mount();
   assert.ok(find('.dts-overlay'), 'the panel starts on screen');
@@ -2376,10 +2579,11 @@ test('a hidden panel releases its session and status subscriptions, and restores
   });
   await tick(1200);
   assert.equal(find('.dts-overlay'), undefined, 'the cover steps aside in rail mode');
-  assert.equal(sessionSource.listenerCount(), 0, 'the session list subscription is released while hidden');
+  assert.equal(sessionSource.listenerCount(), 1, 'the chip keeps following the open session while hidden');
   assert.equal(sessionStatusSource.listenerCount(), 0, 'the status subscription is released while hidden');
   // The rail bridge reads the workspace list to notice "添加工作区", so that one must stay.
   assert.ok(workspaceSource.listenerCount() > 0, 'the workspace list stays observed: the rail bridge needs it');
+  assert.ok(findAnywhere('.dts-composer-topic'), 'the chip is what keeps that one subscription alive');
 
   const snapshot = sessionSource.getSnapshot();
   await act(async () => {
@@ -2396,6 +2600,24 @@ test('a hidden panel releases its session and status subscriptions, and restores
   assert.ok(sessionSource.listenerCount() > 0, 'the session list is observed again');
   assert.ok(find('.dts-row--session', '会话 0'), 'and paints the rows it had before hiding');
   assert.ok(find('.dts-tree'), 'the tree is intact, not blanked');
+});
+
+test('without a composer seat the hidden panel releases the session list too', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  await act(async () => {
+    document.querySelector('.BynINW_frame').setAttribute('data-sidebar-collapsed', '');
+  });
+  await tick(1200);
+  assert.equal(find('.dts-overlay'), undefined);
+  assert.equal(sessionSource.listenerCount(), 1, 'the chip is still seated');
+
+  await act(async () => {
+    document.querySelector('.Hqq-bq_workspaceRow').remove();
+  });
+  await tick(400);
+  assert.equal(findAnywhere('.dts-composer-topic'), undefined, 'the chip lost its seat');
+  assert.equal(sessionSource.listenerCount(), 0, 'so the last session-list subscription goes away');
 });
 
 test('hiding the panel issues no sidecar read and no catalog re-read', async () => {

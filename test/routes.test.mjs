@@ -37,9 +37,10 @@ async function boot({ home, services = {} } = {}) {
 }
 
 /** Minimal req/res pair; the WebRoute contract is `handle(req, res)`. */
-function fakeRequest({ method = 'POST', host = '127.0.0.1:3080', origin, body } = {}) {
+function fakeRequest({ method = 'POST', host = '127.0.0.1:3080', origin, contentType = 'application/json', body } = {}) {
   const headers = { host };
   if (origin !== undefined) headers.origin = origin;
+  if (contentType !== null) headers['content-type'] = contentType;
   const payload = body === undefined ? [] : [Buffer.from(JSON.stringify(body))];
   return {
     method,
@@ -100,6 +101,26 @@ test('the adopt route refuses a cross-site request', async () => {
   });
 });
 
+test('the write routes refuse an opaque Origin', async () => {
+  await withHome(async (home) => {
+    const { find } = await boot({ home, services: { workspaceRegistry: {}, sessionPersistence: {} } });
+    const result = await call(find(`${API}/sessions/adopt`), fakeRequest({ origin: 'null' }));
+    assert.equal(result.status, 403);
+    assert.equal(result.json.code, 'origin');
+  });
+});
+
+test('a write without a JSON content type is refused before parsing', async () => {
+  await withHome(async (home) => {
+    const { find } = await boot({ home });
+    const result = await call(find(`${API}/topics/create`), fakeRequest({ contentType: 'text/plain', body: { workspaceId: 'ws_a', name: 'A' } }));
+    assert.equal(result.status, 415);
+    assert.equal(result.json.code, 'unsupported-media-type');
+    const missing = await call(find(`${API}/topics/create`), fakeRequest({ contentType: null, body: {} }));
+    assert.equal(missing.status, 415);
+  });
+});
+
 test('the adopt route refuses a non-loopback Host', async () => {
   await withHome(async (home) => {
     const { find } = await boot({ home, services: { workspaceRegistry: {}, sessionPersistence: {} } });
@@ -154,6 +175,20 @@ test('the adopt route re-attaches through the host and is idempotent', async () 
     const second = await call(find(`${API}/sessions/adopt`), fakeRequest({ body: {} }));
     assert.deepEqual(second.json.result.adopted, [], 'a repeat is a no-op');
     assert.deepEqual(record.sessionIds, ['ses_orphan'], 'and does not duplicate the id');
+  });
+});
+
+test('/state maps an unreadable document to the same JSON error envelope', async () => {
+  await withHome(async (home) => {
+    // A directory where the document belongs makes readFile fail with EISDIR (not ENOENT),
+    // which is the class of error that used to escape the handler as a bare 500.
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(join(home, 'dsh-better-workspace', 'topics.v1.json'), { recursive: true });
+    const { find } = await boot({ home });
+    const result = await call(find(`${API}/state`), fakeRequest({ method: 'GET', body: undefined, contentType: null }));
+    assert.equal(result.status, 500);
+    assert.equal(result.json.ok, false);
+    assert.equal(result.json.code, 'store-unreadable');
   });
 });
 
