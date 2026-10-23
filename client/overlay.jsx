@@ -1188,10 +1188,11 @@ export function OverlayPanel({ actions, schedules }) {
   };
 
   const composerChip = composer.container && composerSessionId ? createPortal(
+    // The chip controls a dialog, not a menu.
     <button
       type="button"
       className={cx('dts-composer-topic', composerTopic && 'is-set')}
-      aria-haspopup="menu"
+      aria-haspopup="dialog"
       aria-expanded={Boolean(composerMenu)}
       title={t('composer.pickTopic')}
       onClick={(event) => setComposerMenu(

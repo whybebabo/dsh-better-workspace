@@ -2308,6 +2308,19 @@ test('double-clicking a session row opens the rename dialog', async () => {
   assert.equal(dialog.querySelector('.dts-input').value, '会话 1');
 });
 
+test('the composer chip opens a dialog rather than a menu', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const chip = findAnywhere('.dts-composer-topic');
+  assert.ok(chip);
+  assert.equal(chip.getAttribute('aria-haspopup'), 'dialog');
+  await act(async () => {
+    chip.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  assert.equal(findAnywhere('.dts-pop--composer')?.getAttribute('role'), 'dialog');
+});
+
 test('the composer topic chip shows the open session topic and re-files it', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
