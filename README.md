@@ -60,10 +60,10 @@ dsh plugin --profile desktop add @whybebabo/dsh-better-workspace
 不经过 npm，直接从仓库安装某个发布版本：
 
 ```bash
-dsh plugin --profile web add github:whybebabo/dsh-better-workspace#v0.1.3
+dsh plugin --profile web add github:whybebabo/dsh-better-workspace#v0.1.4
 ```
 
-把 `#v0.1.3` 换成你要的 tag。这条路径同样需要 Git 与 pnpm，也不需要克隆仓库。
+把 `#v0.1.4` 换成你要的 tag。这条路径同样需要 Git 与 pnpm，也不需要克隆仓库。
 
 ### 从源码安装
 
@@ -314,10 +314,10 @@ cordis.patch.yml  profile 插桩（enabled / enableDelete 开关）
 npm run build          # 先构建，包里的 lib/client.js 是产物
 npm pack --dry-run     # 确认文件清单
 npm publish            # 发布到 npm
-git tag v0.1.3 && git push --tags
+git tag v0.1.4 && git push --tags
 ```
 
-打 tag 之后 `dsh plugin add github:whybebabo/dsh-better-workspace#v0.1.3` 这条路径才可用；两者互不影响，同版本号建议一起发布。
+打 tag 之后 `dsh plugin add github:whybebabo/dsh-better-workspace#v0.1.4` 这条路径才可用；两者互不影响，同版本号建议一起发布。
 
 ## 已知边界
 
