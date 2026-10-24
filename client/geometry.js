@@ -352,6 +352,18 @@ export function setRegionInert(regionEl, inert) {
 }
 
 /**
+ * Marks the region the panel owns. On macOS desktop the cover is clear (the sidebar's own
+ * translucent gradient must show through), so the stylesheet uses this marker to hide the
+ * native region instead of painting over it. A marker set here, rather than a selector on
+ * host class hashes, keeps that working when an app rebuild renames the CSS modules.
+ */
+export function setRegionCovered(regionEl, covered) {
+  if (!regionEl) return;
+  if (covered) regionEl.setAttribute('data-dts-covered', '');
+  else regionEl.removeAttribute('data-dts-covered');
+}
+
+/**
  * Reports whether a modal is currently rendered inside the covered region, so the caller can
  * stop inerting while the native rename / add-workspace dialog is open (those portal into the
  * sidebar rather than to `body`).

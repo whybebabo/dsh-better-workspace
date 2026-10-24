@@ -236,6 +236,44 @@ test('release never deletes a lock that changed hands while we held it', async (
   assert.equal(await readFile(store.lockFile, 'utf8'), '424242-successor', 'the successor\'s lock survives');
 });
 
+test('stale eviction never unlinks a lock that a successor installed underneath it', async () => {
+  const { home } = await freshStore();
+  const { mkdir, writeFile, rename, utimes } = await import('node:fs/promises');
+  const { createRequire, syncBuiltinESMExports } = await import('node:module');
+  // A short wait makes the failed reclaim observable without slowing the suite down.
+  const store = createTopicStore({ home, staleLockMs: 30, lockWaitMs: 400 });
+  await mkdir(store.dir, { recursive: true });
+  await writeFile(store.lockFile, '999999-deadbeef', 'utf8');
+  const old = new Date(Date.now() - 60_000);
+  await utimes(store.lockFile, old, old);
+
+  const require = createRequire(import.meta.url);
+  const fsp = require('node:fs/promises');
+  const realLink = fsp.link;
+  // The eviction path hard-links the lock it inspected, then decides. Replace the *path*
+  // (new inode, like a successor's `open('wx')`) right after that link: the claim now points
+  // at the dead lock while the path holds a fresh one, and only an identity check can tell.
+  fsp.link = async (from, to) => {
+    await realLink(from, to);
+    if (String(from) !== store.lockFile) return;
+    const successor = `${store.lockFile}.successor`;
+    await writeFile(successor, '424242-successor', 'utf8');
+    await rename(successor, store.lockFile);
+  };
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(
+      () => store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 }),
+      (error) => error instanceof StoreError && error.code === 'store-locked',
+      'the reclaimer must give up rather than wait on a lock it cannot prove is stale',
+    );
+  } finally {
+    fsp.link = realLink;
+    syncBuiltinESMExports();
+  }
+  assert.equal(await readFile(store.lockFile, 'utf8'), '424242-successor', 'the successor\'s lock is untouched');
+});
+
 test('a corrupt primary document falls back to the backup and refuses writes', async () => {
   const { store } = await freshStore();
   await store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 });

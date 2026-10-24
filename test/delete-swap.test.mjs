@@ -29,10 +29,10 @@ async function fixture() {
 }
 
 /** A settled artifact, aged past the write-quiet window so the lease check stays out of the way. */
-async function makeSession(fx, id) {
+async function makeSession(fx, id, extraHeader = {}) {
   const target = fx.sessionDir(id);
   await mkdir(target, { recursive: true });
-  const header = { type: 'session', version: 3, id, createdAt: 1_700_000_000_000, cwd: 'C:/Work/demo' };
+  const header = { type: 'session', version: 3, id, createdAt: 1_700_000_000_000, cwd: 'C:/Work/demo', ...extraHeader };
   const log = join(target, 'session.v3.jsonl');
   await writeFile(log, `${JSON.stringify(header)}\n${JSON.stringify({ type: 'event', seq: 1 })}\n`, 'utf8');
   const stamp = new Date(Date.now() - 120_000);
@@ -78,6 +78,78 @@ test('a directory swapped in after the scan is never deleted under the scanned i
   assert.equal(await exists(victimDir), true, 'the directory now sitting at the scanned path is untouched');
   const kept = await readFile(join(victimDir, 'session.v3.jsonl'), 'utf8');
   assert.match(kept, /ses_important/, 'and it is still the other session, not a half-deleted husk');
+});
+
+test('a directory swapped in after pre-removal verification is restored, not deleted', async () => {
+  // The previous test swaps before `verifySessionDir`. This one swaps after verification, in
+  // the store-detach await — the object in quarantine must still be the requested session.
+  const fx = await fixture();
+  const victimDir = await makeSession(fx, 'ses_victim');
+  const importantDir = await makeSession(fx, 'ses_important');
+  let swapped = false;
+  const ctx = {
+    get(name) {
+      if (name === 'agents') return { get: () => null };
+      if (name === 'sessions') {
+        return {
+          store: {
+            get: () => {
+              if (!swapped) {
+                swapped = true;
+                renameSync(victimDir, `${victimDir}.moved-aside`);
+                renameSync(importantDir, victimDir);
+              }
+              return {};
+            },
+          },
+        };
+      }
+      return null;
+    },
+  };
+
+  const outcome = await executeDelete({ home: fx.home, ctx, sessionIds: ['ses_victim'], confirm: true });
+  assert.equal(swapped, true, 'the swap happened after the scan and verification');
+  assert.notEqual(outcome.items[0].status, 'deleted');
+  assert.equal(await exists(victimDir), true, 'the swapped-in session is restored to its path');
+  assert.match(await readFile(join(victimDir, 'session.v3.jsonl'), 'utf8'), /ses_important/);
+});
+
+test('a subagent directory swapped before its cascade removal is not deleted', async () => {
+  const fx = await fixture();
+  const parentDir = await makeSession(fx, 'ses_parent');
+  const childDir = await makeSession(fx, 'ses_child', { origin: 'subagent', parentSession: 'ses_parent' });
+  const importantDir = await makeSession(fx, 'ses_important');
+  let probes = 0;
+  const ctx = {
+    get(name) {
+      if (name === 'agents') return { get: () => null };
+      if (name === 'sessions') {
+        return {
+          store: {
+            get: () => {
+              probes += 1;
+              // The first detach is the parent; the second is the child, immediately before
+              // its removal. Swap the child with an unrelated session at that point.
+              if (probes === 2) {
+                renameSync(childDir, `${childDir}.moved-aside`);
+                renameSync(importantDir, childDir);
+              }
+              return {};
+            },
+          },
+        };
+      }
+      return null;
+    },
+  };
+
+  const outcome = await executeDelete({ home: fx.home, ctx, sessionIds: ['ses_parent'], confirm: true });
+  assert.equal(await exists(parentDir), false, 'the parent was deleted');
+  assert.equal(outcome.items[0].status, 'partial');
+  assert.deepEqual(outcome.items[0].subagentsFailed, ['ses_child']);
+  assert.equal(await exists(childDir), true, 'the swapped-in child target survives');
+  assert.match(await readFile(join(childDir, 'session.v3.jsonl'), 'utf8'), /ses_important/);
 });
 
 test('a quarantine that cannot be created fails loudly instead of reporting a delete', async () => {

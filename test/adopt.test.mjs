@@ -9,7 +9,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { adoptOrphanSessions } from '../lib/adopt.js';
@@ -169,6 +169,22 @@ test('a concurrent tab reports no move for a write it did not make', async () =>
     const result = await adoptOrphanSessions({ ctx });
     assert.deepEqual(result.adopted, ['ses_race'], 'the id is accounted for now');
     assert.deepEqual(result.moved, [], 'but this run changed nothing, so nothing is announced');
+  });
+});
+
+test('a workspace registered through a symlinked spelling still matches its sessions', async () => {
+  await withDirs(async ({ root, alpha }) => {
+    const alias = join(root, 'alpha-alias');
+    const linked = await symlink(alpha, alias, 'dir').then(() => true, () => false);
+    if (!linked) return; // Windows without privileges/dev mode
+    // The record keeps the user's spelling; the artifact header carries the canonical path.
+    const registry = fakeRegistry([{ id: 'ws_a', path: alias, sessionIds: [] }]);
+    const ctx = { get: (name) => ({ workspaceRegistry: registry, sessionPersistence: fakePersistence([
+      { id: 'ses_alias', cwd: alpha },
+    ]) })[name] };
+    const result = await adoptOrphanSessions({ ctx });
+    assert.deepEqual(result.adopted, ['ses_alias']);
+    assert.deepEqual(registry.entities[0].sessionIds, ['ses_alias']);
   });
 });
 

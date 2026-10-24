@@ -231,7 +231,7 @@ export const SessionRow = React.memo(function SessionRow({
         event.preventDefault();
         // A row menu would mix single-session actions into the batch flow.
         if (row.blank || selectMode) return;
-        onMenu({ type: 'session', row, anchor: event.currentTarget.getBoundingClientRect() });
+        onMenu({ type: 'session', row, anchor: event.currentTarget });
       }}
     >
       {selectMode ? (
@@ -278,7 +278,7 @@ export const SessionRow = React.memo(function SessionRow({
               label={t('session.rowMenu')}
               title={t('session.rowMenu')}
               className="dts-row__act"
-              onClick={(event) => onMenu({ type: 'session', row, anchor: event.currentTarget.getBoundingClientRect() })}
+              onClick={(event) => onMenu({ type: 'session', row, anchor: event.currentTarget })}
             >
               <Icon name="ellipsis" />
             </IconButton>

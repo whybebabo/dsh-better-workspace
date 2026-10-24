@@ -165,9 +165,10 @@ Every workspace has a system default group. It cannot be renamed or deleted, but
 
 ### Where a new session lands
 
-- The header ＋ "new session", a workspace row's ＋, and the rail's "new session" all leave the session with **no group assignment written**, so it stays in the system default group and sorts first inside that bucket — the same placement the official list gives it;
+- A workspace row's ＋ and the rail's "new session" leave the session with **no group assignment written**, so it stays in the system default group and sorts first inside that bucket — the same placement the official list gives it;
+- The header ＋ → "new session" picks a workspace and a group (the default group is in the list too), then creates the session and files it into that choice;
 - A group row's ＋, or an explicitly chosen group in the ＋ flow: the session is created and then filed into that group;
-- Creating one while "only this group" is active files it into that group, since it is the place you are looking at;
+- Creating one while "only this group" is active files it into that group, since it is the place you are looking at; the write happens only when the new blank really belongs to that workspace, so a blank started by another window in a different workspace is never re-filed;
 - Earlier versions filed implicit new sessions into the "most recently created group". Groups used to render oldest-first, so that group was usually the last one, which dropped the new row at the bottom of the workspace. That behavior is gone; a newly created group now leads the list instead.
 
 > The default group itself is still draggable (like the native list: it cannot be renamed or deleted, but it can be reordered). Drag it to the bottom and ungrouped sessions sit down there with it — that is your own ordering, not the plugin pushing new sessions to the end again; drag it back up to restore the placement.
@@ -214,7 +215,7 @@ Once the sidebar is collapsed to the rail, the host's own "new session / add wor
 
 Writes go temporary file → `fsync` → `rename`, keeping `.bak` from the previous write. If the primary is corrupt, the store falls back to the backup and enters **read-only mode** (banner at the top of the panel); that recovery write does not overwrite `.bak` with the broken file. If **neither** the primary nor the backup can be parsed, every write is refused rather than starting from an empty document, and read-only mode clears itself as soon as the file is repaired — no host restart needed.
 
-The lock is released only by its owner: the lock file carries a token that is compared before unlinking. A lock is reclaimed only when its `mtime` exceeds `staleLockMs` **and** the PID in its token is gone, so a slow writer is never evicted mid-write.
+The lock is released only by its owner: the lock file carries a token that is compared before unlinking. A lock is reclaimed only when its `mtime` exceeds `staleLockMs` **and** the PID in its token is gone. Reclaiming first hard-links the current lock into a private claim, then verifies that the claim's token and inode/dev still identify the same old lock before `unlink`ing the path; on filesystems without hard links it falls back to `rename`, restoring the moved lock only when the path is free and never overwriting a successor. A slow writer is therefore never evicted mid-write, and the shorter default stale window (2 s) versus the wait deadline (6 s) keeps a crash-left lock from timing out every request just before it becomes reclaimable.
 
 **Topic rules:** a session belongs to at most one group; groups are scoped per workspace; deleting a group only clears assignments; every workspace (including ones that have not been written to the sidecar yet) has a virtual system default group; archiving does not change assignment; deleting a session cleans up its assignment. The virtual "ungrouped" bucket only holds **unarchived** sessions with no workspace; archived sessions appear only in their workspace's Archived bucket.
 
@@ -226,7 +227,7 @@ Which workspace a session belongs to is the host's decision: if the artifact hea
 - the host crashed or the window closed between the header write and `attachSession`;
 - the session was resumed through a different path (for example reusing an older blank record).
 
-The native list treats those as "no workspace accounts for it" and shows them in the trailing Ungrouped bucket. No data is lost, but it looks lost — especially after the plugin is removed, where they simply stay in Ungrouped. On the panel's first on-screen pass the plugin calls `/sessions/adopt` once, which uses only the official `workspace.attachSession(id)` to put **those and only those** sessions back (that command re-validates `cwd`, refuses a mismatch, and prepends the id, so a repaired session lands first in its workspace, exactly like a new one). Subagent children, archived sessions, sessions that already have a workspace, and sessions whose `cwd` no longer resolves are never touched; a refused attach is reported per id instead of forced. The panel reports "restored N session(s) to their workspace".
+The native list treats those as "no workspace accounts for it" and shows them in the trailing Ungrouped bucket. No data is lost, but it looks lost — especially after the plugin is removed, where they simply stay in Ungrouped. On the panel's first on-screen pass the plugin calls `/sessions/adopt` once, which uses only the official `workspace.attachSession(id)` to put **those and only those** sessions back (that command re-validates `cwd`, refuses a mismatch, and prepends the id, so a repaired session lands first in its workspace, exactly like a new one). Workspace paths are canonicalized with `realpath`, so a workspace registered through a symlinked spelling still matches its sessions. Subagent children, archived sessions, sessions that already have a workspace, and sessions whose `cwd` no longer resolves are never touched; a refused attach is reported per id instead of forced. The panel reports "restored N session(s) to their workspace".
 
 ## Host routes
 
@@ -244,7 +245,7 @@ Prefix `/dsh-better-workspace/api`, registered on both `webServer` (browser) and
 | `POST` | `/delete/preview` | Per-item deletion verdicts |
 | `POST` | `/delete/execute` | Perform the deletion |
 
-Every write **must** carry `expectedRevision` (missing → `400 revision-required`); a mismatch returns `409` with `currentRevision`, after which the client reloads and retries. `/delete/*` are imperative operations and do not participate in revision checks.
+Every write **must** carry `expectedRevision` (missing → `400 revision-required`); a mismatch returns `409` with `currentRevision`, after which the client reloads and retries. `/delete/*` are imperative operations and `/sessions/adopt` is an idempotent repair of facts the host already owns, so neither participates in revision checks.
 
 ## Fallback behavior
 
@@ -262,8 +263,8 @@ DSH has no host-side command to delete a session, so the plugin implements one w
 2. The directory must live under `<DSH_HOME>/sessions`, with every path level checked via `lstat` + `realpath`, rejecting symlinks/junctions; a sessions root that is itself a link is refused outright;
 3. The first line (header) of `session.v3.jsonl[.zstd]` must be read and confirm `header.id === sessionId` — a directory-name match alone never deletes;
 4. A session whose artifact was **appended to recently** is blocked (subagent sessions are blocked too, and are cascaded by their parent with a count in the preview); a user fork carrying only `parentSession` is not a subagent. Note that DSH's write lease is *not* "a lock file exists": Windows uses a named kernel semaphore, and on POSIX `session.lock` is never removed once created — so this checks the artifact's recent modification time (a 15-second quiet window) rather than `*.lock` filenames;
-5. A running session is stopped the official way (`agent.cancel({kind:'user'})`) and given up to 3 seconds to leave `running`; if it does not, nothing is deleted;
-6. Removal first `rename`s the target into a `.trash-<pid>-<rand>` quarantine inside the root, then deletes the quarantine — `rename` is atomic and resolves the path once, which closes the window where a parent directory swapped for a junction would redirect a recursive delete; afterwards `lstat` proves the directory is really gone;
+5. A running session is stopped the official way (`agent.cancel({kind:'user'})`) and given up to 3 seconds to leave `running`; if it does not, nothing is deleted. Between analysis and the actual removal the running state and write lease are **re-probed** (the lease is checked before detaching, because a flush itself refreshes the mtime), and either hit skips the item with its data intact;
+6. Removal first `rename`s the target into a `.trash-<pid>-<rand>` quarantine inside the root, then deletes the quarantine — `rename` is atomic and resolves the path once, which closes the window where a parent directory swapped for a junction would redirect a recursive delete. The header is then re-read **from the quarantined object** and its `id` compared; a mismatch restores it and aborts (the subagent cascade runs the same check), and afterwards `lstat` proves the directory is really gone;
 7. Batches preflight as a whole, then execute item by item without rolling back successes, returning `deleted/skipped/partial/failed` per item; `partial` means the parent was deleted but some children were not (`subagentsFailed` lists them).
 
 ## Switching off and rollback
@@ -280,12 +281,12 @@ Both switches are configuration only and need no rebuild. Deleting the sidecar d
 npm install
 npm run build     # esbuild -> lib/client.js (window.__ModuleLoader__.load shell; externalizes react/react-dom/host primitives)
 npm run check     # loads lib/*.js as a real module graph and checks the bundle's registration id (not node --check)
-npm test          # 206 tests
+npm test          # 234 tests
 ```
 
 `client/` is the source; `lib/client.js` is the artifact (shipped in the package, do not edit by hand). `react`/`react-dom`/`jsdom` in the test setup are **dev dependencies only**: at runtime `require('react')` resolves to the instance the host already loaded (React 18.3.1, same as DSH 0.2.1), so a second React is never bundled.
 
-`test/` covers: sidecar locking/atomic writes/revisions/corruption recovery, **cross-process** concurrent writes (two forked node processes), the selection scope (`selectableIds`, shared by all three "select all" entry points), tree derivation and status aggregation, batch archive classification, deletion safety boundaries (including a deterministic directory swap between preview and execute, and a failed quarantine), drag and rename, the panel's jsdom integration (loading the **built artifact**, with fabricated layout and `fetch`), scheduled-task frequency and the hover block, and zh/en key-set symmetry.
+`test/` covers: sidecar locking/atomic writes/revisions/corruption recovery (including a lock changing hands and reclaiming a dead process's lock), **cross-process** concurrent writes (two forked node processes), the selection scope (`selectableIds`, shared by all three "select all" entry points), tree derivation and status aggregation, batch archive classification, deletion safety boundaries (including a deterministic directory swap between preview and execute, identity re-checking after quarantine, a swapped subagent directory, a failed quarantine, a session that starts running or writing after analysis, and a compressed header larger than the old window), drag and rename (including ordering inside Ungrouped), the panel's jsdom integration (loading the **built artifact**, with fabricated layout and `fetch`, including handing the region back for native dialogs and a trigger click closing its own menu), scheduled-task frequency and the hover block, and zh/en key-set symmetry.
 
 Every safety fix in this round was **mutation-checked**: revert the implementation to the old behaviour and the corresponding test must go red. Do the same after touching safety-related code — adding happy-path cases alone easily yields tests that "look like they guard, but stay green when the code is deleted" (in the second review round 21 of 56 mutations still survived; see `review/round2/`).
 

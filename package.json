@@ -54,7 +54,8 @@
   },
   "scripts": {
     "build": "node client/build.mjs",
-    "test": "node --test test/*.test.mjs",
+    "pretest": "npm run build",
+    "test": "node --test --test-force-exit test/*.test.mjs",
     "check": "node scripts/check.mjs",
     "prepublishOnly": "npm run build && npm run check && npm test"
   },

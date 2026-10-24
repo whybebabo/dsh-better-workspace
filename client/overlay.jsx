@@ -9,7 +9,7 @@
 import * as React from 'react';
 import { createPortal } from 'react-dom';
 import { observeComposerSlot, resolveComposerWorkspace } from './composer.js';
-import { observeWorkspaceRegion, setRegionInert, watchRegionModals } from './geometry.js';
+import { observeWorkspaceRegion, setRegionCovered, setRegionInert, watchRegionModals } from './geometry.js';
 import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, mainSessionId, moveWithin, pendingStatusLabel, samePath, selectableIds, topicLabel, UNGROUPED_WORKSPACE_ID } from './model.js';
 import { createPanelStore } from './store.js';
 import { beginReorder, currentDrag, endDrag, readDragPayload, reorderVerdict, sessionReorderVerdict, writeReorderPayload } from './dnd.js';
@@ -268,18 +268,24 @@ export function OverlayPanel({ actions, schedules }) {
   }, []);
 
   // Keep the covered native region out of the tab order while the panel is up, and hand the
-  // region back whenever a native dialog opens inside it.
+  // region back whenever a native dialog opens inside it. The same toggle marks the region as
+  // covered for the stylesheet, which hides it on macOS desktop (the cover there is clear).
   React.useEffect(() => {
     const region = geom.regionEl;
     if (!region) return undefined;
     const covered = geom.visible && state.ready && state.reachable;
     let modalOpen = false;
-    const apply = () => setRegionInert(region, covered && !modalOpen);
+    const apply = () => {
+      const own = covered && !modalOpen;
+      setRegionInert(region, own);
+      setRegionCovered(region, own);
+    };
     apply();
     const stopWatching = covered ? watchRegionModals(region, (open) => { modalOpen = open; apply(); }) : () => {};
     return () => {
       stopWatching();
       setRegionInert(region, false);
+      setRegionCovered(region, false);
     };
   }, [geom.visible, geom.regionEl, state.ready, state.reachable]);
 
@@ -379,9 +385,22 @@ export function OverlayPanel({ actions, schedules }) {
 
     const active = pendingRef.current;
     if (active) {
+      const workspaceForSession = (id) => {
+        const session = byId[id];
+        const recorded = options.find((option) => option.sessionIds.includes(id));
+        if (recorded) return recorded;
+        if (!session?.cwd) return null;
+        return options.find((option) => samePath(option.path, session.cwd)) ?? null;
+      };
       // Only a *new blank* session is the one we just asked the host to start. Without this
       // restriction, opening an existing session right afterwards would file it by mistake.
-      const freshBlank = ids.filter((id) => !active.seen.has(id) && byId[id]?.blank && !byId[id]?.parentId);
+      // It must also belong to the workspace the user clicked in: a blank created by another
+      // window in a different workspace is not ours to file, and assigning it here would
+      // persist a cross-workspace assignment.
+      const freshBlank = ids.filter((id) => !active.seen.has(id)
+        && byId[id]?.blank
+        && !byId[id]?.parentId
+        && workspaceForSession(id)?.workspaceId === active.workspaceId);
       if (freshBlank.length === 0) return;
       const currentId = mainSessionId(list);
       const target = freshBlank.includes(currentId) ? currentId : freshBlank[0];
@@ -708,6 +727,21 @@ export function OverlayPanel({ actions, schedules }) {
     const known = list.byId ?? {};
     const ids = [];
     const seen = new Set();
+    if (workspaceId === UNGROUPED_WORKSPACE_ID) {
+      // 未分组 has no workspace record, so it needs the same derivation the tree uses: no
+      // workspace accounts for the id, and no cwd matches a registered path. Returning []
+      // here made a session drag inside the bucket silently persist an empty order.
+      const workspacePaths = options.map((entry) => entry.path).filter(Boolean);
+      const accounted = new Set(options.flatMap((entry) => entry.sessionIds ?? []));
+      const archived = new Set(archivedIds);
+      for (const session of Object.values(known)) {
+        if (!session || session.blank || session.origin === 'subagent') continue;
+        if (accounted.has(session.id) || archived.has(session.id)) continue;
+        if (workspacePaths.some((path) => samePath(session.cwd, path))) continue;
+        ids.push(session.id);
+      }
+      return ids;
+    }
     for (const id of option?.sessionIds ?? []) {
       if (seen.has(id) || !known[id]) continue;
       seen.add(id);
@@ -819,7 +853,19 @@ export function OverlayPanel({ actions, schedules }) {
       flash(next.reason === 'cross-workspace' ? t('session.crossWorkspace') : t('session.dragHint'), 'bad');
       return;
     }
-    setMenu(next);
+    setMenu((current) => {
+      if (!current || !next) return next;
+      // Every menu keeps its trigger element (not a snapshot rect), so clicking the same
+      // trigger can toggle the menu closed. The Popover excludes that element from the
+      // outside-pointer test, which is what lets this click arrive instead of being closed
+      // and immediately reopened on pointerdown.
+      const same = current.type === next.type
+        && current.anchor === next.anchor
+        && (next.type !== 'session' || current.row?.id === next.row?.id)
+        && (next.type !== 'topic' || current.section?.id === next.section?.id)
+        && (next.type !== 'workspace' || current.group?.workspaceId === next.group?.workspaceId);
+      return same ? null : next;
+    });
   };
   /**
    * The rows the current selection can still act on.
@@ -917,7 +963,7 @@ export function OverlayPanel({ actions, schedules }) {
             await navigator.clipboard.writeText(row.id);
             flash(t('session.copied'));
           } catch {
-            flash(t('session.copied'), 'bad');
+            flash(t('session.copyFailed'), 'bad');
           }
         }}
       >
@@ -1047,7 +1093,10 @@ export function OverlayPanel({ actions, schedules }) {
       icon={<Icon name="chevronRight" />}
       onSelect={() => {
         setMenu(null);
-        setPrefs({ collapsedWorkspaces: tree.groups.map((group) => group.workspaceId), collapsedTopics: tree.groups.flatMap((group) => group.sections.filter((section) => section.kind === 'topic').map((section) => `${group.workspaceId}:${section.id}`)) });
+        setPrefs({
+          collapsedWorkspaces: tree.groups.flatMap((group) => [group.workspaceId, `${group.workspaceId}:archived`]),
+          collapsedTopics: tree.groups.flatMap((group) => group.sections.filter((section) => section.kind === 'topic').map((section) => `${group.workspaceId}:${section.id}`)),
+        });
       }}
     >
       {t('menu.collapseAll')}
@@ -1330,7 +1379,7 @@ export function OverlayPanel({ actions, schedules }) {
               startSessionUnderTopic(workspaceId, topicId);
             }}
             onNewSession={newSession}
-            onOpenHeaderMenu={(anchor) => setMenu({ type: 'header', anchor })}
+            onOpenHeaderMenu={(anchor) => handleMenu({ type: 'header', anchor })}
           />
         )}
 
