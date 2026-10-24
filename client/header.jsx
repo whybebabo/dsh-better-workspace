@@ -175,7 +175,7 @@ export function Header({
         >
           <Icon name="plus" size={16} />
         </IconButton>
-        <IconButton label={t('action.menu')} title={t('action.menu')} onClick={(event) => onOpenHeaderMenu(event.currentTarget.getBoundingClientRect())}>
+        <IconButton label={t('action.menu')} title={t('action.menu')} onClick={(event) => onOpenHeaderMenu(event.currentTarget)}>
           <Icon name="ellipsis" size={16} />
         </IconButton>
       </div>

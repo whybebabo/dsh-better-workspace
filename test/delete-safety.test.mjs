@@ -1,10 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, lstat, symlink, rm, utimes, rename } from 'node:fs/promises';
+import { utimesSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import * as zlib from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { previewDelete, executeDelete } from '../lib/delete.js';
-import { isSafeSessionId, encodeSegment, removeVerifiedDir, resolveSessionsRoot } from '../lib/session-files.js';
+import { isSafeSessionId, encodeSegment, removeVerifiedDir, resolveSessionsRoot, readSessionHeader } from '../lib/session-files.js';
 
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-topic-delete-'));
@@ -28,6 +31,22 @@ async function makeSession(fx, id, extraHeader = {}, { lease = false, ageMs = 60
   const stamp = new Date(Date.now() - ageMs);
   await utimes(logPath, stamp, stamp);
   if (lease) await writeFile(join(target, 'session.v3.jsonl.lock'), 'holder', 'utf8');
+  return target;
+}
+
+/**
+ * A zstd artifact larger than `HEADER_READ_BYTES`. The random body is deliberately
+ * incompressible, so the compressed file itself crosses the old 64KB window.
+ */
+async function makeCompressedSession(fx, id, bodyBytes = 120_000) {
+  const target = fx.sessionDir(id);
+  await mkdir(target, { recursive: true });
+  const header = { type: 'session', version: 3, id, createdAt: 1_700_000_000_000, cwd: 'C:/Work/demo' };
+  const raw = Buffer.concat([Buffer.from(`${JSON.stringify(header)}\n`), randomBytes(bodyBytes)]);
+  const logPath = join(target, 'session.v3.jsonl.zstd');
+  await writeFile(logPath, zlib.zstdCompressSync(raw));
+  const stamp = new Date(Date.now() - 60_000);
+  await utimes(logPath, stamp, stamp);
   return target;
 }
 
@@ -240,6 +259,60 @@ test('a running session is cancelled first, and never deleted while it stays run
   assert.equal(await exists(skipped), true);
 });
 
+test('a session that starts running between analysis and removal is skipped', async () => {
+  const fx = await fixture();
+  await makeSession(fx, 'ses_starts');
+  let probes = 0;
+  const ctx = ctxWith({
+    ses_starts: {
+      get status() {
+        probes += 1;
+        return probes >= 2 ? 'running' : 'idle';
+      },
+    },
+  });
+  const outcome = await executeDelete({ home: fx.home, ctx, sessionIds: ['ses_starts'], confirm: true });
+  assert.equal(outcome.items[0].status, 'skipped');
+  assert.equal(outcome.items[0].code, 'running');
+  assert.equal(await exists(fx.sessionDir('ses_starts')), true, 'the directory is untouched');
+});
+
+test('a log written after analysis makes the session a lease blocker', async () => {
+  const fx = await fixture();
+  const target = await makeSession(fx, 'ses_write');
+  const logPath = join(target, 'session.v3.jsonl');
+  let probes = 0;
+  const ctx = ctxWith({
+    ses_write: {
+      get status() {
+        probes += 1;
+        if (probes === 2) utimesSync(logPath, new Date(), new Date());
+        return 'idle';
+      },
+    },
+  });
+  const outcome = await executeDelete({ home: fx.home, ctx, sessionIds: ['ses_write'], confirm: true });
+  assert.equal(outcome.items[0].status, 'skipped');
+  assert.equal(outcome.items[0].code, 'locked');
+  assert.equal(await exists(target), true);
+});
+
+test('compressed artifacts larger than the old header window still verify and delete', async () => {
+  if (typeof zlib.zstdCompressSync !== 'function' || typeof zlib.createZstdDecompress !== 'function') return;
+  const fx = await fixture();
+  const target = await makeCompressedSession(fx, 'ses_zstd');
+  const header = await readSessionHeader(target);
+  assert.equal(header.header.id, 'ses_zstd');
+
+  const preview = await previewDelete({ home: fx.home, ctx: ctxWith(), sessionIds: ['ses_zstd'] });
+  assert.equal(preview.items[0].exists, true);
+  assert.deepEqual(preview.items[0].blockers, []);
+
+  const outcome = await executeDelete({ home: fx.home, ctx: ctxWith(), sessionIds: ['ses_zstd'], confirm: true });
+  assert.equal(outcome.items[0].status, 'deleted');
+  assert.equal(await exists(target), false);
+});
+
 test('path safety: links are refused and removal cannot escape the sessions root', async () => {
   const fx = await fixture();
   await makeSession(fx, 'ses_ok');
@@ -352,10 +425,15 @@ test('removal goes through a quarantine directory inside the root', async () => 
   const watcher = watch(resolvedRoot.resolved, { persistent: true }, (_event, name) => {
     if (name) observed.push(String(name));
   });
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  await removeVerifiedDir({ rootResolved: resolvedRoot.resolved, dir: fx.sessionDir('ses_direct') });
-  await new Promise((resolve) => setTimeout(resolve, 80));
-  watcher.close();
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await removeVerifiedDir({ rootResolved: resolvedRoot.resolved, dir: fx.sessionDir('ses_direct') });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  } finally {
+    // A failed assertion above must not leave a persistent watcher behind: it keeps the test
+    // process alive and makes the whole runner hang instead of reporting the failure.
+    watcher.close();
+  }
 
   assert.ok(
     observed.some((name) => name.startsWith('.trash-')),

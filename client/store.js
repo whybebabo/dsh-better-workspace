@@ -246,8 +246,13 @@ export function createPanelStore() {
   /** Drops a filter whose target disappeared (workspace closed, topic deleted). */
   function reconcile(entityExists) {
     const { workspaceFilter, topicFilter } = state.prefs;
-    if (workspaceFilter && !entityExists(workspaceFilter)) setPrefs({ workspaceFilter: null, topicFilter: null });
-    else if (topicFilter && !entityExists(topicFilter)) setPrefs({ topicFilter: null });
+    if (workspaceFilter && !entityExists(workspaceFilter)) {
+      setPrefs({ workspaceFilter: null, topicFilter: null });
+      return;
+    }
+    // A topic can disappear while its workspace survives (deleted in another window). The old
+    // else-if skipped this check whenever a workspace filter was present, leaving an empty view.
+    if (topicFilter && !entityExists(topicFilter)) setPrefs({ topicFilter: null });
   }
 
   return {

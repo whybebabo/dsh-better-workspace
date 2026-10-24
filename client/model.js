@@ -109,14 +109,17 @@ function isWindowsPath(value) {
   return /^[A-Za-z]:[\\/]/.test(value) || String(value ?? '').includes('\\');
 }
 
+/** One normalized spelling used both by `samePath` and by the per-build path index. */
+function pathKey(value) {
+  const text = String(value ?? '');
+  return isWindowsPath(text)
+    ? text.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()
+    : text.replace(/\/+$/, '');
+}
+
 export function samePath(left, right) {
-  const normalize = (value) => {
-    const text = String(value ?? '');
-    const unified = isWindowsPath(text) ? text.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase() : text.replace(/\/+$/, '');
-    return unified;
-  };
-  const a = normalize(left);
-  return a !== '' && a === normalize(right);
+  const a = pathKey(left);
+  return a !== '' && a === pathKey(right);
 }
 
 /** The session the main conversation view is showing, mirroring the native `mainSessionId`. */
@@ -381,9 +384,17 @@ const groupCache = new Map();
  * not a stray even if the host has not accounted it yet: it belongs to a workspace, and the
  * panel shows it under that workspace's header via the straggler rule above.
  */
-function ungroupedBucketMatches(session, workspacePaths) {
-  for (const path of workspacePaths) if (samePath(session.cwd, path)) return true;
-  return false;
+function buildPathIndex(byId) {
+  const byPath = new Map();
+  for (const session of Object.values(byId)) {
+    if (!session) continue;
+    const key = pathKey(session.cwd);
+    if (key === '') continue;
+    const list = byPath.get(key);
+    if (list) list.push(session);
+    else byPath.set(key, [session]);
+  }
+  return byPath;
 }
 
 export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topicsOf, assignmentsOf, prefs, query, now }) {
@@ -396,6 +407,9 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
   [...pinned].forEach((id, index) => pinnedRank.set(id, index));
   const byId = list?.byId ?? {};
   const current = mainSessionId(list);
+  // One cwd -> sessions index for the whole build. Scanning every session once per workspace
+  // made a build O(workspaces × sessions), which is paid on every search keystroke.
+  const sessionsByPath = buildPathIndex(byId);
   // Minute-quantized: the label's own precision is minutes, so a tick inside the same minute
   // must produce identical row fingerprints (and therefore zero re-renders).
   const minuteNow = Number.isFinite(now) ? Math.floor(now / 60_000) * 60_000 : Date.now();
@@ -447,8 +461,9 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
     }
     // Workspace records can lag the session list; anything known but unaccounted for is
     // appended by recency so the panel never hides a session the native list shows.
-    const stragglers = Object.values(byId)
-      .filter((session) => session && !seen.has(session.id) && samePath(session.cwd, workspace.path))
+    const workspacePathKey = pathKey(workspace.path);
+    const stragglers = (workspacePathKey ? sessionsByPath.get(workspacePathKey) ?? [] : [])
+      .filter((session) => !seen.has(session.id))
       .sort((left, right) => relativeKey(left.updatedAt) - relativeKey(right.updatedAt));
     for (const session of stragglers) orderedIds.push(session.id);
     // A drag inside a workspace reorders its sessions; the manual list is a stable overlay
@@ -557,9 +572,9 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
   if (!workspaceFilter && !topicFilter) {
     const accounted = new Set();
     for (const workspace of workspaces) for (const id of workspace.sessionIds ?? []) accounted.add(id);
-    const workspacePaths = workspaces.map((workspace) => workspace.path).filter(Boolean);
+    const workspacePaths = new Set(workspaces.map((workspace) => pathKey(workspace.path)).filter(Boolean));
     const strays = Object.values(byId)
-      .filter((session) => session && !accounted.has(session.id) && !ungroupedBucketMatches(session, workspacePaths) && !archived.has(session.id))
+      .filter((session) => session && !accounted.has(session.id) && !workspacePaths.has(pathKey(session.cwd)) && !archived.has(session.id))
       .sort((left, right) => relativeKey(left.updatedAt) - relativeKey(right.updatedAt));
     const orderedStrays = orderBy(strays.map((session) => session.id), prefs?.sessionOrder?.[UNGROUPED_WORKSPACE_ID], (id) => id);
     const defaultName = t('topic.default');

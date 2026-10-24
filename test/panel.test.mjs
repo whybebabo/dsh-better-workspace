@@ -417,6 +417,47 @@ test('the bundle mounts over the workspace region and inert the native list', as
   assert.equal(container.querySelectorAll('.dts-row--session').length, 3);
 });
 
+test('a native dialog rendered inside the covered region hands the region back until it closes', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const region = document.querySelector('[class*="_regionArea"]');
+  assert.equal(region.hasAttribute('data-dts-covered'), true, 'the panel marks the region it owns');
+
+  const modal = document.createElement('div');
+  modal.setAttribute('aria-modal', 'true');
+  await act(async () => {
+    region.querySelector('[role="tree"]').append(modal);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.equal(region.hasAttribute('inert'), false, 'the native dialog can be typed into');
+  assert.equal(region.getAttribute('aria-hidden'), null, 'and is exposed to assistive tech');
+  assert.equal(region.hasAttribute('data-dts-covered'), false, 'the stylesheet stops hiding it');
+
+  await act(async () => {
+    modal.remove();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.equal(region.hasAttribute('inert'), true, 'closing the dialog restores the inert cover');
+  assert.equal(region.getAttribute('aria-hidden'), 'true');
+  assert.equal(region.hasAttribute('data-dts-covered'), true);
+});
+
+test('macOS desktop keeps the sidebar gradient and hides the native region instead of repainting it', async () => {
+  document.documentElement.dataset.platform = 'darwin';
+  let region;
+  try {
+    responseOverrides[`${API}/state`] = stateResult;
+    await mount();
+    const overlay = find('.dts-overlay');
+    region = document.querySelector('[class*="_regionArea"]');
+    assert.equal(getComputedStyle(overlay).backgroundColor, 'rgba(0, 0, 0, 0)', 'the cover does not paint the sidebar fill over the vibrancy');
+    assert.equal(getComputedStyle(region).opacity, '0', 'the native region is hidden behind the clear cover');
+  } finally {
+    delete document.documentElement.dataset.platform;
+  }
+  assert.equal(getComputedStyle(region).opacity, '1', 'the hiding is scoped to the macOS shell');
+});
+
 test('scheduled sessions keep the stock clock mark and hover task block', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   scheduleCatalog = [{
@@ -762,6 +803,43 @@ test('a blank created in another workspace is not written into the filtered topi
   );
 });
 
+test('a pending topic does not claim a blank created in another workspace', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
+  const one = workspaceSource.getSnapshot();
+  workspaceSource.set({
+    ...one,
+    items: [
+      one.items[0],
+      { workspaceId: 'ws_two', path: 'D:/work/two', title: 'Two', sessionIds: [], createdAt: 2, updatedAt: 2 },
+    ],
+  });
+  await mount();
+  await act(async () => {
+    find('.dts-row--topic', '设计').querySelector('.dts-row__actions .dts-iconbtn[title="在此分组下新建会话"]').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+
+  // Another window starts a blank in ws_two while ws_one's topic arm is still pending.
+  const before = sessionSource.getSnapshot();
+  const foreign = { id: 'ses_foreign', displayTitle: '', cwd: 'D:/work/two', updatedAt: Date.now(), blank: true, retainedBy: { mainView: 1 } };
+  await act(async () => {
+    sessionSource.set({ ...before, ids: [...before.ids, 'ses_foreign'], byId: { ...before.byId, ses_foreign: foreign }, current: 'ses_foreign' });
+  });
+  await tick();
+  assert.equal(calls.some((call) => call.url.endsWith('/assign')), false, 'the foreign blank is never written into ws_one');
+
+  const own = { id: 'ses_own', displayTitle: '', cwd: 'D:/work/one', updatedAt: Date.now(), blank: true, retainedBy: { mainView: 1 } };
+  await act(async () => {
+    const current = sessionSource.getSnapshot();
+    sessionSource.set({ ...current, ids: [...current.ids, 'ses_own'], byId: { ...current.byId, ses_own: own }, current: 'ses_own' });
+  });
+  await tick();
+  const assign = calls.find((call) => call.url.endsWith('/assign'));
+  assert.ok(assign, 'the blank from the clicked workspace is still claimed');
+  assert.deepEqual(assign.body.sessionIds, ['ses_own']);
+  assert.equal(assign.body.topicId, TOPIC);
+});
+
 test('a blank restored with the first snapshot is not re-filed', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   const base = sessionSource.getSnapshot();
@@ -965,6 +1043,27 @@ test('the workspace menu keeps the native rename and delete commands', async () 
   });
   await tick();
   assert.deepEqual(workspaceDeleteCalls, [WORKSPACE], 'the delete goes through the host workspace service');
+});
+
+test('clicking the same row or header trigger toggles its menu closed', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+
+  const rowTrigger = find('.dts-row--session', '会话 1').querySelector('.dts-row__actions .dts-iconbtn');
+  await act(async () => rowTrigger.dispatchEvent(new window.Event('click', { bubbles: true })));
+  await tick();
+  assert.ok(document.querySelector('.dts-pop--menu'), 'the row menu opens');
+  await act(async () => rowTrigger.dispatchEvent(new window.Event('click', { bubbles: true })));
+  await tick();
+  assert.equal(document.querySelector('.dts-pop--menu'), null, 'a second click on the same row trigger closes it');
+
+  const headerTrigger = container.querySelector('.dts-header .dts-iconbtn[aria-label="更多操作"]');
+  await act(async () => headerTrigger.dispatchEvent(new window.Event('click', { bubbles: true })));
+  await tick();
+  assert.ok(document.querySelector('.dts-pop--menu'), 'the header menu opens');
+  await act(async () => headerTrigger.dispatchEvent(new window.Event('click', { bubbles: true })));
+  await tick();
+  assert.equal(document.querySelector('.dts-pop--menu'), null, 'a second click on the same header trigger closes it');
 });
 
 test('the topic menu no longer offers a new-session item', async () => {
@@ -1800,6 +1899,41 @@ test('sessions outside every workspace trail in a virtual 未分组 group', asyn
   });
   await tick();
   assert.equal(document.querySelector('.dts-pop--menu').textContent.includes('移动到分组'), false, 'a session with no workspace cannot be moved to a topic');
+});
+
+test('sessions inside 未分组 reorder against its own full set, not an empty baseline', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  const base = sessionSource.getSnapshot();
+  sessionSource.set({
+    ...base,
+    ids: [...base.ids, 'ses_stray_a', 'ses_stray_b'],
+    byId: {
+      ...base.byId,
+      ses_stray_a: { id: 'ses_stray_a', displayTitle: '游离 A', cwd: 'D:/elsewhere', updatedAt: 1_700_000_002_000, blank: false },
+      ses_stray_b: { id: 'ses_stray_b', displayTitle: '游离 B', cwd: 'D:/elsewhere', updatedAt: 1_700_000_001_000, blank: false },
+    },
+  });
+  await mount();
+  const rowFor = (title) => find('.dts-row--session', title);
+  assert.equal([...container.querySelectorAll('.dts-row--session')].filter((row) => row.textContent.includes('游离 A')).length, 1, 'the virtual group renders the strays');
+
+  await act(async () => {
+    const start = new window.Event('dragstart', { bubbles: true });
+    start.dataTransfer = makeDataTransfer(['ses_stray_a']);
+    rowFor('游离 A').dispatchEvent(start);
+    const drop = new window.Event('drop', { bubbles: true, cancelable: true });
+    drop.dataTransfer = makeDataTransfer(['ses_stray_a']);
+    rowFor('游离 B').dispatchEvent(drop);
+  });
+  await tick();
+
+  const saved = JSON.parse(window.localStorage.getItem('dsh-better-workspace:prefs:v1')).sessionOrder;
+  assert.deepEqual(saved.__ungrouped__, ['ses_stray_b', 'ses_stray_a'], 'the drop persists the reordered bucket');
+  assert.deepEqual(saved[WORKSPACE], undefined, 'and does not invent a workspace order');
+  const titles = [...container.querySelectorAll('.dts-row--session')]
+    .map((row) => row.querySelector('.dts-row__text').textContent)
+    .filter((title) => title.startsWith('游离'));
+  assert.deepEqual(titles, ['游离 B', '游离 A'], 'the rendered rows follow the saved order');
 });
 
 test('archived orphans stay out of the virtual 未分组 group', async () => {

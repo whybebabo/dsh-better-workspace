@@ -96,7 +96,7 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, groupHidden 
       onContextMenu={(event) => {
         event.preventDefault();
         if (virtual) return;
-        onMenu({ type: 'workspace', group, anchor: event.currentTarget.getBoundingClientRect() });
+        onMenu({ type: 'workspace', group, anchor: event.currentTarget });
       }}
     >
       {/* Native pattern: the folder is shown at rest, the caret only while hovering. */}
@@ -135,7 +135,7 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, groupHidden 
             <IconButton
               label={t('action.menu')}
               title={t('action.menu')}
-              onClick={(event) => onMenu({ type: 'workspace', group, anchor: event.currentTarget.getBoundingClientRect() })}
+              onClick={(event) => onMenu({ type: 'workspace', group, anchor: event.currentTarget })}
             >
               <Icon name="ellipsis" />
             </IconButton>
@@ -225,7 +225,7 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
       onContextMenu={(event) => {
         event.preventDefault();
         if (virtual) return;
-        if (section.kind === 'topic') onMenu({ type: 'topic', section, group, anchor: event.currentTarget.getBoundingClientRect() });
+        if (section.kind === 'topic') onMenu({ type: 'topic', section, group, anchor: event.currentTarget });
       }}
       onDragStart={(event) => {
         if (!draggable) return;
@@ -340,7 +340,7 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
                 title={t('action.menu')}
                 onClick={(event) => {
                   event.stopPropagation();
-                  onMenu({ type: 'topic', section, group, anchor: event.currentTarget.getBoundingClientRect() });
+                  onMenu({ type: 'topic', section, group, anchor: event.currentTarget });
                 }}
               >
                 <Icon name="ellipsis" />

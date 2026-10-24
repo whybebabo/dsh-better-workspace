@@ -13,6 +13,13 @@ export const FALLBACK_EMOJIS = ['\u{1F4C1}', '\u{1F4A1}', '\u{1F3A8}', '\u{1F6E0
 /** Control characters are the only glyphs the sidecar strips, so they are the illegal set. */
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 
+/** Same policy as the host's `pickTopicEmoji`: do not make every fresh topic look identical. */
+function nextUnusedEmoji(emojis, topics) {
+  const list = emojis ?? FALLBACK_EMOJIS;
+  const used = new Set((Array.isArray(topics) ? topics : []).map((topic) => topic?.emoji).filter(Boolean));
+  return list.find((glyph) => !used.has(glyph)) ?? '';
+}
+
 /**
  * Why a topic name cannot be used right now, or `null` when it can. The host stays the
  * authority — this answers before the round trip so the field, not a silent dead button,
@@ -106,8 +113,9 @@ function SessionPicker({ rows, selected, onToggle, onSelectAll, query, onQuery }
 export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, topicsFor, emojis, onSubmit, onClose }) {
   const [name, setName] = React.useState('');
   const [nameTouched, setNameTouched] = React.useState(false);
-  const [emoji, setEmoji] = React.useState(emojis?.[0] ?? '');
   const [chosen, setChosen] = React.useState(workspaceId ?? (workspaces.length === 1 ? workspaces[0].workspaceId : null));
+  const [emojiTouched, setEmojiTouched] = React.useState(false);
+  const [emoji, setEmoji] = React.useState(() => nextUnusedEmoji(emojis, chosen ? topicsFor?.(chosen) : []));
   const [selected, setSelected] = React.useState(() => new Set());
   const [error, setError] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
@@ -174,9 +182,11 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, topic
               value={chosen ?? ''}
               aria-label={t('section.workspaces')}
               onChange={(event) => {
-                setChosen(event.target.value || null);
+                const next = event.target.value || null;
+                setChosen(next);
                 setSelected(new Set());
                 setError(null);
+                if (!emojiTouched) setEmoji(nextUnusedEmoji(emojis, next ? topicsFor?.(next) : []));
               }}
             >
               {chosen ? null : <option value="" disabled>{t('topic.pickWorkspace')}</option>}
@@ -210,7 +220,7 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, topic
       </label>
       <div className="dts-field">
         <span className="dts-field__label">{t('topic.icon')}</span>
-        <EmojiPicker emojis={emojis ?? FALLBACK_EMOJIS} value={emoji} onChange={setEmoji} name={t('topic.icon')} />
+        <EmojiPicker emojis={emojis ?? FALLBACK_EMOJIS} value={emoji} onChange={(glyph) => { setEmoji(glyph); setEmojiTouched(true); }} name={t('topic.icon')} />
       </div>
       {chosen && rows.length > 0 ? (
         <div className="dts-field">
@@ -290,6 +300,7 @@ export function EditTopicDialog({ topic, workspaceId, topicsFor, emojis, onSubmi
 
 export function DeleteTopicDialog({ topic, count, onConfirm, onClose }) {
   const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState(null);
   const close = () => {
     if (!busy) onClose();
   };
@@ -306,9 +317,12 @@ export function DeleteTopicDialog({ topic, count, onConfirm, onClose }) {
             disabled={busy}
             onClick={async () => {
               setBusy(true);
+              setError(null);
               try {
                 await onConfirm();
                 onClose();
+              } catch (caught) {
+                setError(caught?.message ?? String(caught));
               } finally {
                 setBusy(false);
               }
@@ -320,6 +334,7 @@ export function DeleteTopicDialog({ topic, count, onConfirm, onClose }) {
       }
     >
       <p className="dts-dialog__text">{t('topic.deleteBody', { n: count })}</p>
+      {error ? <p className="dts-error">{error}</p> : null}
     </Dialog>
   );
 }
@@ -469,7 +484,7 @@ export function RenameSessionDialog({ row, onSubmit, onClose }) {
 export function MoveToTopicDialog({ count, topics, emojis, onMove, onCreate, onClose }) {
   const [creating, setCreating] = React.useState(false);
   const [name, setName] = React.useState('');
-  const [emoji, setEmoji] = React.useState(emojis?.[0] ?? '');
+  const [emoji, setEmoji] = React.useState(() => nextUnusedEmoji(emojis, topics));
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(null);
   // Same rules as the create dialog: the new name has to be unique in this workspace.

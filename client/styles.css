@@ -17,6 +17,22 @@
   line-height: 22px;
 }
 
+/* The macOS desktop shell paints the sidebar column with a translucent gradient over the
+   window's vibrancy (`html[data-platform=darwin] .sidebarCol`), not with a flat fill. An
+   opaque cover would read as a differently tinted block, so on that platform the cover stays
+   clear and the region underneath is hidden instead — the column's own gradient then shows
+   through, continuous with the rest of the sidebar. `opacity` rather than `visibility`:
+   the host's own rules set `visibility: visible` on the stock header and rows, which would
+   override a hidden value inherited from the region, while a parent's opacity cannot be
+   overridden by its children. The marker only exists while the panel owns the region. */
+html[data-platform='darwin'] .dts-overlay {
+  background: transparent;
+}
+
+html[data-platform='darwin'] [data-dts-covered] {
+  opacity: 0;
+}
+
 .dts-overlay * {
   box-sizing: border-box;
 }
