@@ -60,10 +60,10 @@ dsh plugin --profile desktop add @whybebabo/dsh-better-workspace
 Install a tagged release straight from the repository, without npm:
 
 ```bash
-dsh plugin --profile web add github:whybebabo/dsh-better-workspace#v0.1.4
+dsh plugin --profile web add github:whybebabo/dsh-better-workspace#v0.1.5
 ```
 
-Replace `#v0.1.4` with the tag you want. This path also needs Git and pnpm, and still needs no clone.
+Replace `#v0.1.5` with the tag you want. This path also needs Git and pnpm, and still needs no clone.
 
 ### From source
 
@@ -315,10 +315,10 @@ The shipped `lib/client.js` must register with `__ModuleLoader__` under the **pa
 npm run build          # build first: lib/client.js in the package is an artifact
 npm pack --dry-run     # inspect the file list
 npm publish            # publish to npm
-git tag v0.1.4 && git push --tags
+git tag v0.1.5 && git push --tags
 ```
 
-The `github:...#v0.1.4` install path only works once a tag exists; the two are independent, but publish them with the same version.
+The `github:...#v0.1.5` install path only works once a tag exists; the two are independent, but publish them with the same version.
 
 ## Known limits
 
