@@ -263,7 +263,6 @@ function applyPlugin(mod) {
           },
           async create(input) {
             workspaceCreateCalls.push(input);
-            return { workspaceId: 'ws_new' };
           },
         };
       }
@@ -942,7 +941,6 @@ test('the ＋ menu offers only a session starter and adding a workspace, neither
 
 test('adding a workspace delegates to the host’s own control so the composed picker runs', async () => {
   responseOverrides[`${API}/state`] = stateResult;
-  globalThis.__DSH_DIRECTORY_PICKER__ = { pick: async () => null };
   await mount();
   const region = document.querySelector('[class*="_regionArea"]');
   const nativeAdd = document.createElement('button');
@@ -973,7 +971,6 @@ test('adding a workspace delegates to the host’s own control so the composed p
 
 test('the delegated add control is found by shortcut when the label is another locale', async () => {
   responseOverrides[`${API}/state`] = stateResult;
-  globalThis.__DSH_DIRECTORY_PICKER__ = { pick: async () => null };
   await mount();
   const region = document.querySelector('[class*="_regionArea"]');
   const nativeAdd = document.createElement('button');
@@ -1003,7 +1000,6 @@ test('the delegated add control is found by shortcut when the label is another l
 
 test('a busy host add control is not replaced by a second picker', async () => {
   responseOverrides[`${API}/state`] = stateResult;
-  globalThis.__DSH_DIRECTORY_PICKER__ = { pick: async () => null };
   await mount();
   const region = document.querySelector('[class*="_regionArea"]');
   const nativeAdd = document.createElement('button');
@@ -1063,14 +1059,8 @@ test('adding a workspace falls back to the shell’s window-owned picker without
   }
 });
 
-test('adding a workspace on Web uses the panel’s own directory picker', async () => {
+test('adding a workspace falls back to the remote picker without the desktop bridge', async () => {
   responseOverrides[`${API}/state`] = stateResult;
-  responseOverrides[`${API}/directory/list`] = (body) => ({
-    ok: true,
-    result: body?.path === '/home/me/project'
-      ? { path: '/home/me/project', parent: '/home/me', home: '/home/me', truncated: false, entries: [] }
-      : { path: '/home/me', parent: '/home', home: '/home/me', truncated: false, entries: [{ name: 'project', path: '/home/me/project' }] },
-  });
   await mount();
   const plus = [...container.querySelectorAll('.dts-header .dts-iconbtn')].find((node) => node.getAttribute('title') === '创建');
   await act(async () => {
@@ -1084,20 +1074,8 @@ test('adding a workspace on Web uses the panel’s own directory picker', async 
   });
   await tick();
 
-  const dialog = find('.dts-dialog', '添加工作区');
-  assert.ok(dialog, 'the panel owns the picker instead of the host’s detached panel');
-  const row = find('.dts-browser__row', 'project');
-  assert.ok(row, 'the host’s folders arrive through the plugin route');
-  await act(async () => row.dispatchEvent(new window.Event('click', { bubbles: true })));
-  await act(async () => {
-    [...dialog.querySelectorAll('button')]
-      .find((node) => node.textContent.includes('添加此目录'))
-      .dispatchEvent(new window.Event('click', { bubbles: true }));
-  });
-  await tick();
-
-  assert.deepEqual(workspaceCreateCalls, [{ path: '/home/me/project' }], 'the chosen folder becomes a workspace');
-  assert.deepEqual(startSessionArgs, ['ws_new'], 'the stock flow starts a blank session in it');
+  assert.equal(pickDirectoryCalls, 1, 'the host command is the Web fallback');
+  assert.deepEqual(workspaceCreateCalls, [], 'a cancelled pick creates nothing');
 });
 
 test('starting a session into a topic from the header files the new blank session', async () => {

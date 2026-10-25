@@ -97,10 +97,6 @@ export function createHostActions(ctx) {
       await call(workspaces(), 'create', { path });
       return path;
     },
-    /** Registers a path the panel's own picker already chose; returns the host's workspace. */
-    async createWorkspaceAt(path) {
-      return await call(workspaces(), 'create', { path });
-    },
     renameWorkspace(workspaceId, title) {
       return call(workspaces(), 'rename', workspaceId, title);
     },

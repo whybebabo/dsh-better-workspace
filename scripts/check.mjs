@@ -26,7 +26,6 @@ const HOST_MODULES = [
   'lib/session-files.js',
   'lib/adopt.js',
   'lib/emojis.js',
-  'lib/directories.js',
 ];
 
 const problems = [];
