@@ -62,6 +62,8 @@ export const api = {
   deleteTopic: (payload) => request(`${API}/topics/delete`, { method: 'POST', body: payload }),
   assign: (payload) => request(`${API}/assign`, { method: 'POST', body: payload }),
   adoptSessions: () => request(`${API}/sessions/adopt`, { method: 'POST', body: {} }),
+  listDirectories: (path, signal) => request(`${API}/directory/list`, { method: 'POST', body: { path }, signal }),
+  createDirectory: (path, name) => request(`${API}/directory/create`, { method: 'POST', body: { path, name } }),
   deletePreview: (sessionIds) => request(`${API}/delete/preview`, { method: 'POST', body: { sessionIds } }),
   deleteExecute: (payload) => request(`${API}/delete/execute`, { method: 'POST', body: payload }),
 };

@@ -5,6 +5,7 @@
  */
 import * as React from 'react';
 import { cx, Dialog, Button, TextInput, Checkbox, Icon, TopicMark } from './widgets.jsx';
+import { api } from './api.js';
 import { t } from './i18n.js';
 
 /** Offline fallback; every glyph is also present in the host's Zen-sourced list. */
@@ -569,6 +570,172 @@ export function MoveToTopicDialog({ count, topics, emojis, onMove, onCreate, onC
         ))}
       </div>
       {error ? <p className="dts-error">{error}</p> : null}
+    </Dialog>
+  );
+}
+
+/**
+ * In-app directory picker for browser-hosted deployments.
+ *
+ * The host's native picker on Web is a detached macOS panel (a helper process) that can
+ * come up behind the browser; the plugin's own picker keeps the whole flow inside the page
+ * and lists the *host's* directories through the plugin routes. Desktop keeps its
+ * window-owned Electron sheet and never mounts this dialog.
+ */
+export function AddWorkspaceDialog({ onClose, onSubmit }) {
+  const [listing, setListing] = React.useState(null);
+  const [draft, setDraft] = React.useState('');
+  const [selected, setSelected] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState(null);
+  const [creating, setCreating] = React.useState(false);
+  const [folderName, setFolderName] = React.useState('');
+  const abortRef = React.useRef(null);
+
+  const load = async (path) => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setLoading(true);
+    setError(null);
+    setSelected(null);
+    setCreating(false);
+    setFolderName('');
+    try {
+      const next = await api.listDirectories(path, controller.signal);
+      if (controller.signal.aborted) return;
+      setListing(next);
+      setDraft(next.path);
+    } catch (caught) {
+      if (caught?.name !== 'AbortError' && !controller.signal.aborted) setError(caught?.message ?? String(caught));
+    } finally {
+      if (!controller.signal.aborted) setLoading(false);
+    }
+  };
+
+  React.useEffect(() => {
+    load(undefined);
+    return () => abortRef.current?.abort();
+  }, []);
+
+  const target = selected ?? listing?.path ?? null;
+  const close = () => {
+    if (!busy) onClose();
+  };
+  const submit = async () => {
+    if (!target) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onSubmit(target);
+      onClose();
+    } catch (caught) {
+      setBusy(false);
+      setError(caught?.message ?? String(caught));
+    }
+  };
+  const createFolder = async () => {
+    const name = folderName.trim();
+    if (!name || !listing || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const created = await api.createDirectory(listing.path, name);
+      setBusy(false);
+      await load(created.path);
+      setSelected(created.path);
+    } catch (caught) {
+      setBusy(false);
+      setError(caught?.message ?? String(caught));
+    }
+  };
+
+  return (
+    <Dialog
+      title={t('workspace.addTitle')}
+      description={t('workspace.addDescription')}
+      onClose={close}
+      width={560}
+      footer={
+        <>
+          <Button variant="ghost" onClick={close} disabled={busy}>{t('action.cancel')}</Button>
+          <Button variant="primary" onClick={submit} disabled={busy || loading || !target}>
+            {busy ? t('workspace.adding') : t('workspace.addHere')}
+          </Button>
+        </>
+      }
+    >
+      <div className="dts-browser">
+        <div className="dts-browser__bar">
+          <Button
+            variant="ghost"
+            onClick={() => listing?.parent && load(listing.parent)}
+            disabled={!listing?.parent || loading || busy}
+            title={t('workspace.parent')}
+          >
+            <Icon name="chevronLeft" size={14} />
+            {t('workspace.parent')}
+          </Button>
+          <TextInput
+            value={draft}
+            onChange={setDraft}
+            onEnter={() => load(draft.trim())}
+            maxLength={4096}
+            placeholder={t('workspace.pathPlaceholder')}
+            aria-label={t('workspace.path')}
+          />
+        </div>
+        <div className="dts-browser__actions">
+          {creating ? (
+            <>
+              <TextInput
+                autoFocus
+                value={folderName}
+                onChange={setFolderName}
+                onEnter={createFolder}
+                maxLength={80}
+                placeholder={t('workspace.folderName')}
+                aria-label={t('workspace.folderName')}
+              />
+              <Button onClick={createFolder} disabled={busy || !folderName.trim()}>{t('action.create')}</Button>
+              <Button variant="ghost" onClick={() => { setCreating(false); setFolderName(''); }}>{t('action.cancel')}</Button>
+            </>
+          ) : (
+            <Button variant="ghost" onClick={() => setCreating(true)} disabled={!listing || loading || busy}>
+              <Icon name="plus" size={14} />
+              {t('workspace.newFolder')}
+            </Button>
+          )}
+        </div>
+        <div className="dts-browser__list" role="listbox" aria-label={t('workspace.folders')}>
+          {loading ? <div className="dts-browser__empty">{t('workspace.loadingFolders')}</div> : null}
+          {!loading && listing?.entries.length === 0 ? <div className="dts-browser__empty">{t('workspace.noFolders')}</div> : null}
+          {listing?.entries.map((entry) => (
+            <div
+              key={entry.path}
+              role="option"
+              aria-selected={selected === entry.path}
+              tabIndex={0}
+              className={cx('dts-browser__row', selected === entry.path && 'is-selected')}
+              onClick={() => setSelected(entry.path)}
+              onDoubleClick={() => load(entry.path)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  load(entry.path);
+                }
+              }}
+              title={entry.path}
+            >
+              <Icon name="folder" size={15} />
+              <span className="dts-browser__name">{entry.name}</span>
+            </div>
+          ))}
+        </div>
+        {listing?.truncated ? <p className="dts-browser__hint">{t('workspace.truncated')}</p> : null}
+        {error ? <p className="dts-browser__error" role="alert">{error}</p> : null}
+      </div>
     </Dialog>
   );
 }

@@ -7,7 +7,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import plugin from '../lib/index.js';
@@ -87,8 +87,28 @@ test('every route is registered on both carriers', async () => {
     const paths = routes.map((route) => route.path).sort();
     assert.ok(paths.includes(`${API}/state`));
     assert.ok(paths.includes(`${API}/sessions/adopt`), 'the membership-repair route is registered');
+    assert.ok(paths.includes(`${API}/directory/list`), 'the in-app picker can list the host directories');
+    assert.ok(paths.includes(`${API}/directory/create`));
     assert.ok(paths.includes(`${API}/delete/preview`));
     assert.ok(paths.every((path) => path.startsWith(`${API}/`)), 'all routes share the plugin prefix');
+  });
+});
+
+test('the directory routes list and create folders under a client-supplied path', async () => {
+  await withHome(async (home) => {
+    await mkdir(join(home, 'project'));
+    const { find } = await boot({ home });
+    const listed = await call(find(`${API}/directory/list`), fakeRequest({ body: { path: home } }));
+    assert.equal(listed.status, 200);
+    assert.deepEqual(listed.json.result.entries.map((entry) => entry.name), ['project']);
+
+    const created = await call(find(`${API}/directory/create`), fakeRequest({ body: { path: home, name: 'second' } }));
+    assert.equal(created.status, 200);
+    assert.equal(created.json.result.path, join(home, 'second'));
+
+    const bad = await call(find(`${API}/directory/create`), fakeRequest({ body: { path: home, name: '../escape' } }));
+    assert.equal(bad.status, 400);
+    assert.equal(bad.json.code, 'bad-directory-name');
   });
 });
 

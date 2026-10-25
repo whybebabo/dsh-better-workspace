@@ -18,7 +18,7 @@ import { cx, Popover, MenuItem, Icon, StateMark, useLanguage, TopicMark } from '
 import { Header } from './header.jsx';
 import { sectionKey, TopicTree } from './topic-tree.jsx';
 import { BatchBar } from './batch-bar.jsx';
-import { CreateTopicDialog, EditTopicDialog, DeleteTopicDialog, MoveToTopicDialog, RenameSessionDialog, RenameWorkspaceDialog, DeleteWorkspaceDialog } from './dialogs.jsx';
+import { AddWorkspaceDialog, CreateTopicDialog, EditTopicDialog, DeleteTopicDialog, MoveToTopicDialog, RenameSessionDialog, RenameWorkspaceDialog, DeleteWorkspaceDialog } from './dialogs.jsx';
 import { BatchResultDialog, DeleteSessionsDialog } from './results.jsx';
 import { t } from './i18n.js';
 import { formatRelative } from './time.js';
@@ -1216,23 +1216,31 @@ export function OverlayPanel({ actions, schedules }) {
   }
 
   const addWorkspace = async () => {
-    // Delegate to the host's own add-workspace flow: it renders whichever directory
-    // interaction this deployment composed and starts the session the stock flow starts.
-    // A programmatic click still reaches the covered (inert) control, whose own handler
-    // runs the host flow above the panel.
-    const nativeAdd = findNativeAddWorkspace(geom.regionEl);
-    if (nativeAdd) {
-      // Disabled means the host's flow is already busy with a pick; opening our own
-      // fallback picker on top would be a second chooser, so leave the host alone.
-      if (!nativeAdd.disabled) nativeAdd.click();
+    const desktop = typeof globalThis.__DSH_DIRECTORY_PICKER__?.pick === 'function';
+    if (desktop) {
+      // Desktop: let the host run its own flow. The covered add control opens the same
+      // window-owned Electron sheet the stock sidebar uses, and starts the session the
+      // stock flow starts.
+      const nativeAdd = findNativeAddWorkspace(geom.regionEl);
+      if (nativeAdd) {
+        // Disabled means the host's flow is already busy with a pick; opening our own
+        // fallback picker on top would be a second chooser, so leave the host alone.
+        if (!nativeAdd.disabled) nativeAdd.click();
+        return;
+      }
+      try {
+        const path = await actions.createWorkspace();
+        if (path) flash(path);
+      } catch (error) {
+        flash(error?.message ?? String(error), 'bad');
+      }
       return;
     }
-    try {
-      const path = await actions.createWorkspace();
-      if (path) flash(path);
-    } catch (error) {
-      flash(error?.message ?? String(error), 'bad');
-    }
+    // Web: the host's native face is a detached macOS panel that can open behind the
+    // browser and ignore clicks, and the browse interaction exists only on remote
+    // deployments. The panel owns a picker that works everywhere: it lists the host's
+    // directories through the plugin routes, then registers the chosen path.
+    setDialog({ type: 'addWorkspace' });
   };
 
   const menuItems = menu ? { session: () => sessionMenu(menu.row), topic: () => topicMenu(menu), workspace: () => workspaceMenu(menu.group), header: () => headerMenu }[menu.type]?.() : null;
@@ -1517,6 +1525,23 @@ export function OverlayPanel({ actions, schedules }) {
           onConfirm={async () => {
             await store.deleteTopic({ workspaceId: dialog.workspaceId, topicId: dialog.topic.id });
             if (prefs.topicFilter === dialog.topic.id) pickTopic(null);
+          }}
+        />
+      ) : null}
+
+      {dialog?.type === 'addWorkspace' ? (
+        <AddWorkspaceDialog
+          onClose={() => setDialog(null)}
+          onSubmit={async (path) => {
+            const created = await actions.createWorkspaceAt(path);
+            flash(path);
+            if (created?.workspaceId) {
+              try {
+                await actions.startSession(created.workspaceId);
+              } catch (error) {
+                flash(error?.message ?? String(error), 'bad');
+              }
+            }
           }}
         />
       ) : null}
