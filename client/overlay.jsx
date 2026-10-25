@@ -49,6 +49,25 @@ function useSnapshot(source, enabled = true) {
 }
 
 /**
+ * The host's own "add workspace" control, still mounted under the cover.
+ *
+ * The panel's menu delegates to it instead of running a picker command itself: the host
+ * composes the directory interaction per deployment (the OS chooser on Desktop, the in-app
+ * browser when the server is reached over a tunnel or a non-loopback bind), and only its own
+ * flow knows which one is mounted. `uiWorkspace.pickDirectory` exists only for the native
+ * composition; the host refuses it with "the composed picker serves browse" everywhere else.
+ */
+function findNativeAddWorkspace(regionEl) {
+  if (!regionEl) return null;
+  return [...regionEl.querySelectorAll('button')].find((button) => {
+    const label = (button.getAttribute('aria-label') || button.getAttribute('title') || '').trim();
+    if (/^(添加工作区|add workspace|open folder)(…|\.\.\.)?$/i.test(label)) return true;
+    // The shortcut is locale-independent, and only the workspace header binds ⌘/Ctrl+O.
+    return /(^|\+)O$/i.test(button.getAttribute('aria-keyshortcuts') || '');
+  }) ?? null;
+}
+
+/**
  * Stable-identity dispatch for the tree's callback props.
  *
  * `Section` and `SessionRow` are memoized, so every callback they receive has to keep its
@@ -102,7 +121,12 @@ export function OverlayPanel({ actions, schedules }) {
     setHint(next);
   }, []);
   const [now, setNow] = React.useState(() => Date.now());
-  const [pendingTopic, setPendingTopic] = React.useState(null);
+  /**
+   * Bumped whenever a topic is armed so the blank-session watcher evaluates immediately.
+   * A host that reuses an already-current blank may publish no new session list, and the
+   * claim must not wait for an unrelated publish (or the 90s window) to run.
+   */
+  const [pendingEpoch, setPendingEpoch] = React.useState(0);
   const [dropHint, setDropHint] = React.useState(null);
   /** Transient collapse focus while a workspace/topic is dragged; never persisted. */
   const [dragFocus, setDragFocus] = React.useState(null);
@@ -110,7 +134,7 @@ export function OverlayPanel({ actions, schedules }) {
   const pendingRef = React.useRef(null);
   /** Blank-session watcher: the first ready snapshot primes the set, so reloads never re-file. */
   const autoFileRef = React.useRef({ primed: false, seen: new Set(), busy: new Set() });
-  /** Panel-owned timers. Both must die with the overlay, or they outlive it and keep firing. */
+  /** Panel-owned timers. All must die with the overlay, or they outlive it and keep firing. */
   const timersRef = React.useRef({ toast: null, arm: null });
 
   /**
@@ -378,7 +402,6 @@ export function OverlayPanel({ actions, schedules }) {
     const pending = pendingRef.current;
     if (pending && Date.now() > pending.until) {
       pendingRef.current = null;
-      setPendingTopic(null);
       clearTimeout(timersRef.current.arm);
       timersRef.current.arm = null;
     }
@@ -392,20 +415,23 @@ export function OverlayPanel({ actions, schedules }) {
         if (!session?.cwd) return null;
         return options.find((option) => samePath(option.path, session.cwd)) ?? null;
       };
-      // Only a *new blank* session is the one we just asked the host to start. Without this
+      // Only a blank session is the one we just asked the host to start. Without this
       // restriction, opening an existing session right afterwards would file it by mistake.
       // It must also belong to the workspace the user clicked in: a blank created by another
       // window in a different workspace is not ours to file, and assigning it here would
       // persist a cross-workspace assignment.
-      const freshBlank = ids.filter((id) => !active.seen.has(id)
-        && byId[id]?.blank
+      const inScope = (id) => Boolean(byId[id]?.blank
         && !byId[id]?.parentId
         && workspaceForSession(id)?.workspaceId === active.workspaceId);
-      if (freshBlank.length === 0) return;
+      const freshBlank = ids.filter((id) => !active.seen.has(id) && inScope(id));
+      // The host *reuses* an existing blank in the workspace instead of minting a new id
+      // (`UiWorkspaceService.createInWorkspace`), so a claim keyed only on new ids would
+      // leave the reused blank unfiled. The reused blank becomes the main view; claim it too.
       const currentId = mainSessionId(list);
-      const target = freshBlank.includes(currentId) ? currentId : freshBlank[0];
+      const reusedBlank = currentId && inScope(currentId) ? currentId : null;
+      const target = freshBlank.includes(currentId) ? currentId : (freshBlank[0] ?? reusedBlank);
+      if (!target) return;
       pendingRef.current = null;
-      setPendingTopic(null);
       clearTimeout(timersRef.current.arm);
       timersRef.current.arm = null;
       auto.seen.add(target);
@@ -454,9 +480,12 @@ export function OverlayPanel({ actions, schedules }) {
         .catch(() => { /* stays in the default bucket; the row menu can still move it */ })
         .finally(() => auto.busy.delete(id));
     }
-    // Only a new session list (or workspace list) can introduce a blank to file. Without this
-    // dependency array the whole scan ran on every render — each hover, toast and keystroke.
-  }, [list, options, store, state.workspaces]);
+    // Only a new session list (or workspace list) can introduce a blank to file, and arming a
+    // pending topic is the one moment where a *reused* blank already sits in the current list.
+    // Without this dependency array the whole scan ran on every render — each hover, toast and
+    // keystroke. `pendingRef` is a ref, so the arm itself is replayed through the ref check
+    // below when the list next publishes.
+  }, [list, options, store, state.workspaces, pendingEpoch]);
 
   const activeTopic = React.useMemo(() => {
     if (!prefs.topicFilter) return null;
@@ -556,14 +585,21 @@ export function OverlayPanel({ actions, schedules }) {
       event.preventDefault();
       event.dataTransfer.dropEffect = 'move';
       const position = forcedPosition ?? positionOf(event);
+      // Topic ids are only unique inside a workspace (`tp_default` exists in every one), so
+      // the hint has to carry the owner: rendering it back by id alone drew the insertion
+      // line beside every workspace's default group.
       setDropHint((current) =>
-        current && current.level === level && current.id === target.id && current.position === position
+        current && current.level === level && current.id === target.id
+          && current.workspaceId === (target.workspaceId ?? null) && current.position === position
           ? current
-          : { level, id: target.id, position },
+          : { level, id: target.id, workspaceId: target.workspaceId ?? null, position },
       );
     },
-    onLeave: (level, id) => {
-      setDropHint((current) => (current?.level === level && current.id === id ? null : current));
+    onLeave: (level, id, workspaceId) => {
+      setDropHint((current) => (current?.level === level && current.id === id
+        && (workspaceId === undefined || current.workspaceId === workspaceId)
+        ? null
+        : current));
     },
     onDrop: (event, level, target, forcedPosition) => {
       const drag = currentDrag();
@@ -1147,13 +1183,12 @@ export function OverlayPanel({ actions, schedules }) {
   function armTopic(workspaceId, topicId) {
     clearTimeout(timersRef.current.arm);
     pendingRef.current = { workspaceId, topicId, seen: new Set(Object.keys(list.byId ?? {})), until: Date.now() + 90_000 };
-    setPendingTopic(topicId);
+    setPendingEpoch((epoch) => epoch + 1);
     timersRef.current.arm = setTimeout(() => {
       timersRef.current.arm = null;
       const pending = pendingRef.current;
       if (pending && pending.topicId === topicId && pending.workspaceId === workspaceId && pending.until <= Date.now()) {
         pendingRef.current = null;
-        setPendingTopic(null);
       }
     }, 90_000);
   }
@@ -1165,7 +1200,6 @@ export function OverlayPanel({ actions, schedules }) {
       const pending = pendingRef.current;
       if (pending && pending.topicId === topicId && pending.workspaceId === workspaceId) {
         pendingRef.current = null;
-        setPendingTopic(null);
         clearTimeout(timersRef.current.arm);
         timersRef.current.arm = null;
       }
@@ -1182,6 +1216,17 @@ export function OverlayPanel({ actions, schedules }) {
   }
 
   const addWorkspace = async () => {
+    // Delegate to the host's own add-workspace flow: it renders whichever directory
+    // interaction this deployment composed and starts the session the stock flow starts.
+    // A programmatic click still reaches the covered (inert) control, whose own handler
+    // runs the host flow above the panel.
+    const nativeAdd = findNativeAddWorkspace(geom.regionEl);
+    if (nativeAdd) {
+      // Disabled means the host's flow is already busy with a pick; opening our own
+      // fallback picker on top would be a second chooser, so leave the host alone.
+      if (!nativeAdd.disabled) nativeAdd.click();
+      return;
+    }
     try {
       const path = await actions.createWorkspace();
       if (path) flash(path);
@@ -1422,7 +1467,6 @@ export function OverlayPanel({ actions, schedules }) {
             onDropOnRow={treeHandlers.onDropOnRow}
             onToggleReveal={treeHandlers.onToggleReveal}
             reorder={reorder}
-            pendingTopicId={pendingTopic}
             currentWorkspaceId={tree.currentWorkspaceId}
           />
         </div>

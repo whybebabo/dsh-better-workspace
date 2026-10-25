@@ -200,7 +200,7 @@ export const SessionRow = React.memo(function SessionRow({
         }
       }}
       onDragLeave={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) reorder?.onLeave?.('session', row.id);
+        if (!event.currentTarget.contains(event.relatedTarget)) reorder?.onLeave?.('session', row.id, row.workspaceId);
       }}
       onDrop={(event) => {
         event.preventDefault();

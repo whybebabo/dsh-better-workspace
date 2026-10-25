@@ -1770,16 +1770,6 @@ html[data-platform='darwin'] [data-dts-covered] {
   background: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.05));
 }
 
-.dts-row--topic.is-pending::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: var(--dsw-radius-md, 12px);
-  box-shadow: inset 0 0 0 1px var(--dsw-alias-link, rgba(65, 118, 230, 0.45));
-  animation: dts-pulse 1.4s ease-in-out infinite;
-  pointer-events: none;
-}
-
 /* ---------- topic markers: emoji, or the '-' symbol when there is none ---------- */
 .dts-emoji,
 .dts-dash {

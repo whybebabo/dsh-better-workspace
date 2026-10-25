@@ -42,6 +42,8 @@ let openSessionCalls = 0;
 let toggleSidebarCalls = 0;
 let workspaceRenameCalls = [];
 let workspaceDeleteCalls = [];
+let workspaceCreateCalls = [];
+let pickDirectoryCalls = 0;
 let sessionRefreshCalls = 0;
 /** Per-test override for `pinSession`, so a click can move the host's pin set. */
 let pinImpl;
@@ -259,6 +261,9 @@ function applyPlugin(mod) {
           async delete(workspaceId) {
             workspaceDeleteCalls.push(workspaceId);
           },
+          async create(input) {
+            workspaceCreateCalls.push(input);
+          },
         };
       }
       if (name === 'uiWorkspace') {
@@ -273,7 +278,10 @@ function applyPlugin(mod) {
           unarchiveSession: async () => {},
           pinSession: async (id) => (pinImpl ? pinImpl(id) : undefined),
           unpinSession: async () => {},
-          pickDirectory: async () => null,
+          pickDirectory: async () => {
+            pickDirectoryCalls += 1;
+            return null;
+          },
         };
       }
       if (name === 'layout') return { toggleSidebar() { toggleSidebarCalls += 1; } };
@@ -342,6 +350,9 @@ beforeEach(async () => {
   toggleSidebarCalls = 0;
   workspaceRenameCalls = [];
   workspaceDeleteCalls = [];
+  workspaceCreateCalls = [];
+  pickDirectoryCalls = 0;
+  delete globalThis.__DSH_DIRECTORY_PICKER__;
   sessionRefreshCalls = 0;
   scheduleCatalog = [];
   scheduleReaders = 0;
@@ -928,6 +939,145 @@ test('the ＋ menu offers only a session starter and adding a workspace, neither
   assert.equal(items.every((node) => !node.disabled), true);
 });
 
+test('adding a workspace delegates to the host’s own control so the composed picker runs', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const region = document.querySelector('[class*="_regionArea"]');
+  const nativeAdd = document.createElement('button');
+  nativeAdd.setAttribute('aria-label', '添加工作区');
+  let nativeClicks = 0;
+  nativeAdd.addEventListener('click', () => {
+    nativeClicks += 1;
+  });
+  region.append(nativeAdd);
+  assert.equal(region.hasAttribute('inert'), true, 'the stock control sits under the inert cover');
+
+  const plus = [...container.querySelectorAll('.dts-header .dts-iconbtn')].find((node) => node.getAttribute('title') === '创建');
+  await act(async () => {
+    plus.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-pop--create .dts-menu__item')]
+      .find((node) => node.textContent.includes('添加工作区'))
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+
+  assert.equal(nativeClicks, 1, 'the host flow owns the picker it actually composed (native or browse)');
+  assert.equal(pickDirectoryCalls, 0, 'the plugin never calls the native-only RPC itself');
+  assert.deepEqual(workspaceCreateCalls, [], 'the host creates the workspace in its own flow');
+});
+
+test('the delegated add control is found by shortcut when the label is another locale', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const region = document.querySelector('[class*="_regionArea"]');
+  const nativeAdd = document.createElement('button');
+  nativeAdd.setAttribute('aria-label', 'Añadir área de trabajo');
+  nativeAdd.setAttribute('aria-keyshortcuts', 'Control+Alt+O');
+  let nativeClicks = 0;
+  nativeAdd.addEventListener('click', () => {
+    nativeClicks += 1;
+  });
+  region.append(nativeAdd);
+
+  const plus = [...container.querySelectorAll('.dts-header .dts-iconbtn')].find((node) => node.getAttribute('title') === '创建');
+  await act(async () => {
+    plus.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-pop--create .dts-menu__item')]
+      .find((node) => node.textContent.includes('添加工作区'))
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+
+  assert.equal(nativeClicks, 1);
+  assert.equal(pickDirectoryCalls, 0);
+});
+
+test('a busy host add control is not replaced by a second picker', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const region = document.querySelector('[class*="_regionArea"]');
+  const nativeAdd = document.createElement('button');
+  nativeAdd.setAttribute('aria-label', '添加工作区');
+  nativeAdd.disabled = true;
+  let nativeClicks = 0;
+  nativeAdd.addEventListener('click', () => {
+    nativeClicks += 1;
+  });
+  region.append(nativeAdd);
+
+  const plus = [...container.querySelectorAll('.dts-header .dts-iconbtn')].find((node) => node.getAttribute('title') === '创建');
+  await act(async () => {
+    plus.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-pop--create .dts-menu__item')]
+      .find((node) => node.textContent.includes('添加工作区'))
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+
+  assert.equal(nativeClicks, 0, 'the disabled host control already owns an open flow');
+  assert.equal(pickDirectoryCalls, 0, 'no second chooser is opened on top');
+});
+
+test('adding a workspace falls back to the shell’s window-owned picker without a host control', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  const bridge = {
+    calls: 0,
+    pick: async () => {
+      bridge.calls += 1;
+      return 'D:/work/two';
+    },
+  };
+  globalThis.__DSH_DIRECTORY_PICKER__ = bridge;
+  try {
+    await mount();
+    const plus = [...container.querySelectorAll('.dts-header .dts-iconbtn')].find((node) => node.getAttribute('title') === '创建');
+    await act(async () => {
+      plus.dispatchEvent(new window.Event('click', { bubbles: true }));
+    });
+    await tick();
+    await act(async () => {
+      [...document.querySelectorAll('.dts-pop--create .dts-menu__item')]
+        .find((node) => node.textContent.includes('添加工作区'))
+        .dispatchEvent(new window.Event('click', { bubbles: true }));
+    });
+    await tick();
+
+    assert.equal(bridge.calls, 1, 'the Desktop bridge opens the same window-owned sheet the host uses');
+    assert.equal(pickDirectoryCalls, 0, 'the detached remote panel is not opened');
+    assert.deepEqual(workspaceCreateCalls, [{ path: 'D:/work/two' }], 'the picked path becomes a workspace');
+  } finally {
+    delete globalThis.__DSH_DIRECTORY_PICKER__;
+  }
+});
+
+test('adding a workspace falls back to the remote picker without the desktop bridge', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const plus = [...container.querySelectorAll('.dts-header .dts-iconbtn')].find((node) => node.getAttribute('title') === '创建');
+  await act(async () => {
+    plus.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-pop--create .dts-menu__item')]
+      .find((node) => node.textContent.includes('添加工作区'))
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+
+  assert.equal(pickDirectoryCalls, 1, 'the host command is the Web fallback');
+  assert.deepEqual(workspaceCreateCalls, [], 'a cancelled pick creates nothing');
+});
+
 test('starting a session into a topic from the header files the new blank session', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 7, result: { changed: 1 } } });
@@ -985,6 +1135,40 @@ test('choosing 默认分组 from the header files the blank into the default gro
   const assign = calls.find((call) => call.url.endsWith('/assign'));
   assert.ok(assign, 'the explicit default choice is honoured');
   assert.equal(assign.body.topicId, 'tp_default');
+});
+
+test('a reused blank is filed into the chosen group', async () => {
+  // The host reuses an existing blank in the workspace (`createInWorkspace`) rather than
+  // minting a new id, so a claim keyed only on new ids would leave it unfiled.
+  responseOverrides[`${API}/state`] = stateResult;
+  const sessions = makeSessions(3);
+  sessions.ids = [...sessions.ids, 'ses_reused'];
+  sessions.byId = {
+    ...sessions.byId,
+    ses_reused: { id: 'ses_reused', displayTitle: '', cwd: 'D:/work/one', updatedAt: 1, blank: true, retainedBy: { mainView: 1 } },
+  };
+  sessions.current = 'ses_reused';
+  sessionSource.set(sessions);
+  const one = workspaceSource.getSnapshot();
+  workspaceSource.set({ ...one, items: [{ ...one.items[0], sessionIds: sessions.ids }] });
+  const assignBodies = [];
+  responseOverrides[`${API}/assign`] = (body) => {
+    assignBodies.push(body);
+    return { ok: true, result: { revision: 6, result: { changed: 1 } } };
+  };
+  await mount();
+
+  await act(async () => {
+    find('.dts-row--topic', '默认分组')
+      .querySelector('.dts-row__actions .dts-iconbtn[title="在此分组下新建会话"]')
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+
+  assert.deepEqual(startSessionArgs, [WORKSPACE], 'the host is asked for a session in the clicked workspace');
+  const assign = assignBodies.find((body) => body.sessionIds?.includes('ses_reused'));
+  assert.ok(assign, 'the reused blank is filed into the chosen group');
+  assert.equal(assign.topicId, 'tp_default');
 });
 
 test('the default group renders as a system topic row', async () => {
@@ -1714,6 +1898,55 @@ test('dragging a topic row reorders the topics of that workspace', async () => {
   await tick();
   const last = calls.filter((entry) => entry.url.endsWith('/topics/reorder')).pop();
   assert.deepEqual(last.body.topicIds, ['tp_a', TOPIC, 'tp_default'], 'the default group can be filed anywhere');
+});
+
+test('a topic drag marks only the default group of the workspace being dragged in', async () => {
+  // `tp_default` is the same id in every workspace; matching the insertion line on the id
+  // alone drew it beside every workspace's default group.
+  responseOverrides[`${API}/state`] = () => {
+    const payload = stateResult();
+    payload.result.workspaces = {
+      ...payload.result.workspaces,
+      ws_two: {
+        topics: [{ id: 'tp_default', name: '默认分组', emoji: '', order: -1, createdAt: 0, system: true }],
+        assignments: {},
+      },
+    };
+    return payload;
+  };
+  const one = workspaceSource.getSnapshot();
+  workspaceSource.set({
+    ...one,
+    items: [
+      one.items[0],
+      { workspaceId: 'ws_two', path: 'D:/work/two', title: 'Two', sessionIds: [], createdAt: 2, updatedAt: 2 },
+    ],
+  });
+  await mount();
+
+  const groups = [...container.querySelectorAll('.dts-group')];
+  const [oneDefault, oneTopic] = groups[0].querySelectorAll('.dts-row--topic');
+  const twoDefault = groups[1].querySelector('.dts-row--topic');
+  assert.ok(oneDefault.textContent.includes('默认分组'));
+  assert.ok(twoDefault.textContent.includes('默认分组'));
+
+  await act(async () => {
+    const start = new window.Event('dragstart', { bubbles: true });
+    start.dataTransfer = makeDataTransfer([]);
+    oneTopic.dispatchEvent(start);
+    const over = new window.Event('dragover', { bubbles: true, cancelable: true });
+    over.dataTransfer = makeDataTransfer([]);
+    oneDefault.dispatchEvent(over);
+  });
+  await tick();
+
+  const marked = (row) => row.classList.contains('is-dropbefore') || row.classList.contains('is-dropafter');
+  assert.equal(marked(oneDefault), true, 'the hovered workspace default group shows the insertion line');
+  assert.equal(marked(twoDefault), false, 'the other workspace default group stays clean');
+
+  await act(async () => oneTopic.dispatchEvent(new window.Event('dragend', { bubbles: true })));
+  await tick();
+  assert.equal(marked(oneDefault), false, 'ending the drag clears the line');
 });
 
 test('dragging a session onto another session reorders them', async () => {

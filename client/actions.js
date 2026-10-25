@@ -78,9 +78,21 @@ export function createHostActions(ctx) {
       if (typeof target?.renameSession === 'function') return call(target, 'renameSession', sessionId, title);
       throw Object.assign(new Error(t('host.renameUnsupported')), { code: 'host-command-missing' });
     },
-    /** Reuses the host's own directory picker so adding a workspace behaves exactly natively. */
+    /**
+     * Fallback for adding a workspace when the host's own add control cannot be found.
+     *
+     * The panel normally delegates to that control, so the host runs whichever directory
+     * interaction the deployment composed. This path only has the native face: Desktop's
+     * window-owned bridge first (`__DSH_DIRECTORY_PICKER__.pick()`, an Electron sheet),
+     * then the remote `pickDirectory` command. The latter is native-only — a browse
+     * composition (tunnel, SSH, non-loopback bind) refuses it, which is why delegation is
+     * the primary path.
+     */
     async createWorkspace() {
-      const path = await call(uiWorkspace(), 'pickDirectory');
+      const bridge = globalThis.__DSH_DIRECTORY_PICKER__;
+      const path = typeof bridge?.pick === 'function'
+        ? await bridge.pick()
+        : await call(uiWorkspace(), 'pickDirectory');
       if (!path) return null;
       await call(workspaces(), 'create', { path });
       return path;

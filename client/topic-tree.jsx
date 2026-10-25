@@ -153,7 +153,7 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, groupHidden 
   );
 }
 
-function SectionHeader({ section, group, selectMode, selectedIds, pending, onToggleCollapse, onToggleSection, onMenu, onFilter, onNewSession, onDropSessions, onRename, reorder, selectableIds = [], hidden = 0 }) {
+function SectionHeader({ section, group, selectMode, selectedIds, onToggleCollapse, onToggleSection, onMenu, onFilter, onNewSession, onDropSessions, onRename, reorder, selectableIds = [], hidden = 0 }) {
   // `selectableIds` is the section's visible scope (model.selectableIds — the same derivation
   // every "select all" entry point uses). A fallback to `section.rows` here is exactly the bug:
   // it meant "select all" on an over-REVEAL_LIMIT group silently grabbed rows that were never
@@ -172,8 +172,10 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
   const label = sectionLabel(section);
   const statusLabel = sectionStatusLabel(section);
   const hint = reorder?.hint;
-  const dropBefore = hint?.level === 'topic' && hint.id === section.id && hint.position === 'before';
-  const dropAfter = hint?.level === 'topic' && hint.id === section.id && hint.position === 'after';
+  // `tp_default` is shared by every workspace, so an id-only match marked the default
+  // group of every workspace while a topic was dragged over one of them.
+  const dropBefore = hint?.level === 'topic' && hint.workspaceId === group.workspaceId && hint.id === section.id && hint.position === 'before';
+  const dropAfter = hint?.level === 'topic' && hint.workspaceId === group.workspaceId && hint.id === section.id && hint.position === 'after';
 
   React.useEffect(() => {
     if (!editing) setDraft(section.name ?? '');
@@ -195,7 +197,6 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
         section.kind !== 'topic' && 'is-bucket',
         dropState === 'ok' && 'is-drop-ok',
         dropState === 'no' && 'is-drop-no',
-        pending && 'is-pending',
         dropBefore && 'is-dropbefore',
         dropAfter && 'is-dropafter',
       )}
@@ -362,7 +363,7 @@ function SectionHeader({ section, group, selectMode, selectedIds, pending, onTog
   );
 }
 
-const Section = React.memo(function Section({ section, group, schedules, selectMode, selectedIds, query, pendingTopicId, revealed, onToggleReveal, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleWorkspaceCollapse, onToggleTopicCollapse, onSelectMany, onFilter, onNewSessionInTopic, onDropSessions, onRename, onDropOnRow, reorder }) {
+const Section = React.memo(function Section({ section, group, schedules, selectMode, selectedIds, query, revealed, onToggleReveal, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleWorkspaceCollapse, onToggleTopicCollapse, onSelectMany, onFilter, onNewSessionInTopic, onDropSessions, onRename, onDropOnRow, reorder }) {
   // Selecting is about existing records; hide the provisional New Session placeholder while
   // the batch toolbar is active instead of offering a checkbox that cannot do anything.
   const rows = selectMode ? section.rows.filter((row) => !row.blank) : section.rows;
@@ -438,7 +439,6 @@ const Section = React.memo(function Section({ section, group, schedules, selectM
         selectedIds={selectedIds}
         selectableIds={scope.visible}
         hidden={scope.hidden.length}
-        pending={section.kind === 'topic' && pendingTopicId === section.id}
         onToggleCollapse={onToggleCollapse}
         onToggleSection={onToggleSection}
         onMenu={onMenu}
@@ -477,7 +477,6 @@ export function TopicTree({
   onDropOnRow,
   onToggleReveal,
   reorder,
-  pendingTopicId,
   currentWorkspaceId,
 }) {
   const selectedIds = React.useMemo(() => new Set(selection), [selection]);
@@ -578,7 +577,6 @@ export function TopicTree({
                         revealed={revealedBuckets.has(sectionKey(group, section))}
                         onToggleReveal={onToggleReveal}
                         query={tree.search}
-                        pendingTopicId={pendingTopicId}
                         onOpenSession={onOpenSession}
                         onToggleSelection={onToggleSelection}
                         onMenu={onMenu}
@@ -602,7 +600,7 @@ export function TopicTree({
                           className="dts-drop-tail"
                           aria-hidden="true"
                           onDragOver={(event) => reorder?.onHover?.(event, 'topic', { id: lastTopic.id, workspaceId: group.workspaceId }, 'after')}
-                          onDragLeave={() => reorder?.onLeave?.('topic', lastTopic.id)}
+                          onDragLeave={() => reorder?.onLeave?.('topic', lastTopic.id, group.workspaceId)}
                           onDrop={(event) => reorder?.onDrop?.(event, 'topic', { id: lastTopic.id, workspaceId: group.workspaceId }, 'after')}
                         />
                       ) : null}
@@ -617,7 +615,7 @@ export function TopicTree({
                 className="dts-drop-tail"
                 aria-hidden="true"
                 onDragOver={(event) => reorder?.onHover?.(event, 'workspace', { id: lastRealWorkspace.workspaceId, workspaceId: lastRealWorkspace.workspaceId }, 'after')}
-                onDragLeave={() => reorder?.onLeave?.('workspace', lastRealWorkspace.workspaceId)}
+                onDragLeave={() => reorder?.onLeave?.('workspace', lastRealWorkspace.workspaceId, lastRealWorkspace.workspaceId)}
                 onDrop={(event) => reorder?.onDrop?.(event, 'workspace', { id: lastRealWorkspace.workspaceId, workspaceId: lastRealWorkspace.workspaceId }, 'after')}
               />
             ) : null}
