@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { adoptOrphanSessions } from '../lib/adopt.js';
 
-function fakeRegistry(workspaces, { archived = [], tableRecords = null } = {}) {
+function fakeRegistry(workspaces, { archived = [], tableRecords = null, withTable = true } = {}) {
   const entities = workspaces.map((entry) => {
     const record = { path: entry.path, sessionIds: [...(entry.sessionIds ?? [])] };
     return {
@@ -25,10 +25,14 @@ function fakeRegistry(workspaces, { archived = [], tableRecords = null } = {}) {
       record,
     };
   });
-  const table = tableRecords === null ? undefined : {
-    keys: () => [...tableRecords.keys()],
-    get: (key) => tableRecords.get(key),
-  };
+  // 0.2.1 always exposes the raw record table (`registry.table`). The fake therefore mirrors the
+  // entities by default; `tableRecords` overrides it (a stale snapshot) and `withTable: false`
+  // models a composition without one, which the repair must refuse to guess on.
+  const records = tableRecords ?? new Map(entities.map((entity) => [entity.id, entity.record]));
+  const table = withTable ? {
+    keys: () => [...records.keys()],
+    get: (key) => records.get(key),
+  } : undefined;
   return {
     list: () => entities,
     archivedSessionIds: archived,
@@ -169,6 +173,26 @@ test('a concurrent tab reports no move for a write it did not make', async () =>
     const result = await adoptOrphanSessions({ ctx });
     assert.deepEqual(result.adopted, ['ses_race'], 'the id is accounted for now');
     assert.deepEqual(result.moved, [], 'but this run changed nothing, so nothing is announced');
+  });
+});
+
+test('a registry without a raw table skips the repair instead of guessing', async () => {
+  await withDirs(async ({ alpha }) => {
+    let attaches = 0;
+    const registry = fakeRegistry(
+      [{ id: 'ws_a', path: alpha, sessionIds: [], attach: async () => { attaches += 1; } }],
+      { withTable: false },
+    );
+    const ctx = { get: (name) => ({
+      workspaceRegistry: registry,
+      sessionPersistence: fakePersistence([{ id: 'ses_stale', cwd: alpha }]),
+    })[name] };
+    const result = await adoptOrphanSessions({ ctx });
+    // The entity getter hides ids whose cwd went stale; treating that as "unaccounted" would
+    // double-account a session and the native registry refuses to boot such a state.
+    assert.equal(result.available, false);
+    assert.deepEqual(result.adopted, []);
+    assert.equal(attaches, 0, 'nothing was attached');
   });
 });
 

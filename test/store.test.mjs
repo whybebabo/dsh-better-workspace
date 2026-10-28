@@ -1,14 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTopicStore, StoreError, validateSessionIds, normalizeTopicName, normalizeTopicEmoji, pickTopicEmoji, TOPIC_EMOJIS, DEFAULT_TOPIC_ID } from '../lib/store.js';
 
-async function freshStore() {
+async function freshStore(options = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-topic-store-'));
   const home = join(dir, 'home');
-  return { dir, home, store: createTopicStore({ home }) };
+  return { dir, home, store: createTopicStore({ home, ...options }) };
 }
 
 const sampleIds = (n) => Array.from({ length: n }, (_, index) => `ses_test${index}`);
@@ -95,17 +95,45 @@ test('assign is idempotent, moves between topics, and null means the default gro
   assert.equal(first.result.changed, 2, 'dedupes input ids');
   const again = await store.assign({ workspaceId: 'ws_a', sessionIds: ['ses_1', 'ses_2'], topicId: a.id, expectedRevision: first.revision });
   assert.equal(again.result.changed, 0, 'no-op does not report a change');
-  assert.equal(again.revision, first.revision + 1, 'a write still bumps revision');
+  assert.equal(again.revision, first.revision, 'a no-op keeps the revision other windows hold');
+  assert.equal(JSON.parse(await readFile(store.file, 'utf8')).revision, first.revision, 'and is not written to disk');
 
   const moved = await store.assign({ workspaceId: 'ws_a', sessionIds: ['ses_1'], topicId: b.id, expectedRevision: again.revision });
-  assert.deepEqual(moved.result.assignments, { ses_1: b.id, ses_2: a.id });
+  assert.deepEqual(moved.result, { topicId: b.id, changed: 1 }, 'the response carries the delta, not the whole assignment map');
+  assert.deepEqual(
+    JSON.parse(await readFile(store.file, 'utf8')).workspaces.ws_a.assignments,
+    { ses_1: b.id, ses_2: a.id },
+    'and the document holds the move',
+  );
 
   const defaulted = await store.assign({ workspaceId: 'ws_a', sessionIds: ['ses_2', 'ses_missing'], topicId: null, expectedRevision: moved.revision });
   assert.equal(defaulted.result.topicId, DEFAULT_TOPIC_ID, 'null resolves to the reserved default group');
   assert.equal(defaulted.result.changed, 2, 'ses_2 moves and the unknown session lands in the default group');
-  assert.deepEqual(defaulted.result.assignments, { ses_1: b.id, ses_2: DEFAULT_TOPIC_ID, ses_missing: DEFAULT_TOPIC_ID });
+  assert.deepEqual(
+    JSON.parse(await readFile(store.file, 'utf8')).workspaces.ws_a.assignments,
+    { ses_1: b.id, ses_2: DEFAULT_TOPIC_ID, ses_missing: DEFAULT_TOPIC_ID },
+  );
 
   await assert.rejects(() => store.assign({ workspaceId: 'ws_a', sessionIds: ['ses_1'], topicId: 'tp_nope', expectedRevision: defaulted.revision }), (e) => e.code === 'topic-not-found');
+});
+
+test('renaming to the same name and re-dropping in place are not writes', async () => {
+  const { store } = await freshStore();
+  const a = (await store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 })).result.topic;
+  await store.createTopic({ workspaceId: 'ws_a', name: 'B', expectedRevision: 1 });
+
+  const sameName = await store.updateTopic({ workspaceId: 'ws_a', topicId: a.id, name: 'A', emoji: a.emoji, expectedRevision: 2 });
+  assert.equal(sameName.revision, 2, 'a same-name update keeps the revision other windows hold');
+  assert.equal(JSON.parse(await readFile(store.file, 'utf8')).revision, 2, 'and is not written to disk');
+
+  // The stored orders are not 0..n-1 yet, so this reorder would renumber them without moving
+  // anything: the sequence is what decides, not the numbers behind it.
+  const order = (await store.snapshot()).workspaces.ws_a.topics.map((topic) => topic.id);
+  const sameOrder = await store.reorderTopics({ workspaceId: 'ws_a', topicIds: order, expectedRevision: 2 });
+  assert.equal(sameOrder.revision, 2, 'a drop that lands in place is not a write');
+
+  const moved = await store.reorderTopics({ workspaceId: 'ws_a', topicIds: [...order].reverse(), expectedRevision: 2 });
+  assert.equal(moved.revision, 3, 'a real reorder still writes');
 });
 
 test('deleting a topic re-files its sessions into the default group', async () => {
@@ -274,7 +302,7 @@ test('stale eviction never unlinks a lock that a successor installed underneath 
   assert.equal(await readFile(store.lockFile, 'utf8'), '424242-successor', 'the successor\'s lock is untouched');
 });
 
-test('a corrupt primary document falls back to the backup and refuses writes', async () => {
+test('a corrupt primary document falls back to the backup and stays writable', async () => {
   const { store } = await freshStore();
   await store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 });
   await store.createTopic({ workspaceId: 'ws_a', name: 'B', expectedRevision: 1 });
@@ -282,7 +310,10 @@ test('a corrupt primary document falls back to the backup and refuses writes', a
   await import('node:fs/promises').then(({ writeFile }) => writeFile(store.file, '{ truncated', 'utf8'));
 
   const snapshot = await store.snapshot();
-  assert.equal(snapshot.readOnly, true);
+  // Readable *and* writable: the next successful write rebuilds the primary. Reporting this as
+  // read-only told users their edits could not land when they could, and hid the real reason.
+  assert.equal(snapshot.readOnly, false);
+  assert.equal(snapshot.warningCode, 'recovered-backup');
   assert.equal(snapshot.workspaces.ws_a.topics.length, 2, 'recovered from .bak (default group plus topic A)');
   assert.match(snapshot.warning, /损坏/);
   // A write that *recovers* from the backup is allowed (it repairs the document and reports a
@@ -334,7 +365,9 @@ test('an external repair clears the read-only snapshot without a write', async (
   await store.createTopic({ workspaceId: 'ws_a', name: 'B', expectedRevision: 1 });
   const { writeFile } = await import('node:fs/promises');
   await writeFile(store.file, '{ truncated', 'utf8');
-  assert.equal((await store.snapshot()).readOnly, true, 'the broken primary is reported');
+  const damaged = await store.snapshot();
+  assert.equal(damaged.warningCode, 'recovered-backup', 'the broken primary is reported');
+  assert.equal(damaged.readOnly, false, 'but it is writable: the backup is readable');
 
   // Repair the document outside the store, exactly as a user or a sync tool would.
   const backup = await readFile(`${store.file}.bak`, 'utf8');
@@ -342,6 +375,7 @@ test('an external repair clears the read-only snapshot without a write', async (
   const snapshot = await store.snapshot();
   assert.equal(snapshot.readOnly, false, 'the next readable snapshot is not stuck on the old corruption');
   assert.equal(snapshot.warning, null);
+  assert.equal(snapshot.warningCode, null);
 });
 
 test('a write without expectedRevision is refused instead of silently winning', async () => {
@@ -376,6 +410,47 @@ test('an entirely unreadable document is never overwritten with an empty state',
   assert.equal(await readFile(seed.file, 'utf8'), '{ truncated', 'the damaged file is left for manual salvage');
 });
 
+test('a document written by a newer plugin is read-only, never downgraded', async () => {
+  const { store } = await freshStore();
+  const doc = (version, revision) => JSON.stringify({ version, revision, updatedAt: 1, workspaces: {} });
+  await mkdir(store.dir, { recursive: true });
+  // A perfectly good v1 backup exists: it must NOT be used as a "recovery" source, because
+  // writing it back would silently discard whatever the newer plugin stored.
+  await writeFile(store.bakFile, doc(1, 3), 'utf8');
+  await writeFile(store.file, doc(2, 7), 'utf8');
+
+  const snapshot = await store.snapshot();
+  assert.equal(snapshot.readOnly, true, 'an unknown version is not writable');
+  assert.equal(snapshot.warningCode, 'future-version');
+  assert.match(snapshot.warning, /版本 2/);
+
+  await assert.rejects(
+    () => store.assign({ workspaceId: 'ws_a', sessionIds: ['ses_1'], topicId: null, expectedRevision: 0 }),
+    (error) => error.code === 'store-future-version' && error.status === 503,
+  );
+  assert.equal(JSON.parse(await readFile(store.file, 'utf8')).version, 2, 'the newer document is untouched');
+  assert.equal(JSON.parse(await readFile(store.file, 'utf8')).revision, 7);
+  assert.equal(JSON.parse(await readFile(store.bakFile, 'utf8')).version, 1, 'and the backup is not overwritten either');
+});
+
+test('a primary recovered from the backup stays writable and reports the recovery', async () => {
+  const { store } = await freshStore();
+  await store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 });
+  await store.createTopic({ workspaceId: 'ws_a', name: 'B', expectedRevision: 1 });
+  await writeFile(store.file, '{ truncated', 'utf8');
+
+  const snapshot = await store.snapshot();
+  assert.equal(snapshot.readOnly, false, 'the backup is readable, and the next write rebuilds the primary');
+  assert.equal(snapshot.warningCode, 'recovered-backup');
+  assert.match(snapshot.warning, /已回退到备份/);
+
+  const written = await store.createTopic({ workspaceId: 'ws_a', name: 'C', expectedRevision: snapshot.revision });
+  assert.ok(written.revision > snapshot.revision);
+  const rebuilt = JSON.parse(await readFile(store.file, 'utf8'));
+  assert.equal(rebuilt.version, 1, 'the primary is valid again');
+  assert.ok(rebuilt.workspaces.ws_a.topics.some((topic) => topic.name === 'C'));
+});
+
 test('input validation rejects bad ids and oversized batches', () => {
   assert.deepEqual(validateSessionIds(['ses_a', 'ses_a']), ['ses_a']);
   assert.deepEqual(validateSessionIds([], { allowEmpty: true }), []);
@@ -392,4 +467,23 @@ test('workspace ids must be single safe segments', async () => {
   for (const bad of ['../ws', 'ws/b', '', 'ws\\c', null]) {
     await assert.rejects(() => store.createTopic({ workspaceId: bad, name: 'A' }), (e) => e.code === 'bad-workspace', `rejects ${JSON.stringify(bad)}`);
   }
+});
+
+test('a lock held by a live process is waited out, never stolen', async () => {
+  const { store } = await freshStore({ staleLockMs: 100, lockWaitMs: 400 });
+  await store.snapshot();
+  await mkdir(store.dir, { recursive: true });
+  // A lock whose mtime is far past the stale window but whose owner is *this* process: the
+  // PID check is what has to keep it, not the clock.
+  await writeFile(store.lockFile, `${process.pid}-deadbeef`, 'utf8');
+  const old = new Date(Date.now() - 60_000);
+  await utimes(store.lockFile, old, old);
+
+  const started = Date.now();
+  await assert.rejects(
+    () => store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 }),
+    (error) => error.code === 'store-locked' && error.status === 409,
+  );
+  assert.ok(Date.now() - started >= 300, 'it waits for the holder instead of evicting it mid-write');
+  assert.equal(await readFile(store.lockFile, 'utf8'), `${process.pid}-deadbeef`, 'and the live lock survives');
 });

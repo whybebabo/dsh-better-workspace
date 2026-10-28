@@ -129,6 +129,33 @@ test('subagents, write leases and unknown ids are hard blockers; running is soft
   assert.equal(preview.running, 1);
 });
 
+test('an orphaned subagent (parent artifact gone) can be deleted on its own', async () => {
+  const fx = await fixture();
+  // What a `partial` delete leaves behind: the parent is already gone, the child stayed.
+  await makeSession(fx, 'ses_orphan', { origin: 'subagent', parentSession: 'ses_parent_gone' });
+  const ctx = ctxWith();
+
+  const preview = await previewDelete({ home: fx.home, ctx, sessionIds: ['ses_orphan'] });
+  const [item] = preview.items;
+  assert.equal(item.subagent, true);
+  assert.equal(item.blockers.some((blocker) => blocker.code === 'subagent' && blocker.severity === 'hard'), false, 'no "delete its parent" dead end');
+  assert.equal(preview.hardBlocked, false);
+
+  const outcome = await executeDelete({ home: fx.home, ctx, sessionIds: ['ses_orphan'], confirm: true });
+  assert.equal(outcome.items[0].status, 'deleted');
+  await assert.rejects(() => lstat(fx.sessionDir('ses_orphan')), 'the orphaned artifact is gone');
+});
+
+test('a subagent whose parent still exists is refused with the cascade instruction', async () => {
+  const fx = await fixture();
+  await makeSession(fx, 'ses_parent');
+  await makeSession(fx, 'ses_child', { origin: 'subagent', parentSession: 'ses_parent' });
+  const preview = await previewDelete({ home: fx.home, ctx: ctxWith(), sessionIds: ['ses_child'] });
+  assert.equal(preview.items[0].blockers[0].code, 'subagent');
+  assert.equal(preview.items[0].blockers[0].severity, 'hard');
+  assert.equal(preview.hardBlocked, true);
+});
+
 test('deletion requires explicit confirmation', async () => {
   const fx = await fixture();
   await makeSession(fx, 'ses_one');

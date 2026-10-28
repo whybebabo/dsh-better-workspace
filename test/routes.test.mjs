@@ -15,7 +15,7 @@ import plugin from '../lib/index.js';
 const API = '/dsh-better-workspace/api';
 
 /** Boots the plugin against a captured `webServer.register` and an adopted-services stub. */
-async function boot({ home, services = {} } = {}) {
+async function boot({ home, services = {}, config } = {}) {
   const routes = [];
   const ctx = {
     inject(names, enter) {
@@ -31,7 +31,7 @@ async function boot({ home, services = {} } = {}) {
     },
     logger: { warn() {} },
   };
-  plugin(ctx, { enabled: true, storageHome: home });
+  plugin(ctx, config ?? { enabled: true, storageHome: home });
   const find = (path) => routes.find((route) => route.path === path);
   return { routes, find };
 }
@@ -69,7 +69,7 @@ function fakeResponse() {
 async function call(route, request) {
   const res = fakeResponse();
   await route.handler(request, res);
-  return { status: res.out.status, json: res.out.body === null ? null : JSON.parse(res.out.body) };
+  return { status: res.out.status, headers: res.out.headers, json: res.out.body === null ? null : JSON.parse(res.out.body) };
 }
 
 async function withHome(fn) {
@@ -86,6 +86,7 @@ test('every route is registered on both carriers', async () => {
     const { routes } = await boot({ home });
     const paths = routes.map((route) => route.path).sort();
     assert.ok(paths.includes(`${API}/state`));
+    assert.ok(paths.includes(`${API}/emojis`), 'the static glyph table has its own route');
     assert.ok(paths.includes(`${API}/sessions/adopt`), 'the membership-repair route is registered');
     assert.ok(paths.includes(`${API}/delete/preview`));
     assert.ok(paths.every((path) => path.startsWith(`${API}/`)), 'all routes share the plugin prefix');
@@ -163,7 +164,14 @@ test('the adopt route re-attaches through the host and is idempotent', async () 
         record.sessionIds = [id, ...record.sessionIds];
       },
     };
-    const registry = { list: () => [workspace], archivedSessionIds: [] };
+    // 0.2.1 always exposes the raw record table; without it the entity getter hides ids whose
+    // cwd no longer matches, and the repair refuses to guess (see `adopt.js`). The fake table
+    // stays live so a second call sees what the first one attached.
+    const table = {
+      keys: () => ['ws_a'],
+      get: (key) => (key === 'ws_a' ? { sessionIds: record.sessionIds } : undefined),
+    };
+    const registry = { list: () => [workspace], archivedSessionIds: [], table };
     const persistence = { list: async () => [{ header: { id: 'ses_orphan', cwd: project, version: 4, type: 'session' } }] };
     const { find } = await boot({ home, services: { workspaceRegistry: registry, sessionPersistence: persistence } });
 
@@ -175,6 +183,30 @@ test('the adopt route re-attaches through the host and is idempotent', async () 
     const second = await call(find(`${API}/sessions/adopt`), fakeRequest({ body: {} }));
     assert.deepEqual(second.json.result.adopted, [], 'a repeat is a no-op');
     assert.deepEqual(record.sessionIds, ['ses_orphan'], 'and does not duplicate the id');
+  });
+});
+
+test('adopt refuses to repair when the registry exposes no raw table', async () => {
+  await withHome(async (home) => {
+    const { mkdir } = await import('node:fs/promises');
+    const project = join(home, 'project');
+    await mkdir(project);
+    // The entity getter filters out ids whose cwd no longer matches, so "not listed" cannot be
+    // read as "not accounted": attaching one of those to another workspace would double-account
+    // a session, which the native registry refuses to boot. Skip instead of guessing.
+    const workspace = {
+      id: 'ws_a',
+      path: project,
+      get sessionIds() { return []; },
+      attachSession: async () => { throw new Error('must not be called'); },
+    };
+    const registry = { list: () => [workspace], archivedSessionIds: [] };
+    const persistence = { list: async () => [{ header: { id: 'ses_orphan', cwd: project, type: 'session' } }] };
+    const { find } = await boot({ home, services: { workspaceRegistry: registry, sessionPersistence: persistence } });
+    const result = await call(find(`${API}/sessions/adopt`), fakeRequest({ body: {} }));
+    assert.equal(result.status, 200);
+    assert.equal(result.json.result.available, false);
+    assert.deepEqual(result.json.result.adopted, []);
   });
 });
 
@@ -202,5 +234,62 @@ test('/state stays a read-only GET carrying the topic document', async () => {
     assert.equal(typeof result.json.result.workspaces, 'object');
     const wrong = await call(find(`${API}/state`), fakeRequest({ method: 'POST', body: {} }));
     assert.equal(wrong.status, 405);
+  });
+});
+
+test('the glyph table is a cached GET and no longer rides on /state', async () => {
+  await withHome(async (home) => {
+    const { find } = await boot({ home });
+    const emojis = await call(find(`${API}/emojis`), fakeRequest({ method: 'GET', body: undefined }));
+    assert.equal(emojis.status, 200);
+    assert.equal(emojis.json.result.emojis.length, 1915);
+    assert.match(String(emojis.headers['cache-control']), /max-age=\d+/, 'a static table is worth a browser cache');
+
+    const state = await call(find(`${API}/state`), fakeRequest({ method: 'GET', body: undefined }));
+    assert.equal('emojis' in state.json.result, false, 'the revisioned document no longer carries 11KB of glyphs');
+    assert.match(String(state.headers['cache-control']), /no-store/, 'while the document itself must never be cached');
+  });
+});
+
+test('a disabled plugin still answers /state, so the panel can hand the region back', async () => {
+  const { routes, find } = await boot({ home: join(tmpdir(), 'dsh-disabled-unused'), config: { enabled: false } });
+  // Only the kill-switch answer: no store, no sidecar, no delete routes.
+  assert.deepEqual(routes.map((route) => route.path), [`${API}/state`]);
+  const state = await call(find(`${API}/state`), fakeRequest({ method: 'GET', body: undefined }));
+  assert.equal(state.status, 200);
+  assert.equal(state.json.result.enabled, false, 'the panel sees "switched off" and unmounts itself');
+});
+
+test('a session filed into another workspace is refused, a matching one is not', async () => {
+  await withHome(async (home) => {
+    const services = {
+      workspaceRegistry: {
+        list: () => [
+          { id: 'ws_a', path: 'D:/work/a', sessionIds: [] },
+          { id: 'ws_b', path: 'D:/work/b', sessionIds: [] },
+        ],
+      },
+      sessionPersistence: {
+        list: async () => [
+          { header: { type: 'session', id: 'ses_a', cwd: 'D:/work/a' } },
+          { header: { type: 'session', id: 'ses_b', cwd: 'D:/work/b' } },
+        ],
+      },
+    };
+    const { find } = await boot({ home, services });
+    const assign = find(`${API}/assign`);
+
+    const crossed = await call(assign, fakeRequest({ body: { workspaceId: 'ws_a', sessionIds: ['ses_b'], topicId: null, expectedRevision: 0 } }));
+    assert.equal(crossed.status, 400, 'proof of a mismatch is a client error, not a 500');
+    assert.equal(crossed.json.code, 'cross-workspace');
+
+    const created = await call(find(`${API}/topics/create`), fakeRequest({ body: { workspaceId: 'ws_b', name: 'X', sessionIds: ['ses_a'], expectedRevision: 0 } }));
+    assert.equal(created.status, 400, 'the create route carries the same guard');
+
+    const same = await call(assign, fakeRequest({ body: { workspaceId: 'ws_a', sessionIds: ['ses_a'], topicId: null, expectedRevision: 0 } }));
+    assert.equal(same.status, 200, 'a session that lives in that workspace is filed normally');
+
+    const unknown = await call(assign, fakeRequest({ body: { workspaceId: 'ws_b', sessionIds: ['ses_new'], topicId: null, expectedRevision: 1 } }));
+    assert.equal(unknown.status, 200, 'a session the host has not accounted yet is exactly the case this must not block');
   });
 });
