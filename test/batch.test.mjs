@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runSessionAction, retryFailed, mergeOutcomes, BATCH_LIMIT } from '../client/batch.js';
+import { runSessionAction, mergeOutcomes, BATCH_LIMIT } from '../client/batch.js';
 
 const host = ({ archive, unarchive }) => ({ archiveSession: archive, unarchiveSession: unarchive });
 
@@ -37,7 +37,9 @@ test('a running-session rejection is routed to stop-and-archive instead of failu
   assert.equal(outcome.failed.length, 0, 'not a failure yet — the UI offers to stop it');
   assert.deepEqual(outcome.needsStop, ['ses_live']);
 
-  const retried = await retryFailed({ outcome, ids: ['ses_live'], actions });
+  // What the panel's "stop and archive" button re-runs: the ids it could not file, this time
+  // asking the host to stop the running turn first.
+  const retried = await runSessionAction({ action: 'archive', ids: outcome.needsStop, actions, options: { stopActivity: true } });
   assert.deepEqual(retried.ok, ['ses_live']);
   assert.deepEqual(calls[1], ['ses_live', { stopActivity: true }]);
 });

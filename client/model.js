@@ -307,10 +307,15 @@ function aggregateMembers(ids, { byId, archived, current, statuses }) {
  * bottom of its bucket instead of the top, which is the opposite of the host — `attachSession`
  * prepends, so a new session leads its workspace. Here the named ids keep their own slots and
  * only permute among them; rows the snapshot never met keep the host's position untouched.
+ *
+ * Exported because the drag handlers must translate a drop against the *displayed* order, which
+ * is exactly `orderByManual(base, manual)`. Using the raw base there made the second drag of a
+ * row land somewhere else than the pointer said.
  */
-function orderBy(rows, manual, keyOf) {
+export function orderByManual(rows, manual, keyOf) {
   if (!Array.isArray(manual) || manual.length === 0) return rows;
-  const pick = keyOf ?? ((entry) => entry.id);
+  // Rows may be ids (workspace/session order) or objects (rows); the default key covers both.
+  const pick = keyOf ?? ((entry) => (entry !== null && typeof entry === 'object' ? entry.id : entry));
   const order = new Map();
   for (const id of manual) if (!order.has(id)) order.set(id, order.size);
   const slots = [];
@@ -321,6 +326,55 @@ function orderBy(rows, manual, keyOf) {
   const next = [...rows];
   slots.forEach((slot, index) => { next[slot] = named[index]; });
   return next;
+}
+
+/** Internal spelling; `buildTree` reads the manual lists itself. */
+const orderBy = orderByManual;
+
+/**
+ * Every session id a workspace owns, in the order the tree builds rows from: the workspace's
+ * own account first (host order), then sessions whose `cwd` matches the workspace path but
+ * which the record has not accounted yet — most recent first, subagents excluded.
+ *
+ * Exported so drag reordering uses the *same* derivation as rendering. `allSessionIdsInWorkspace`
+ * in the panel had its own version (`Object.values` insertion order, subagents included), which
+ * is why a manual order written from a drag could disagree with the rows on screen.
+ */
+export function workspaceSessionIds({ workspace, byId, pathIndex = null }) {
+  const ordered = [];
+  const seen = new Set();
+  for (const id of workspace?.sessionIds ?? []) {
+    const session = byId?.[id];
+    if (!session || seen.has(id) || session.origin === 'subagent') continue;
+    seen.add(id);
+    ordered.push(id);
+  }
+  const key = pathKey(workspace?.path);
+  if (key === '') return ordered;
+  const matching = pathIndex?.get?.(key) ?? Object.values(byId ?? {}).filter((session) => pathKey(session?.cwd) === key);
+  const stragglers = matching
+    .filter((session) => session && !seen.has(session.id) && session.origin !== 'subagent')
+    .sort((left, right) => relativeKey(left.updatedAt) - relativeKey(right.updatedAt));
+  for (const session of stragglers) ordered.push(session.id);
+  return ordered;
+}
+
+/**
+ * The ids of the virtual 未分组 bucket: no workspace accounts for them and no `cwd` matches a
+ * registered workspace path. Same derivation as the tree, exported for the drag baseline.
+ */
+export function ungroupedSessionIds({ workspaces, byId, archived = null }) {
+  const accounted = new Set();
+  for (const workspace of workspaces ?? []) for (const id of workspace.sessionIds ?? []) accounted.add(id);
+  const paths = new Set((workspaces ?? []).map((workspace) => pathKey(workspace.path)).filter(Boolean));
+  return Object.values(byId ?? {})
+    .filter((session) => session
+      && session.origin !== 'subagent'
+      && !accounted.has(session.id)
+      && !paths.has(pathKey(session.cwd))
+      && !archived?.has?.(session.id))
+    .sort((left, right) => relativeKey(left.updatedAt) - relativeKey(right.updatedAt))
+    .map((session) => session.id);
 }
 
 /**
@@ -422,11 +476,16 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
 
   // A topic lives in exactly one workspace, so "only this topic" implies its workspace —
   // otherwise the other workspaces would still render as empty (or, with a clashing title,
-  // look like they matched too).
+  // look like they matched too). `tp_default` exists in *every* workspace, so the pairing the
+  // panel writes alongside the filter wins; a preference document written before that pairing
+  // existed falls back to the locked workspace `pickTopic` used to write, then to the lookup.
   const topicOwner = topicFilter
-    ? workspaces.find((workspace) => (topicsOf(workspace.workspaceId) ?? []).some((topic) => topic.id === topicFilter))?.workspaceId ?? null
+    ? prefs?.topicFilterWorkspace
+      ?? workspaceFilter
+      ?? workspaces.find((workspace) => (topicsOf(workspace.workspaceId) ?? []).some((topic) => topic.id === topicFilter))?.workspaceId
+      ?? null
     : null;
-  const scopeId = workspaceFilter ?? topicOwner;
+  const scopeId = topicOwner ?? workspaceFilter;
   const scoped = scopeId ? workspaces.filter((workspace) => workspace.workspaceId === scopeId) : workspaces;
   const groups = [];
   let matched = 0;
@@ -452,22 +511,12 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
     const assignments = assignmentsOf(workspace.workspaceId) ?? {};
     const topicById = new Map(topics.map((topic) => [topic.id, topic]));
 
-    const orderedIds = [];
-    const seen = new Set();
-    for (const id of workspace.sessionIds) {
-      if (seen.has(id) || !byId[id]) continue;
-      seen.add(id);
-      orderedIds.push(id);
-    }
-    // Workspace records can lag the session list; anything known but unaccounted for is
-    // appended by recency so the panel never hides a session the native list shows.
-    const workspacePathKey = pathKey(workspace.path);
-    const stragglers = (workspacePathKey ? sessionsByPath.get(workspacePathKey) ?? [] : [])
-      .filter((session) => !seen.has(session.id))
-      .sort((left, right) => relativeKey(left.updatedAt) - relativeKey(right.updatedAt));
-    for (const session of stragglers) orderedIds.push(session.id);
-    // A drag inside a workspace reorders its sessions; the manual list is a stable overlay
-    // on the host's order, so sessions created later simply fall in at the end.
+    // The same derivation the panel's drag handler uses (`workspaceSessionIds`): the workspace
+    // account first, then cwd-matched stragglers by recency. A drag baseline that disagreed with
+    // this order is what made the second drag of a row land somewhere else than the pointer.
+    const orderedIds = workspaceSessionIds({ workspace, byId, pathIndex: sessionsByPath });
+    // A drag inside a workspace reorders its sessions; the manual list is a permutation of the
+    // ids it names, so a session created later keeps the host's position (it does not sink).
     const manualSessions = prefs?.sessionOrder?.[workspace.workspaceId];
     const finalIds = orderBy(orderedIds, manualSessions, (id) => id);
 
@@ -517,6 +566,10 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
     const archivedRows = rows.filter((row) => row.archived);
 
     const sections = [];
+    // Search opens every bucket, so the effective `collapsed` is folded into the objects below
+    // (and therefore into their fingerprints) instead of being patched afterwards: these objects
+    // are cached and shared with the previous build, so mutating one in place would poison the
+    // next tick.
     for (const topic of topics) {
       const topicRows = live.filter((row) => row.topicId === topic.id);
       if (topicRows.length === 0 && search) continue;
@@ -570,13 +623,12 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
   // Archived sessions always belong to their workspace's archived bucket: sessions with no
   // workspace at all stay out instead of surfacing under 未分组.
   if (!workspaceFilter && !topicFilter) {
-    const accounted = new Set();
-    for (const workspace of workspaces) for (const id of workspace.sessionIds ?? []) accounted.add(id);
-    const workspacePaths = new Set(workspaces.map((workspace) => pathKey(workspace.path)).filter(Boolean));
-    const strays = Object.values(byId)
-      .filter((session) => session && !accounted.has(session.id) && !workspacePaths.has(pathKey(session.cwd)) && !archived.has(session.id))
-      .sort((left, right) => relativeKey(left.updatedAt) - relativeKey(right.updatedAt));
-    const orderedStrays = orderBy(strays.map((session) => session.id), prefs?.sessionOrder?.[UNGROUPED_WORKSPACE_ID], (id) => id);
+    // Same derivation the panel's drag handler uses for this bucket (`ungroupedSessionIds`).
+    const orderedStrays = orderBy(
+      ungroupedSessionIds({ workspaces, byId, archived }),
+      prefs?.sessionOrder?.[UNGROUPED_WORKSPACE_ID],
+      (id) => id,
+    );
     const defaultName = t('topic.default');
     const rows = [];
     for (const id of orderedStrays) {
@@ -649,13 +701,6 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
     }
   }
 
-  if (search) {
-    // Search opens every bucket, so the *effective* collapsed flag is false for the whole
-    // build. It is folded into the objects below (and therefore their fingerprints) instead
-    // of being patched afterwards: these objects are cached and shared with the previous
-    // build, so mutating one in place would poison the cache for the next tick.
-  }
-
   // The tinted folder is the one the user is looking at: the explicit workspace filter when
   // one is set, otherwise the workspace that owns the session on screen (native behaviour).
   let currentWorkspaceId = null;
@@ -696,21 +741,4 @@ export function buildWorkspaceOptions({ items, list, archivedIds }) {
     const known = workspace.sessionIds.filter((id) => byId[id] && byId[id].origin !== 'subagent' && !(byId[id].blank && id !== current) && !archived.has(id));
     return { ...workspace, visibleCount: known.length, archivedCount: workspace.sessionIds.filter((id) => archived.has(id)).length };
   });
-}
-
-/**
- * The topic a freshly started session belongs to: the workspace's most recently created
- * group. `createdAt` is authoritative when the document carries it; the server appends new
- * topics, so array position is the fallback for older documents.
- *
- * Kept exported because it is the honest answer to "which group is newest", but no longer used
- * by the new-session watcher: an implicit new session stays unfiled in the default group (or
- * follows the active topic filter), so there is no group to guess.
- */
-export function newestTopic(topics) {
-  const list = topics ?? [];
-  if (list.length === 0) return null;
-  const stamped = list.filter((topic) => Number.isFinite(Number(topic?.createdAt)));
-  if (stamped.length === 0) return list[list.length - 1];
-  return stamped.reduce((best, topic) => (Number(topic.createdAt) >= Number(best.createdAt) ? topic : best), stamped[0]);
 }

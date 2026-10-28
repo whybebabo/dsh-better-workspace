@@ -6,12 +6,20 @@
  * a conflict instead of silently clobbering another window's write.
  */
 import { api, ApiError } from './api.js';
+import { t } from './i18n.js';
 import { withDefaultTopic } from './model.js';
 
 const PREFS_KEY = 'dsh-better-workspace:prefs:v1';
 const DEFAULT_PREFS = {
   workspaceFilter: null,
   topicFilter: null,
+  /**
+   * The workspace the active topic filter belongs to. A topic id is only unique inside its
+   * workspace (`tp_default` exists in every one), so a bare id made "only this group" resolve to
+   * whichever workspace happened to own that id first. Kept next to the filter rather than
+   * replacing it with a composite key so the persisted shape stays readable.
+   */
+  topicFilterWorkspace: null,
   searchOpen: false,
   search: '',
   showArchived: false,
@@ -45,6 +53,9 @@ function readPrefs() {
       revealedBuckets: Array.isArray(parsed?.revealedBuckets) ? parsed.revealedBuckets : [],
       workspaceOrder: Array.isArray(parsed?.workspaceOrder) ? parsed.workspaceOrder : [],
       sessionOrder: parsed?.sessionOrder && typeof parsed.sessionOrder === 'object' ? parsed.sessionOrder : {},
+      // A document written before the pairing existed carries the topic id alone; `buildTree`
+      // then falls back to looking the owner up, exactly as it did before.
+      topicFilterWorkspace: typeof parsed?.topicFilterWorkspace === 'string' ? parsed.topicFilterWorkspace : null,
     };
   } catch {
     return { ...DEFAULT_PREFS };
@@ -67,6 +78,7 @@ export function createPanelStore() {
     error: null,
     readOnly: false,
     warning: null,
+    warningCode: null,
     deleteAvailable: false,
     emojis: [],
     revision: 0,
@@ -89,23 +101,72 @@ export function createPanelStore() {
 
   const getState = () => state;
 
+  /**
+   * The picker glyphs. `/state` used to carry all 1915 of them (~11KB) and is re-read after
+   * every write, so the panel re-downloaded a constant table on each keystroke-sized change.
+   * One request per page, coalesced while it is in flight.
+   */
+  let emojiRequest = null;
+  /** Monotonic guard for `/state` reads; see `load()`. */
+  let loadSeq = 0;
+  function loadEmojis() {
+    if (state.emojis.length > 0) return Promise.resolve(state.emojis);
+    if (emojiRequest) return emojiRequest;
+    emojiRequest = api.emojis()
+      .then((result) => {
+        const list = Array.isArray(result?.emojis) ? result.emojis : [];
+        if (list.length > 0) patch({ emojis: list });
+        return list;
+      })
+      .catch(() => [])
+      .finally(() => { emojiRequest = null; });
+    return emojiRequest;
+  }
+
   async function load() {
+    // The glyph table is static and lives on its own route, so it is fetched once per page
+    // rather than riding along with every revisioned document read.
+    loadEmojis().catch(() => {});
+    // Reads are not serialized with writes, so two GETs can land out of order. Only the newest
+    // one may patch the mirror: a stale snapshot used to overwrite a newer revision and turn the
+    // *next* write into a phantom "changed in another window" conflict.
+    const seq = ++loadSeq;
     try {
       const result = await api.state();
+      if (seq !== loadSeq) return false;
+      if (result?.enabled === false) {
+        // The host row is switched off (`config.enabled: false`). The bundle still loads — the
+        // loader keys it by package name, not by that row's config — so without this the panel
+        // covered the stock list with a 404 banner instead of handing it back.
         patch({
-          ready: true,
+          ready: false,
           loading: false,
-          reachable: true,
+          reachable: false,
           error: null,
-          readOnly: Boolean(result.readOnly),
-          warning: result.warning ?? null,
-          deleteAvailable: Boolean(result.deleteAvailable),
-          emojis: Array.isArray(result.emojis) ? result.emojis : [],
-          revision: result.revision,
-          workspaces: result.workspaces ?? {},
+          readOnly: false,
+          warning: null,
+          warningCode: null,
+          deleteAvailable: false,
+          revision: 0,
+          workspaces: {},
         });
+        return false;
+      }
+      patch({
+        ready: true,
+        loading: false,
+        reachable: true,
+        error: null,
+        readOnly: Boolean(result.readOnly),
+        warning: result.warning ?? null,
+        warningCode: result.warningCode ?? null,
+        deleteAvailable: Boolean(result.deleteAvailable),
+        revision: result.revision,
+        workspaces: result.workspaces ?? {},
+      });
       return true;
     } catch (error) {
+      if (seq !== loadSeq) return false;
       patch({
         ready: true,
         loading: false,
@@ -176,6 +237,23 @@ export function createPanelStore() {
    * on a successful load, so a store that turned read-only mid-session would keep offering
    * edits and never show the banner.
    */
+  /**
+   * Service errors the panel can phrase itself. Everything else falls back to the host text —
+   * the alternative was printing raw Chinese store messages in an English UI.
+   */
+  const ERROR_TEXT = {
+    'store-locked': 'error.storeLocked',
+    'store-write-failed': 'error.storeWriteFailed',
+    'store-read-only': 'error.storeReadOnly',
+    'store-unreadable': 'error.storeUnreadable',
+    'store-future-version': 'error.storeFutureVersion',
+  };
+
+  function describe(error) {
+    if (error instanceof ApiError && ERROR_TEXT[error.code]) return t(ERROR_TEXT[error.code]);
+    return error instanceof ApiError ? error.message : String(error);
+  }
+
   function runMutation(invoker) {
     return enqueue(async () => {
       patch({ busy: 'saving' });
@@ -186,11 +264,14 @@ export function createPanelStore() {
         return outcome;
       } catch (error) {
         patch({ busy: null });
-        const conflict = error instanceof ApiError && (error.code === 'revision-conflict' || error.status === 409);
+        // Only a revision mismatch is "another window changed this". A lock timeout is also a
+        // 409 but means "the store is busy" — reporting it as a foreign edit sent users looking
+        // for a window that did not exist.
+        const conflict = error instanceof ApiError && error.code === 'revision-conflict';
         // A read-only / storage failure is a *state* change, not just a message: reload so the
         // banner reflects it. Conflicts reload too (another window moved the document on).
         if (conflict || isStateFailure(error)) await load().catch(() => {});
-        patch({ error: conflict ? 'conflict' : error instanceof ApiError ? error.message : String(error) });
+        patch({ error: conflict ? 'conflict' : describe(error) });
         if (conflict) throw Object.assign(error, { reloadHint: true });
         throw error;
       }
@@ -204,6 +285,7 @@ export function createPanelStore() {
       || code === 'store-unreadable'
       || code === 'store-write-failed'
       || code === 'store-locked'
+      || code === 'store-future-version'
       || error?.status === 503;
   }
 
@@ -243,22 +325,32 @@ export function createPanelStore() {
     patch({ error: null });
   }
 
-  /** Drops a filter whose target disappeared (workspace closed, topic deleted). */
-  function reconcile(entityExists) {
-    const { workspaceFilter, topicFilter } = state.prefs;
-    if (workspaceFilter && !entityExists(workspaceFilter)) {
-      setPrefs({ workspaceFilter: null, topicFilter: null });
+  /**
+   * Drops filters whose target disappeared (workspace closed, topic deleted).
+   *
+   * `topicExists(topicId, workspaceId)` answers for the paired workspace when the prefs carry
+   * one. Topic ids are only unique inside a workspace — `tp_default` exists in every one — so
+   * an id-only check kept a filter alive after the group it named was deleted elsewhere.
+   */
+  function reconcile({ workspaceExists, topicExists }) {
+    const { workspaceFilter, topicFilter, topicFilterWorkspace } = state.prefs;
+    if (workspaceFilter && !workspaceExists(workspaceFilter)) {
+      setPrefs({ workspaceFilter: null, topicFilter: null, topicFilterWorkspace: null });
       return;
     }
-    // A topic can disappear while its workspace survives (deleted in another window). The old
-    // else-if skipped this check whenever a workspace filter was present, leaving an empty view.
-    if (topicFilter && !entityExists(topicFilter)) setPrefs({ topicFilter: null });
+    if (!topicFilter) return;
+    // A document written before the pairing existed has no owner: fall back to the old
+    // "does any workspace still have this id" question.
+    if (!topicExists(topicFilter, topicFilterWorkspace ?? null)) {
+      setPrefs({ topicFilter: null, topicFilterWorkspace: null });
+    }
   }
 
   return {
     subscribe,
     getState,
     load,
+    loadEmojis,
     setPrefs,
     toggleInList,
     selected,
@@ -277,5 +369,3 @@ export function createPanelStore() {
     reconcile,
   };
 }
-
-export { DEFAULT_PREFS, PREFS_KEY };

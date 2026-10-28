@@ -10,7 +10,7 @@ import * as React from 'react';
 import { createPortal } from 'react-dom';
 import { observeComposerSlot, resolveComposerWorkspace } from './composer.js';
 import { observeWorkspaceRegion, setRegionCovered, setRegionInert, watchRegionModals } from './geometry.js';
-import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, mainSessionId, moveWithin, pendingStatusLabel, samePath, selectableIds, topicLabel, UNGROUPED_WORKSPACE_ID } from './model.js';
+import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, mainSessionId, moveWithin, orderByManual, pendingStatusLabel, samePath, selectableIds, topicLabel, ungroupedSessionIds, UNGROUPED_WORKSPACE_ID, workspaceSessionIds } from './model.js';
 import { createPanelStore } from './store.js';
 import { beginReorder, currentDrag, endDrag, readDragPayload, reorderVerdict, sessionReorderVerdict, writeReorderPayload } from './dnd.js';
 import { runSessionAction, mergeOutcomes, BATCH_LIMIT } from './batch.js';
@@ -24,6 +24,12 @@ import { t } from './i18n.js';
 import { formatRelative } from './time.js';
 import { scheduleHover, schedulesOf } from './schedule.js';
 import { shortcutHint } from './shortcut-hints.js';
+
+/**
+ * How long a freshly created topic keeps its landing highlight. The overlay publishes it to the
+ * stylesheet as `--dts-reveal-ms`, so the fade and the class removal share one clock.
+ */
+const REVEAL_HIGHLIGHT_MS = 1600;
 
 /**
  * Mirrors a host snapshot store into React state.
@@ -72,10 +78,11 @@ function findNativeAddWorkspace(regionEl) {
  *
  * `Section` and `SessionRow` are memoized, so every callback they receive has to keep its
  * identity across renders or the memo never matches — a fresh arrow per render re-authored
- * all 1500 rows for a hover, a status flip or the 30s tick (measured; see
- * review/perf/PERF-REVIEW.md). Each handler is still written as a plain closure over the
- * current render and registered through `publish` at the end of that render, so the frozen
- * dispatcher always forwards to the newest closure and nothing can capture stale state.
+ * every mounted row for a hover, a status flip or the minute tick (measured on a 1500-session
+ * tree: 55–63ms per trigger, DOM unchanged afterwards). Each handler is still written as a
+ * plain closure over the current render and registered through `publish` at the end of that
+ * render, so the frozen dispatcher always forwards to the newest closure and nothing can
+ * capture stale state.
  */
 const TREE_HANDLER_KEYS = [
   'onOpenSession', 'onMenu', 'onArchive', 'onPin', 'onRenameSession', 'onHint', 'onHintEnd',
@@ -128,6 +135,12 @@ export function OverlayPanel({ actions, schedules }) {
    */
   const [pendingEpoch, setPendingEpoch] = React.useState(0);
   const [dropHint, setDropHint] = React.useState(null);
+  /**
+   * The topic a create just added, kept only long enough to expand its workspace, scroll its
+   * row into view and fade a highlight. Never persisted: it is a one-shot landing aid, not a
+   * selection.
+   */
+  const [revealedTopic, setRevealedTopic] = React.useState(null);
   /** Transient collapse focus while a workspace/topic is dragged; never persisted. */
   const [dragFocus, setDragFocus] = React.useState(null);
   const tipRef = React.useRef(null);
@@ -363,12 +376,18 @@ export function OverlayPanel({ actions, schedules }) {
     // Only groups that still belong to a live workspace keep a filter alive; a deleted
     // workspace (or a topic of it) must not strand the view. `topicsOf` also carries the
     // virtual default group of workspaces that have no sidecar document yet.
-    const known = new Set();
+    const live = new Map();
     for (const option of options) {
-      known.add(option.workspaceId);
-      for (const topic of store.topicsOf(option.workspaceId)) known.add(topic.id);
+      live.set(option.workspaceId, new Set((store.topicsOf(option.workspaceId) ?? []).map((topic) => topic.id)));
     }
-    store.reconcile((id) => known.has(id));
+    store.reconcile({
+      workspaceExists: (workspaceId) => live.has(workspaceId),
+      // With a paired owner the question is answered inside that one workspace; without it (a
+      // preference document from an older build) any workspace that still has the id will do.
+      topicExists: (topicId, workspaceId) => (workspaceId
+        ? live.get(workspaceId)?.has(topicId) === true
+        : [...live.values()].some((ids) => ids.has(topicId))),
+    });
   }, [options, state.workspaces, store, workspaceSnapshot?.phase]);
 
   /**
@@ -487,15 +506,78 @@ export function OverlayPanel({ actions, schedules }) {
     // below when the list next publishes.
   }, [list, options, store, state.workspaces, pendingEpoch]);
 
+  /**
+   * Lands a just-created topic in view.
+   *
+   * Creating a group from the workspace ⋯ menu used to leave it wherever the tree happened to
+   * be: a collapsed workspace hid it outright, and in a long list the new row could sit above
+   * the scroll position. Expanding is done through the same preference the chevron writes, so
+   * it survives a reload like any other expand; the scroll/highlight is transient.
+   *
+   * The row can reach the tree one render after this effect first runs (the create response is
+   * followed by a store reload), so a bounded run of frames retries. Filters are deliberately
+   * untouched: a search or "only this topic" hides other rows by the user's own choice, and
+   * revealing a new group must not silently rewrite that choice.
+   */
+  React.useEffect(() => {
+    if (!revealedTopic) return undefined;
+    const rowOf = () => {
+      const scope = typeof document === 'undefined' ? null : document.querySelector('.dts-overlay');
+      if (!scope) return null;
+      return [...scope.querySelectorAll('[data-dts-topic]')].find(
+        (node) => node.dataset.dtsTopic === revealedTopic.topicId && node.dataset.dtsWorkspace === revealedTopic.workspaceId,
+      ) ?? null;
+    };
+    const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (callback) => setTimeout(callback, 16);
+    const stop = typeof cancelAnimationFrame === 'function' ? cancelAnimationFrame : clearTimeout;
+    let frame = null;
+    let tries = 0;
+    const settle = () => {
+      const row = rowOf();
+      if (row) {
+        if (typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'nearest' });
+        return;
+      }
+      if (tries++ < 30) frame = raf(settle);
+    };
+    settle();
+    const timer = setTimeout(() => setRevealedTopic(null), REVEAL_HIGHLIGHT_MS);
+    return () => {
+      if (frame !== null) stop(frame);
+      clearTimeout(timer);
+    };
+  }, [revealedTopic]);
+
+  /**
+   * Expands a workspace/topic and arms the one-shot landing aid. Only collapsed entries are
+   * removed, and only when something was actually collapsed: `setPrefs` persists, so an
+   * unconditional write would touch localStorage and repaint the tree for nothing. The archived
+   * bucket is deliberately left alone — it has nothing to do with a freshly created group.
+   */
+  const revealTopic = (workspaceId, topicId) => {
+    const { prefs } = store.getState();
+    const collapsedWorkspaces = (prefs.collapsedWorkspaces ?? []).filter((key) => key !== workspaceId);
+    const collapsedTopics = (prefs.collapsedTopics ?? []).filter((key) => key !== `${workspaceId}:${topicId}`);
+    if (collapsedWorkspaces.length !== (prefs.collapsedWorkspaces ?? []).length || collapsedTopics.length !== (prefs.collapsedTopics ?? []).length) {
+      store.setPrefs({ collapsedWorkspaces, collapsedTopics });
+    }
+    setRevealedTopic({ workspaceId, topicId });
+  };
+
   const activeTopic = React.useMemo(() => {
     if (!prefs.topicFilter) return null;
-    for (const option of options) {
-      const found = store.topicsOf(option.workspaceId).find((topic) => topic.id === prefs.topicFilter);
+    // Ask the paired workspace first: `tp_default` exists in every workspace, so scanning the
+    // whole list returned whichever one happened to come first (and its emoji).
+    const scope = prefs.topicFilterWorkspace
+      ? [prefs.topicFilterWorkspace, ...options.map((option) => option.workspaceId)]
+      : options.map((option) => option.workspaceId);
+    for (const workspaceId of scope) {
+      const found = (store.topicsOf(workspaceId) ?? []).find((topic) => topic.id === prefs.topicFilter);
       if (found) return { ...found, name: topicLabel(found) };
     }
     return null;
     // `topicLabel` reads the module-level language; the memo has to recompute on a switch.
-  }, [prefs.topicFilter, options, state.workspaces, store, language]);
+  }, [prefs.topicFilter, prefs.topicFilterWorkspace, options, state.workspaces, store, language]);
 
   const titles = React.useMemo(() => {
     const map = {};
@@ -566,6 +648,14 @@ export function OverlayPanel({ actions, schedules }) {
    */
   const optionsRef = React.useRef(options);
   optionsRef.current = options;
+  /**
+   * `reorder` is memoized so the tree's memoized rows keep their props, but a drop must read the
+   * *current* manual orders. A ref (not a dependency) keeps the callbacks stable and the values
+   * fresh; capturing `prefs` in the memo made the second drag compute from the first drag's
+   * snapshot.
+   */
+  const prefsRef = React.useRef(prefs);
+  prefsRef.current = prefs;
   const reorder = React.useMemo(() => ({
     hint: dropHint,
     focus: dragFocus,
@@ -612,7 +702,14 @@ export function OverlayPanel({ actions, schedules }) {
       endDrag();
       const position = forcedPosition ?? positionOf(event);
       if (level === 'workspace') {
-        setPrefs({ workspaceOrder: moveWithin(optionsRef.current.map((option) => option.workspaceId), drag.id, target.id, position) });
+        // Translate the drop against what is on screen. `workspaceOrder` is a permutation of the
+        // displayed list (`orderByManual`), so anchoring on the host's raw order made the second
+        // drag of a workspace land somewhere other than the insertion line promised.
+        const base = orderByManual(
+          optionsRef.current.map((option) => option.workspaceId),
+          prefsRef.current.workspaceOrder ?? [],
+        );
+        setPrefs({ workspaceOrder: moveWithin(base, drag.id, target.id, position) });
         return;
       }
       const ids = (store.topicsOf(drag.workspaceId) ?? []).map((topic) => topic.id);
@@ -636,17 +733,22 @@ export function OverlayPanel({ actions, schedules }) {
    * the new workspace lands (expanding earlier would cover the picker); search reopens the
    * sidebar on the panel's own search field.
    */
-  const [railIntent, setRailIntent] = React.useState(null);
+  /** Search is the only rail action that needs a follow-up inside the panel once it re-mounts. */
+  const [railSearchPending, setRailSearchPending] = React.useState(false);
   const railAddRef = React.useRef(null);
   React.useEffect(() => {
     if (geom.visible || geom.reason !== 'rail') return undefined;
     const onCapture = (event) => {
       const button = event.target?.closest?.('button,[role="button"]');
       if (!button) return;
+      // Only the collapsed sidebar's own rail. Judging by label alone hijacked any "Search"
+      // button elsewhere in the app (settings, other plugin panels) into expanding the sidebar
+      // and opening this panel's search.
+      if (!geom.frameEl?.contains(button)) return;
       const label = (button.getAttribute('aria-label') || button.getAttribute('title') || '').trim();
       const className = String(button.className ?? '');
       const isNewSession = /newSession/i.test(className) || /^(新建会话|new session|new chat)$/i.test(label);
-      const isSearch = /searchButton/i.test(className) || /(搜索会话|搜索|search sessions|search)/i.test(label);
+      const isSearch = /searchButton/i.test(className) || /^(搜索会话|搜索|search sessions|search)$/i.test(label);
       const isAddWorkspace = /^(添加工作区|add workspace|open folder)(…|\.\.\.)?$/i.test(label);
       if (isAddWorkspace) {
         // Do not cancel the event: the host's picker must stay in the rail, where the panel
@@ -668,7 +770,7 @@ export function OverlayPanel({ actions, schedules }) {
         } catch (error) {
           flash(error?.message ?? String(error), 'bad');
         }
-        setRailIntent('search');
+        setRailSearchPending(true);
         return;
       }
       try {
@@ -682,7 +784,7 @@ export function OverlayPanel({ actions, schedules }) {
     };
     document.addEventListener('click', onCapture, true);
     return () => document.removeEventListener('click', onCapture, true);
-  }, [geom.visible, geom.reason, options]);
+  }, [geom.visible, geom.reason, geom.frameEl, options]);
 
   // The rail's add-workspace flow finishes by creating the workspace; expand when that
   // workspace actually lands. A new session alone is not proof: the user may have cancelled
@@ -709,35 +811,38 @@ export function OverlayPanel({ actions, schedules }) {
   }, [options, geom.visible]);
 
   React.useEffect(() => {
-    if (!geom.visible || !railIntent) return undefined;
-    // The panel has just re-mounted; give it a frame before driving its own controls.
+    if (!geom.visible || !railSearchPending) return undefined;
+    // The panel has just re-mounted; give it a frame before focusing its own search field.
     const timer = setTimeout(() => {
-      setRailIntent(null);
-      if (railIntent === 'search') {
-        setPrefs({ searchOpen: true });
-        return;
-      }
-      const plus = document.querySelector(`.dts-header .dts-iconbtn[aria-label="${t('action.create')}"]`);
-      plus?.click();
+      setRailSearchPending(false);
+      setPrefs({ searchOpen: true });
     }, 90);
     return () => clearTimeout(timer);
-  }, [geom.visible, railIntent]);
+  }, [geom.visible, railSearchPending]);
 
   // An unusable sidecar owns nothing to paint, including the composer chip: it has no topics
   // to offer and its writes cannot land.
   if (!state.ready || !state.reachable) return null;
 
-  const style = geom.rect ? { left: geom.rect.left, top: geom.rect.top, width: geom.rect.width, height: geom.rect.height } : undefined;
-  const pickWorkspace = (workspaceId) => setPrefs({ workspaceFilter: workspaceId, topicFilter: null });
-  // A topic id is only unique inside its workspace (`tp_default` is shared by every
-  // workspace), so "only this topic" must carry its owner along with the filter.
+  // The landing highlight's clock lives in one place: the CSS animation reads this variable,
+  // so the class-removal timer and the fade can never drift apart.
+  const style = geom.rect
+    ? { left: geom.rect.left, top: geom.rect.top, width: geom.rect.width, height: geom.rect.height, '--dts-reveal-ms': `${REVEAL_HIGHLIGHT_MS}ms` }
+    : undefined;
+  const pickWorkspace = (workspaceId) => setPrefs({ workspaceFilter: workspaceId, topicFilter: null, topicFilterWorkspace: null });
+  /**
+   * A topic id is only unique inside its workspace (`tp_default` is shared by every one), so
+   * "only this topic" records the owner next to the filter. The workspace lock is written too,
+   * because the tree's other consumers still read it.
+   */
   const pickTopic = (topicId, workspaceId) => {
     if (!topicId) {
       // Applying a topic filter also locks its workspace; release both together.
-      setPrefs({ topicFilter: null, workspaceFilter: null });
+      setPrefs({ topicFilter: null, topicFilterWorkspace: null, workspaceFilter: null });
       return;
     }
-    setPrefs({ topicFilter: topicId, workspaceFilter: workspaceId ?? prefs.workspaceFilter ?? null });
+    const owner = workspaceId ?? prefs.workspaceFilter ?? null;
+    setPrefs({ topicFilter: topicId, topicFilterWorkspace: owner, workspaceFilter: owner });
   };
 
   const openSession = (row) => {
@@ -748,51 +853,60 @@ export function OverlayPanel({ actions, schedules }) {
     }
   };
 
-  const rowsInWorkspace = (workspaceId) => {
-    const group = tree.groups.find((entry) => entry.workspaceId === workspaceId);
-    return group ? group.sections.filter((section) => section.kind !== 'archived').flatMap((section) => section.rows) : [];
-  };
-
   /**
    * Every session id the workspace owns, independent of the current search/topic/archived
    * filters. Manual order is persisted against this set so reordering while filtered cannot
    * demote the rows the user cannot see.
+   *
+   * The derivation is `model.workspaceSessionIds` / `model.ungroupedSessionIds` — the same
+   * functions the tree renders from. A second, slightly different copy here (insertion order,
+   * subagents included, a strict path compare) is what made a drop land somewhere other than
+   * the row it was dropped on.
    */
   const allSessionIdsInWorkspace = (workspaceId) => {
-    const option = options.find((entry) => entry.workspaceId === workspaceId);
-    const known = list.byId ?? {};
-    const ids = [];
-    const seen = new Set();
+    const byId = list.byId ?? {};
+    const selectable = (id) => !byId[id]?.blank;
     if (workspaceId === UNGROUPED_WORKSPACE_ID) {
-      // 未分组 has no workspace record, so it needs the same derivation the tree uses: no
-      // workspace accounts for the id, and no cwd matches a registered path. Returning []
-      // here made a session drag inside the bucket silently persist an empty order.
-      const workspacePaths = options.map((entry) => entry.path).filter(Boolean);
-      const accounted = new Set(options.flatMap((entry) => entry.sessionIds ?? []));
-      const archived = new Set(archivedIds);
-      for (const session of Object.values(known)) {
-        if (!session || session.blank || session.origin === 'subagent') continue;
-        if (accounted.has(session.id) || archived.has(session.id)) continue;
-        if (workspacePaths.some((path) => samePath(session.cwd, path))) continue;
-        ids.push(session.id);
-      }
-      return ids;
+      return ungroupedSessionIds({ workspaces: options, byId, archived: new Set(archivedIds) }).filter(selectable);
     }
-    for (const id of option?.sessionIds ?? []) {
-      if (seen.has(id) || !known[id]) continue;
-      seen.add(id);
-      ids.push(id);
+    const option = options.find((entry) => entry.workspaceId === workspaceId);
+    if (!option) return [];
+    return workspaceSessionIds({ workspace: option, byId }).filter(selectable);
+  };
+
+  /**
+   * Rows the create dialog may attach: every visible session the workspace owns, independent of
+   * the panel's search, topic and archived filters. It used to read the *tree*, which is a view
+   * of those filters — so with "only workspace A" applied, choosing workspace B in the dialog
+   * reported B as having no history at all.
+   */
+  const attachableRowsInWorkspace = (workspaceId) => {
+    const option = options.find((entry) => entry.workspaceId === workspaceId);
+    if (!option) return [];
+    const byId = list.byId ?? {};
+    const topics = (store.topicsOf(workspaceId) ?? []).map((topic) => ({ id: topic.id, name: topicLabel(topic) }));
+    const names = new Map(topics.map((topic) => [topic.id, topic.name]));
+    const assignments = store.assignmentsOf(workspaceId) ?? {};
+    const known = new Set(topics.map((topic) => topic.id));
+    const buckets = new Map(topics.map((topic) => [topic.id, []]));
+    for (const id of allSessionIdsInWorkspace(workspaceId)) {
+      const session = byId[id];
+      if (!session || session.origin === 'subagent') continue;
+      // A stale assignment (the group was deleted in another window) belongs to the default
+      // bucket, exactly like the tree treats it, instead of vanishing from this list.
+      const assigned = assignments[id] ?? DEFAULT_TOPIC_ID;
+      const topicId = known.has(assigned) ? assigned : DEFAULT_TOPIC_ID;
+      buckets.get(topicId)?.push({
+        id,
+        title: session.displayTitle || session.title || id,
+        // The picker labels each row with the group it currently sits in — the one fact that
+        // differs inside the list and that attaching will change.
+        topicName: names.get(topicId) ?? topicLabel({ system: true }),
+        workspaceTitle: option.title,
+      });
     }
-    for (const session of Object.values(known)) {
-      if (!session || seen.has(session.id)) continue;
-      // Same rule the tree uses: a workspace record can lag the session list, and the two
-      // spellings of one path differ on Windows. A strict compare here would silently drop
-      // that session from the order baseline this function is the whole point of.
-      if (!samePath(session.cwd, option?.path)) continue;
-      seen.add(session.id);
-      ids.push(session.id);
-    }
-    return ids.filter((id) => !known[id]?.blank);
+    // Bucket order, the way the tree reads: a flat list with groups interleaved is noise.
+    return topics.flatMap((topic) => buckets.get(topic.id) ?? []);
   };
 
   const finishBatch = (next) => {
@@ -860,10 +974,14 @@ export function OverlayPanel({ actions, schedules }) {
         .catch((error) => flash(error?.message ?? String(error), 'bad'));
       return;
     }
-    // The reorder baseline must be the workspace's *whole* session set, not the rows the
-    // current search/filter happens to show: `orderBy` pushes ids it does not find to the
-    // end, so reordering while filtered would permanently demote every hidden row.
-    const ids = allSessionIdsInWorkspace(row.workspaceId);
+    // The reorder baseline must be the workspace's *whole* session set (not just the rows the
+    // current search/filter shows) **and** in the order those rows are displayed: the manual
+    // list is a permutation of the displayed order, so moving within the host order put the row
+    // somewhere else as soon as a manual order already existed.
+    const ids = orderByManual(
+      allSessionIdsInWorkspace(row.workspaceId),
+      prefs.sessionOrder?.[row.workspaceId] ?? [],
+    );
     setPrefs({ sessionOrder: { ...(prefs.sessionOrder ?? {}), [row.workspaceId]: moveWithin(ids, dropped[0], row.id, position) } });
   };
 
@@ -904,12 +1022,9 @@ export function OverlayPanel({ actions, schedules }) {
     });
   };
   /**
-   * The rows the current selection can still act on.
-   *
-   * Memoized once per render and shared by every consumer (toolbar flags, the move target, the
-   * batch runner): the previous version rebuilt it 5-7 times per render with an `includes()` on
-   * an array, which was O(n·m) and, worse, let the toolbar describe a different selection than
-   * the one the batch actually sent.
+   * The workspace a batch "move to topic" applies to: the one holding most of the selection,
+   * falling back to the active filter. Rows from another workspace are excluded by the caller,
+   * which is what keeps a cross-workspace write from being assembled here.
    */
   const workspaceOfIds = () => {
     const counts = new Map();
@@ -917,18 +1032,29 @@ export function OverlayPanel({ actions, schedules }) {
     return [...counts.entries()].sort((left, right) => right[1] - left[1])[0]?.[0] ?? prefs.workspaceFilter ?? null;
   };
 
+  /**
+   * Groups with their session counts, in one pass over the assignment map. This runs on every
+   * header render and inside two dialogs; counting per group made it O(groups x sessions).
+   */
   function topicsWithCounts(workspaceId) {
-    return (store.topicsOf(workspaceId) ?? []).map((topic) => {
-      const assignments = store.assignmentsOf(workspaceId) ?? {};
-      return { ...topic, name: topicLabel(topic), count: Object.values(assignments).filter((id) => id === topic.id).length };
-    });
+    const counts = new Map();
+    for (const topicId of Object.values(store.assignmentsOf(workspaceId) ?? {})) {
+      counts.set(topicId, (counts.get(topicId) ?? 0) + 1);
+    }
+    return (store.topicsOf(workspaceId) ?? []).map((topic) => ({ ...topic, name: topicLabel(topic), count: counts.get(topic.id) ?? 0 }));
   }
 
   /**
-   * Same order, wording, icons and shortcut hints as the stock session menu, with the two
-   * topic commands appended after a separator: the host owns "what a session is", the plugin
-   * only adds "which topic it lives in".
+   * How many sessions a group actually holds, read from the document rather than from the rows
+   * on screen: a search or an active filter hides rows, but deleting the group still releases
+   * every session in it, and the confirmation must not understate that.
    */
+  const topicSessionCount = (workspaceId, topicId) => {
+    let total = 0;
+    for (const assigned of Object.values(store.assignmentsOf(workspaceId) ?? {})) if (assigned === topicId) total += 1;
+    return total;
+  };
+
   /**
    * Same order, wording, icons and shortcut hints as the stock session menu, with the two
    * topic commands appended after a separator. Archived rows follow the stock menu even more
@@ -1050,7 +1176,8 @@ export function OverlayPanel({ actions, schedules }) {
     ];
     // The default group is system-owned: it can be filtered, filled and selected, but not
     // renamed or deleted.
-    if (section.system) return items;    items.push(
+    if (section.system) return items;
+    items.push(
       <MenuItem
         key="edit"
         icon={<Icon name="edit" />}
@@ -1069,7 +1196,7 @@ export function OverlayPanel({ actions, schedules }) {
         onSelect={() => {
           const topic = (store.topicsOf(group.workspaceId) ?? []).find((entry) => entry.id === section.id);
           setMenu(null);
-          if (topic) setDialog({ type: 'deleteTopic', topic, workspaceId: group.workspaceId, count: section.rows.length });
+          if (topic) setDialog({ type: 'deleteTopic', topic, workspaceId: group.workspaceId, count: topicSessionCount(group.workspaceId, section.id) });
         }}
       >
         {t('topic.delete')}
@@ -1099,7 +1226,7 @@ export function OverlayPanel({ actions, schedules }) {
     >
       {t('topic.batchSelect')}
     </MenuItem>,
-    <MenuItem key="add" icon={<Icon name="plus" />} onSelect={() => { setMenu(null); setDialog({ type: 'create', workspaceId: group.workspaceId }); }}>
+    <MenuItem key="add" icon={<Icon name="plus" />} onSelect={() => { setMenu(null); setDialog({ type: 'create', workspaceId: group.workspaceId, reveal: true }); }}>
       {t('action.addTopic')}
     </MenuItem>,
     <div key="sep" className="dts-menu__sep" role="separator" />,
@@ -1320,7 +1447,13 @@ export function OverlayPanel({ actions, schedules }) {
           icon={<Icon name="plus" />}
           onSelect={() => {
             setComposerMenu(null);
-            setDialog({ type: 'create', workspaceId: composerWorkspaceId });
+            // The chip is bound to the open session, so "create a group here" has to end with
+            // that session filed into it — otherwise the bar would keep naming the old group.
+            setDialog({
+              type: 'create',
+              workspaceId: composerWorkspaceId,
+              composerSession: { sessionId: composerSessionId, workspaceId: composerWorkspaceId },
+            });
           }}
         >
           {t('action.addTopic')}
@@ -1428,7 +1561,16 @@ export function OverlayPanel({ actions, schedules }) {
           />
         )}
 
-        {state.readOnly ? <div className="dts-banner dts-banner--warn">{t('state.readonly')}</div> : null}
+        {/* One banner for "the document is not healthy": read-only only when nothing readable
+            could be recovered, otherwise the reason a recovered read is still writable. The raw
+            server text stays in `title` for support; the visible line is localized by code. */}
+        {state.readOnly || state.warning ? (
+          <div className="dts-banner dts-banner--warn" title={state.warning ?? undefined}>
+            {state.warningCode
+              ? t(`warning.${state.warningCode}`)
+              : state.readOnly ? t('state.readonly') : state.warning}
+          </div>
+        ) : null}
         {state.error ? (
           <div className="dts-banner dts-banner--warn">
             {/* Every failure gets a visible line: a write rejected as read-only, a 5xx, an
@@ -1440,12 +1582,12 @@ export function OverlayPanel({ actions, schedules }) {
             </button>
           </div>
         ) : null}
-        {state.warning && !state.readOnly ? <div className="dts-banner dts-banner--warn">{state.warning}</div> : null}
 
         <div className="dts-scroll">
           <TopicTree
             tree={tree}
             prefs={prefs}
+            reveal={revealedTopic}
             selection={selectedIds}
             schedules={schedulesById}
             onOpenSession={treeHandlers.onOpenSession}
@@ -1484,13 +1626,33 @@ export function OverlayPanel({ actions, schedules }) {
           emojis={state.emojis}
           workspaces={options}
           workspaceId={dialog.workspaceId}
-          rowsFor={(workspaceId) => rowsInWorkspace(workspaceId).filter((row) => !row.blank)}
+          rowsFor={(workspaceId) => attachableRowsInWorkspace(workspaceId)}
           topicsFor={topicsWithCounts}
           onClose={() => setDialog(null)}
           onSubmit={async (input) => {
             const created = await store.createTopic(input);
             flash(`✓ ${created.result.topic.name}`);
             if (dialog.thenStartSession) startSessionUnderTopic(input.workspaceId, created.result.topic.id);
+            if (dialog.reveal) revealTopic(input.workspaceId, created.result.topic.id);
+            // The composer bar follows the open session, so a group created from the chip has to
+            // end with that session filed into it — otherwise the bar keeps naming the old one.
+            const target = dialog.composerSession;
+            if (target?.sessionId) {
+              if (target.workspaceId === input.workspaceId) {
+                try {
+                  await store.assign({ workspaceId: input.workspaceId, sessionIds: [target.sessionId], topicId: created.result.topic.id });
+                } catch (error) {
+                  // The group exists either way: a failed re-file is reported on its own instead
+                  // of leaving the dialog open as if the create had failed.
+                  flash(error?.message ?? String(error), 'bad');
+                }
+              } else {
+                // The chip is bound to one session in a known workspace; a group created in
+                // another one cannot own it (the panel refuses cross-workspace filing
+                // everywhere). Saying so beats a chip that silently keeps its old label.
+                flash(t('session.composerNotFiled'), 'bad');
+              }
+            }
           }}
         />
       ) : null}
@@ -1505,7 +1667,7 @@ export function OverlayPanel({ actions, schedules }) {
           onSubmit={async (input) => {
             await store.updateTopic({ workspaceId: dialog.workspaceId, topicId: dialog.topic.id, ...input });
           }}
-          onDelete={(topic) => setDialog({ type: 'deleteTopic', topic, workspaceId: dialog.workspaceId, count: (Object.values(store.assignmentsOf(dialog.workspaceId) ?? {}).filter((id) => id === topic.id)).length })}
+          onDelete={(topic) => setDialog({ type: 'deleteTopic', topic, workspaceId: dialog.workspaceId, count: topicSessionCount(dialog.workspaceId, topic.id) })}
         />
       ) : null}
 
@@ -1590,7 +1752,9 @@ export function OverlayPanel({ actions, schedules }) {
               await actions.refreshSessions();
             } catch { /* optional */ }
             // Keep the shell off a conversation whose log no longer exists.
-            if ((result?.items ?? []).some((item) => item.status === 'deleted' && item.sessionId === tree.currentSessionId)) {
+            // `partial` means the session's own artifact is already gone (only some children
+            // survived), so the shell must be moved off it exactly like a clean delete.
+            if ((result?.items ?? []).some((item) => (item.status === 'deleted' || item.status === 'partial') && item.sessionId === tree.currentSessionId)) {
               try {
                 actions.startSession();
               } catch { /* the host may already have moved */ }

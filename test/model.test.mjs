@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTree, buildWorkspaceOptions, mainSessionId, basename, samePath, moveWithin, newestTopic, DEFAULT_TOPIC_ID, UNGROUPED_WORKSPACE_ID } from '../client/model.js';
+import { buildTree, buildWorkspaceOptions, mainSessionId, basename, samePath, moveWithin, orderByManual, ungroupedSessionIds, workspaceSessionIds, DEFAULT_TOPIC_ID, UNGROUPED_WORKSPACE_ID } from '../client/model.js';
 
 const WS_A = 'ws_a';
 const WS_B = 'ws_b';
@@ -363,6 +363,48 @@ test('a manual order permutes only the ids it names and leaves the rest in place
   assert.deepEqual(flatten(partial.groups.find((group) => group.workspaceId === WS_A)), ['ses_3', 'ses_2', 'ses_1']);
 });
 
+test('a second drag anchors on the displayed order, not on the host order', () => {
+  // What the panel does on drop: translate the pointer position inside the order the user sees.
+  const ids = ['A', 'B', 'C'];
+  const display = (manual) => orderByManual(ids, manual);
+  const first = moveWithin(display([]), 'C', 'A', 'before');
+  assert.deepEqual(display(first), ['C', 'A', 'B'], 'the first drag lands where it was dropped');
+  // Anchoring on the raw host order here produced B A C (expected C B A) — the row jumped to a
+  // place the insertion line never pointed at.
+  const second = moveWithin(display(first), 'A', 'B', 'after');
+  assert.deepEqual(display(second), ['C', 'B', 'A']);
+});
+
+test('a second workspace drag lands where the insertion line points', () => {
+  const ids = [WS_A, WS_B, 'ws_c'];
+  const items = [
+    ...fixture().items,
+    { workspaceId: 'ws_c', path: 'D:/work/gamma', title: 'Gamma', sessionIds: [], createdAt: 3, updatedAt: 30 },
+  ];
+  const manual = (workspaceOrder) => buildTree({ ...fixture(), items, prefs: { workspaceOrder }, query: '' }).groups.map((group) => group.workspaceId);
+  const first = moveWithin(orderByManual(ids, []), 'ws_c', WS_A, 'before');
+  assert.deepEqual(manual(first), ['ws_c', WS_A, WS_B]);
+  const second = moveWithin(orderByManual(ids, first), WS_A, WS_B, 'after');
+  assert.deepEqual(manual(second), ['ws_c', WS_B, WS_A]);
+});
+
+test('the drag baseline includes cwd-matched stragglers by recency and never subagents', () => {
+  const base = fixture();
+  // A session the workspace record never accounted for (host crashed before attachSession).
+  const byId = {
+    ...base.list.byId,
+    ses_stray: { id: 'ses_stray', displayTitle: '漏记账的会话', cwd: 'D:/work/alpha', updatedAt: 800 },
+  };
+  const ids = workspaceSessionIds({ workspace: base.items[0], byId });
+  assert.deepEqual(ids, ['ses_1', 'ses_2', 'ses_3', 'ses_arch', 'ses_blank', 'ses_stray'], 'record order, then stragglers by recency');
+  assert.equal(ids.includes('ses_sub'), false, 'a subagent is never part of the manual order');
+  const tree = buildTree({ ...fixture(), list: { ...base.list, byId }, prefs: {}, query: '' });
+  assert.deepEqual(flatten(tree.groups.find((group) => group.workspaceId === WS_A)), ['ses_3', 'ses_1', 'ses_2', 'ses_stray'], 'and the tree appends the straggler by recency (ses_3 is pinned)');
+
+  const strays = ungroupedSessionIds({ workspaces: base.items, byId: { ses_loose: { id: 'ses_loose', cwd: '/elsewhere', updatedAt: 1 } } });
+  assert.deepEqual(strays, ['ses_loose'], 'a session no workspace accounts for belongs to 未分组');
+});
+
 test('a session created after a drag keeps its host position instead of sinking to the bottom', () => {
   // `attachSession` prepends, so a brand-new session is first in the workspace's own order.
   const created = { id: 'ses_new', displayTitle: '刚建的会话', cwd: 'D:/work/alpha', updatedAt: 999 };
@@ -461,24 +503,6 @@ test('a session whose cwd spells its workspace path differently still joins that
   assert.ok(flatten(alpha).includes('ses_spelled'), 'the session is shown under its workspace');
   const ungrouped = built.groups.find((group) => group.workspaceId === UNGROUPED_WORKSPACE_ID);
   assert.equal(ungrouped, undefined, 'and not in the trailing 未分组 bucket');
-});
-
-test('the newest topic follows createdAt, then append order for older documents', () => {
-  assert.equal(newestTopic([]), null);
-  assert.equal(newestTopic(undefined), null);
-  assert.equal(
-    newestTopic([
-      { id: 'tp_old', createdAt: 100 },
-      { id: 'tp_new', createdAt: 300 },
-      { id: 'tp_mid', createdAt: 200 },
-    ]).id,
-    'tp_new',
-  );
-  assert.equal(
-    newestTopic([{ id: 'tp_a', order: 0 }, { id: 'tp_b', order: 1 }]).id,
-    'tp_b',
-    'documents without timestamps append new topics at the end',
-  );
 });
 
 test('the highlighted folder follows the workspace filter, then the open session', () => {

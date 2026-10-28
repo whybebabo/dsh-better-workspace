@@ -56,6 +56,8 @@ async function request(path, { method = 'GET', body, signal } = {}) {
 
 export const api = {
   state: (signal) => request(`${API}/state`, { method: 'GET', signal }),
+  /** Static glyph table, fetched once per page (see `store.loadEmojis`). */
+  emojis: (signal) => request(`${API}/emojis`, { method: 'GET', signal }),
   createTopic: (payload) => request(`${API}/topics/create`, { method: 'POST', body: payload }),
   updateTopic: (payload) => request(`${API}/topics/update`, { method: 'POST', body: payload }),
   reorderTopics: (payload) => request(`${API}/topics/reorder`, { method: 'POST', body: payload }),

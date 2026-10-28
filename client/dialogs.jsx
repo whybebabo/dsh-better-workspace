@@ -8,14 +8,20 @@ import { cx, Dialog, Button, TextInput, Checkbox, Icon, TopicMark } from './widg
 import { t } from './i18n.js';
 
 /** Offline fallback; every glyph is also present in the host's Zen-sourced list. */
-export const FALLBACK_EMOJIS = ['\u{1F4C1}', '\u{1F4A1}', '\u{1F3A8}', '\u{1F6E0}\u{FE0F}', '\u{1F9EA}', '\u{1F41E}', '\u{1F680}', '\u{1F4DD}'];
+const FALLBACK_EMOJIS = ['\u{1F4C1}', '\u{1F4A1}', '\u{1F3A8}', '\u{1F6E0}\u{FE0F}', '\u{1F9EA}', '\u{1F41E}', '\u{1F680}', '\u{1F4DD}'];
+
+/**
+ * The host's glyph list, or the local one before it arrives (it is fetched once, separately
+ * from the revisioned document). An empty array is "not loaded yet", not "the host has none".
+ */
+const glyphList = (emojis) => (Array.isArray(emojis) && emojis.length > 0 ? emojis : FALLBACK_EMOJIS);
 
 /** Control characters are the only glyphs the sidecar strips, so they are the illegal set. */
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 
 /** Same policy as the host's `pickTopicEmoji`: do not make every fresh topic look identical. */
 function nextUnusedEmoji(emojis, topics) {
-  const list = emojis ?? FALLBACK_EMOJIS;
+  const list = glyphList(emojis);
   const used = new Set((Array.isArray(topics) ? topics : []).map((topic) => topic?.emoji).filter(Boolean));
   return list.find((glyph) => !used.has(glyph)) ?? '';
 }
@@ -220,7 +226,7 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, topic
       </label>
       <div className="dts-field">
         <span className="dts-field__label">{t('topic.icon')}</span>
-        <EmojiPicker emojis={emojis ?? FALLBACK_EMOJIS} value={emoji} onChange={(glyph) => { setEmoji(glyph); setEmojiTouched(true); }} name={t('topic.icon')} />
+        <EmojiPicker emojis={glyphList(emojis)} value={emoji} onChange={(glyph) => { setEmoji(glyph); setEmojiTouched(true); }} name={t('topic.icon')} />
       </div>
       {chosen && rows.length > 0 ? (
         <div className="dts-field">
@@ -291,7 +297,7 @@ export function EditTopicDialog({ topic, workspaceId, topicsFor, emojis, onSubmi
       </label>
       <label className="dts-field">
         <span className="dts-field__label">{t('topic.icon')}</span>
-        <EmojiPicker emojis={emojis ?? FALLBACK_EMOJIS} value={emoji} onChange={setEmoji} name={t('topic.icon')} />
+        <EmojiPicker emojis={glyphList(emojis)} value={emoji} onChange={setEmoji} name={t('topic.icon')} />
       </label>
       {error ? <p className="dts-error">{error}</p> : null}
     </Dialog>
@@ -540,7 +546,7 @@ export function MoveToTopicDialog({ count, topics, emojis, onMove, onCreate, onC
           <TextInput autoFocus value={name} onChange={setName} maxLength={40} invalid={Boolean(problem)} />
           {problem ? <span className="dts-field__hint is-error">{problemLabel}</span> : null}
         </label>
-        <EmojiPicker emojis={emojis ?? FALLBACK_EMOJIS} value={emoji} onChange={setEmoji} name={t('topic.icon')} />
+        <EmojiPicker emojis={glyphList(emojis)} value={emoji} onChange={setEmoji} name={t('topic.icon')} />
         {error ? <p className="dts-error">{error}</p> : null}
       </Dialog>
     );

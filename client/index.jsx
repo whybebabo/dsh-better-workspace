@@ -69,8 +69,11 @@ function applyStyles() {
   if (typeof document === 'undefined') return () => {};
   const existing = document.head.querySelector(`style[${STYLE_ATTRIBUTE}="${STYLE_ID}"]`);
   if (existing) {
+    // Someone's node already claims this id (a previous instance, or the loader's HMR
+    // inventory). Keep it current, but do not hand out a disposer for a node this call did not
+    // create: removing it on teardown would blank the styles of whichever instance is live.
     if (existing.textContent !== css) existing.textContent = css;
-    return () => existing.remove();
+    return () => {};
   }
   const node = document.createElement('style');
   node.setAttribute(STYLE_ATTRIBUTE, STYLE_ID);

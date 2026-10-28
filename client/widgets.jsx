@@ -339,6 +339,36 @@ export function Dialog({ title, description, children, footer, onClose, width = 
       }
     };
   }, []);
+  /**
+   * `aria-modal` promises the rest of the page is inert, so Tab must not leave the dialog.
+   * The native region is inert while the panel covers it, but the conversation behind the
+   * scrim is not — a destructive confirmation could be tabbed away from mid-decision.
+   */
+  React.useEffect(() => {
+    const node = ref.current;
+    if (!node || typeof document === 'undefined') return undefined;
+    const onKeyDown = (event) => {
+      if (event.key !== 'Tab' || !node.isConnected) return;
+      const focusables = [...node.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')]
+        .filter((element) => !element.disabled && element.getClientRects().length > 0);
+      if (focusables.length === 0) {
+        event.preventDefault();
+        node.focus();
+        return;
+      }
+      const active = document.activeElement;
+      const outside = !node.contains(active);
+      if (event.shiftKey && (active === focusables[0] || outside)) {
+        event.preventDefault();
+        focusables[focusables.length - 1].focus();
+      } else if (!event.shiftKey && (active === focusables[focusables.length - 1] || outside)) {
+        event.preventDefault();
+        focusables[0].focus();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown, true);
+    return () => document.removeEventListener('keydown', onKeyDown, true);
+  }, []);
   return (
     <div
       className="dts-scrim"
@@ -347,7 +377,7 @@ export function Dialog({ title, description, children, footer, onClose, width = 
         if (event.target === event.currentTarget) onClose?.();
       }}
     >
-      <div ref={ref} className={cx('dts-dialog', className)} style={{ width }} role="dialog" aria-modal="true" aria-label={title}>
+      <div ref={ref} tabIndex={-1} className={cx('dts-dialog', className)} style={{ width }} role="dialog" aria-modal="true" aria-label={title}>
         <header className="dts-dialog__head">
           <h2 className="dts-dialog__title">{title}</h2>
           <IconButton label={t('action.close')} onClick={onClose}>

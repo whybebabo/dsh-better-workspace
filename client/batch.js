@@ -88,21 +88,6 @@ function summarize({ action, ok, failed, needsStop }) {
   return parts.join(' · ') || t('result.none');
 }
 
-/** Retries exactly the ids that failed, keeping the successful ones out of the way. */
-export async function retryFailed({ outcome, ids, actions, options, onProgress }) {
-  const wanted = new Set((outcome?.failed ?? []).map((entry) => entry.id));
-  if (outcome?.needsStop?.length) outcome.needsStop.forEach((id) => wanted.add(id));
-  const targets = (ids ?? []).filter((id) => wanted.has(id));
-  const stopFirst = Boolean(outcome?.needsStop?.length);
-  return runSessionAction({
-    action: outcome.action,
-    ids: targets,
-    actions,
-    options: stopFirst ? { ...(options ?? {}), stopActivity: true } : options,
-    onProgress,
-  });
-}
-
 export function mergeOutcomes(previous, next) {
   if (!previous) return next;
   const ok = [...new Set([...previous.ok, ...next.ok])];

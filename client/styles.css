@@ -446,6 +446,42 @@ html[data-platform='darwin'] [data-dts-covered] {
   background: var(--dsw-specific-sidebar-nav-item-active-accent, #e4edfd);
 }
 
+/* A topic created from the workspace menu lands here: the panel expands its workspace, scrolls
+   the row into view and fades a tint out. The tint is a pseudo-element rather than the row's own
+   `background`: a running animation outranks a `:hover` declaration in the cascade, so animating
+   `background` swallowed the hover feedback for the whole 1.6s. `isolation` gives the row a
+   stacking context, which is what keeps this layer above its background and below its text. */
+.dts-row--topic.is-revealed {
+  isolation: isolate;
+}
+
+.dts-row--topic.is-revealed::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  background: var(--dsw-specific-sidebar-nav-item-active-accent, #e4edfd);
+  animation: dts-row-reveal var(--dts-reveal-ms, 1.6s) ease-out forwards;
+}
+
+@keyframes dts-row-reveal {
+  0%,
+  55% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dts-row--topic.is-revealed::after {
+    animation: none;
+  }
+}
+
 .dts-row__title {
   flex: 1 1 auto;
   min-width: 0;

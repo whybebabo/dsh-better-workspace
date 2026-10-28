@@ -73,10 +73,34 @@ export function createHostActions(ctx) {
     forkSession(sessionId) {
       return call(uiWorkspace(), 'forkSession', sessionId);
     },
-    renameSession(sessionId, title) {
+    /**
+     * Rename a session the way the host's own rename dialog does.
+     *
+     * `UiWorkspace` has no `renameSession` in 0.2.1: the host dialog closes over
+     * `sessions.using(id, { source: 'workspaceOperation' }, ref => ref.binding.session.rename(title))`
+     * and checks `result.ok` (`ui-workspace/src/client/index.ts`). Requiring the missing method
+     * made every save fail with "this host build cannot rename sessions". The `uiWorkspace`
+     * branch stays first for a future host that adds it; the official service is the fallback.
+     */
+    async renameSession(sessionId, title) {
       const target = uiWorkspace();
       if (typeof target?.renameSession === 'function') return call(target, 'renameSession', sessionId, title);
-      throw Object.assign(new Error(t('host.renameUnsupported')), { code: 'host-command-missing' });
+      const service = sessions();
+      if (typeof service?.using !== 'function') {
+        throw Object.assign(new Error(t('host.renameUnsupported')), { code: 'host-command-missing' });
+      }
+      const result = await service.using(sessionId, { source: 'workspaceOperation' }, (reference) => {
+        const rename = reference?.binding?.session?.rename;
+        // A silently skipped optional call would report success while nothing was written.
+        if (typeof rename !== 'function') {
+          throw Object.assign(new Error(t('host.renameUnsupported')), { code: 'host-command-missing' });
+        }
+        return rename.call(reference.binding.session, title);
+      });
+      if (result && result.ok === false) {
+        throw Object.assign(new Error(result.error?.message ?? t('host.renameUnsupported')), { code: 'host-rename-failed' });
+      }
+      return result;
     },
     /**
      * Fallback for adding a workspace when the host's own add control cannot be found.

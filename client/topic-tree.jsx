@@ -38,14 +38,26 @@ function sectionStatusLabel(section) {
 }
 
 /**
- * Bodies stay mounted so expand/collapse can animate; the CSS grid row (1fr → 0fr) gives the
- * height transition and clips the overflow. `aria-hidden` keeps collapsed content out of the
- * accessibility tree while it is still in the DOM.
+ * Bodies stay mounted while the height transition runs, then leave the DOM. The CSS grid row
+ * (1fr → 0fr) is what animates; keeping the subtree mounted afterwards meant a collapsed
+ * workspace with a thousand sessions still held every row (and its layout) in the document, and
+ * `content-visibility` cannot help a box that is on screen with zero height. `aria-hidden` and
+ * `inert` keep the collapsed content out of the accessibility tree for the moment it is there.
  */
+const COLLAPSE_MS = 220; // matches the 0.2s grid-row transition in styles.css
+
 function Collapse({ open, children }) {
+  const [retained, setRetained] = React.useState(open);
+  // Mount in the same commit as `open` so the opening transition has content to grow into.
+  if (open && !retained) setRetained(true);
+  React.useEffect(() => {
+    if (open) return undefined;
+    const timer = setTimeout(() => setRetained(false), COLLAPSE_MS);
+    return () => clearTimeout(timer);
+  }, [open]);
   return (
     <div className={cx('dts-collapse', !open && 'is-collapsed')} aria-hidden={open ? undefined : 'true'} inert={open ? undefined : ''}>
-      <div className="dts-collapse__inner">{children}</div>
+      <div className="dts-collapse__inner">{retained ? children : null}</div>
     </div>
   );
 }
@@ -153,7 +165,7 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, groupHidden 
   );
 }
 
-function SectionHeader({ section, group, selectMode, selectedIds, onToggleCollapse, onToggleSection, onMenu, onFilter, onNewSession, onDropSessions, onRename, reorder, selectableIds = [], hidden = 0 }) {
+function SectionHeader({ section, group, selectMode, selectedIds, onToggleCollapse, onToggleSection, onMenu, onFilter, onNewSession, onDropSessions, onRename, reorder, selectableIds = [], hidden = 0, highlighted = false }) {
   // `selectableIds` is the section's visible scope (model.selectableIds — the same derivation
   // every "select all" entry point uses). A fallback to `section.rows` here is exactly the bug:
   // it meant "select all" on an over-REVEAL_LIMIT group silently grabbed rows that were never
@@ -199,10 +211,15 @@ function SectionHeader({ section, group, selectMode, selectedIds, onToggleCollap
         dropState === 'no' && 'is-drop-no',
         dropBefore && 'is-dropbefore',
         dropAfter && 'is-dropafter',
+        highlighted && 'is-revealed',
       )}
       role="treeitem"
       aria-expanded={!section.collapsed}
       aria-label={statusLabel ? `${label} · ${statusLabel}` : label}
+      // The panel's landing aid looks a created topic up by identity: ids are unique per
+      // workspace (`tp_default` is shared), so both halves of the key are written.
+      data-dts-workspace={group.workspaceId}
+      data-dts-topic={section.kind === 'topic' ? section.id : undefined}
       style={{ '--dts-indent': selectMode ? '8px' : '10px' }}
       tabIndex={0}
       draggable={draggable}
@@ -363,7 +380,7 @@ function SectionHeader({ section, group, selectMode, selectedIds, onToggleCollap
   );
 }
 
-const Section = React.memo(function Section({ section, group, schedules, selectMode, selectedIds, query, revealed, onToggleReveal, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleWorkspaceCollapse, onToggleTopicCollapse, onSelectMany, onFilter, onNewSessionInTopic, onDropSessions, onRename, onDropOnRow, reorder }) {
+const Section = React.memo(function Section({ section, group, schedules, selectMode, selectedIds, query, revealed, highlighted, onToggleReveal, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleWorkspaceCollapse, onToggleTopicCollapse, onSelectMany, onFilter, onNewSessionInTopic, onDropSessions, onRename, onDropOnRow, reorder }) {
   // Selecting is about existing records; hide the provisional New Session placeholder while
   // the batch toolbar is active instead of offering a checkbox that cannot do anything.
   const rows = selectMode ? section.rows.filter((row) => !row.blank) : section.rows;
@@ -420,7 +437,7 @@ const Section = React.memo(function Section({ section, group, schedules, selectM
       ))}
       {overflow ? (
         <button type="button" className="dts-reveal" onClick={() => onToggleReveal?.(collapseKey)}>
-          {revealed ? t('action.collapse') : t('action.showAll', { n: section.rows.length })}
+          {revealed ? t('action.collapse') : t('action.showAll', { n: rows.length })}
         </button>
       ) : null}
     </>
@@ -439,6 +456,7 @@ const Section = React.memo(function Section({ section, group, schedules, selectM
         selectedIds={selectedIds}
         selectableIds={scope.visible}
         hidden={scope.hidden.length}
+        highlighted={highlighted}
         onToggleCollapse={onToggleCollapse}
         onToggleSection={onToggleSection}
         onMenu={onMenu}
@@ -456,6 +474,7 @@ const Section = React.memo(function Section({ section, group, schedules, selectM
 export function TopicTree({
   tree,
   prefs,
+  reveal,
   selection,
   schedules,
   onOpenSession,
@@ -566,6 +585,9 @@ export function TopicTree({
                     && section.id !== focus.id;
                   const sectionCollapsed = sibling ? true : section.collapsed;
                   const shownSection = sectionCollapsed === section.collapsed ? section : { ...section, collapsed: sectionCollapsed };
+                  // Landing aid for a topic the user just created: `reveal` names one row, and
+                  // only that row gets the fade-out highlight.
+                  const highlighted = Boolean(reveal) && reveal.workspaceId === group.workspaceId && reveal.topicId === section.id;
                   return (
                     <React.Fragment key={`${section.kind}:${section.id ?? 'ungrouped'}`}>
                       <Section
@@ -575,6 +597,7 @@ export function TopicTree({
                         selectMode={selectMode}
                         selectedIds={selectedIds}
                         revealed={revealedBuckets.has(sectionKey(group, section))}
+                        highlighted={highlighted}
                         onToggleReveal={onToggleReveal}
                         query={tree.search}
                         onOpenSession={onOpenSession}

@@ -139,7 +139,14 @@ export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
         ? `${t('result.ok', { n: 1 })}${item.subagentsRemoved?.length ? ` · ${t('delete.subagentCount', { n: item.subagentsRemoved.length })}` : ''}`
         : item.error,
     }));
-    const failedIds = outcome.items.filter((item) => item.status === 'failed').map((item) => item.sessionId);
+    // A `failed` item is retried by id; a `partial` parent is already gone, so the only thing
+    // left to act on is the children that survived it (`subagentsFailed`). Without those ids the
+    // surviving artifacts had no path back into the delete flow at all.
+    const retryIds = [...new Set(outcome.items.flatMap((item) => {
+      if (item.status === 'failed') return [item.sessionId];
+      if (item.status === 'partial') return item.subagentsFailed ?? [];
+      return [];
+    }))];
     return (
       <Dialog
         title={t('delete.title', { n: ids.length })}
@@ -147,9 +154,9 @@ export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
         width={460}
         footer={
           <>
-            {failedIds.length > 0 ? (
-              <Button disabled={busy} onClick={() => execute(failedIds)}>
-                {t('action.retry')} ({failedIds.length})
+            {retryIds.length > 0 ? (
+              <Button disabled={busy} onClick={() => execute(retryIds)}>
+                {t('action.retry')} ({retryIds.length})
               </Button>
             ) : null}
             <span className="dts-spacer" />

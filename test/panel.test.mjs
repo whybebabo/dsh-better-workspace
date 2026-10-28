@@ -19,6 +19,15 @@ const WORKSPACE = 'ws_one';
 const TOPIC = 'tp_one';
 const API = '/dsh-better-workspace/api';
 
+/**
+ * Routes a test does not care about still have to answer: the picker glyphs moved off `/state`
+ * onto their own cached route, so without this the create/edit dialogs would render only the
+ * "no marker" swatch.
+ */
+const DEFAULT_RESPONSES = {
+  [`${API}/emojis`]: () => ({ ok: true, result: { emojis: ['\u{1F4C1}', '\u{1F4A1}', '\u{1F3A8}', '\u{1F680}'] } }),
+};
+
 let dom;
 let window;
 let document;
@@ -41,6 +50,9 @@ let startSessionArgs = [];
 let openSessionCalls = 0;
 let toggleSidebarCalls = 0;
 let workspaceRenameCalls = [];
+/** `sessions.using` calls: `[sessionId, source]`, and the titles the host rename stub received. */
+let sessionRenameCalls = [];
+let sessionRenameTitles = [];
 let workspaceDeleteCalls = [];
 let workspaceCreateCalls = [];
 let pickDirectoryCalls = 0;
@@ -74,7 +86,6 @@ function stateResult() {
       updatedAt: 1,
       readOnly: false,
       warning: null,
-      emojis: ['\u{1F4C1}', '\u{1F4A1}', '\u{1F3A8}', '\u{1F680}'],
       workspaces: {
         [WORKSPACE]: {
           topics: [
@@ -250,7 +261,30 @@ function applyPlugin(mod) {
       return { dispose: () => {} };
     },
     get: (name) => {
-      if (name === 'sessions') return { list: sessionSource, refresh() { sessionRefreshCalls += 1; } };
+      if (name === 'sessions') {
+        return {
+          list: sessionSource,
+          refresh() { sessionRefreshCalls += 1; },
+          /**
+           * The host's own rename path (`ui-workspace/src/client/index.ts`):
+           * `sessions.using(id, {source:'workspaceOperation'}, ref => ref.binding.session.rename(title))`.
+           * `uiWorkspace.renameSession` deliberately does not exist on this fake, exactly like 0.2.1.
+           */
+          async using(sessionId, options, run) {
+            sessionRenameCalls.push([sessionId, options?.source]);
+            return run({
+              binding: {
+                session: {
+                  async rename(title) {
+                    sessionRenameTitles.push(title);
+                    return { ok: true, value: { title } };
+                  },
+                },
+              },
+            });
+          },
+        };
+      }
       if (name === 'uiSession') return { sessionStatus: sessionStatusSource };
       if (name === 'workspaces') {
         return {
@@ -349,6 +383,8 @@ beforeEach(async () => {
   openSessionCalls = 0;
   toggleSidebarCalls = 0;
   workspaceRenameCalls = [];
+  sessionRenameCalls = [];
+  sessionRenameTitles = [];
   workspaceDeleteCalls = [];
   workspaceCreateCalls = [];
   pickDirectoryCalls = 0;
@@ -396,7 +432,7 @@ beforeEach(async () => {
   global.fetch = async (url, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;
     calls.push({ url: String(url), method: options.method ?? 'GET', body });
-    const handler = responseOverrides[String(url).replace(/^\/api/, '')] ?? (() => ({ ok: true, result: {} }));
+    const handler = responseOverrides[String(url).replace(/^\/api/, '')] ?? DEFAULT_RESPONSES[String(url)] ?? (() => ({ ok: true, result: {} }));
     const payload = handler(body);
     return { ok: payload.ok !== false, status: payload.status ?? 200, json: async () => payload };
   };
@@ -1365,6 +1401,7 @@ test('a default-group filter is scoped to the workspace it was opened from', asy
   const saved = JSON.parse(window.localStorage.getItem('dsh-better-workspace:prefs:v1'));
   assert.equal(saved.workspaceFilter, 'ws_two');
   assert.equal(saved.topicFilter, 'tp_default');
+  assert.equal(saved.topicFilterWorkspace, 'ws_two', 'the filter records which workspace owns that group id');
   const tinted = container.querySelectorAll('.dts-folder.is-active');
   assert.equal(tinted.length, 1, 'the filtered workspace folder is tinted');
   assert.ok(groups[0].parentElement.contains(tinted[0]));
@@ -2433,6 +2470,54 @@ test('the create dialog offers the host emoji list and submits the chosen glyph'
   assert.equal(create.body.emoji, '\u{1F3A8}', 'the third glyph was submitted');
 });
 
+test('creating a group from the workspace menu expands, scrolls and highlights it', async () => {
+  let created = false;
+  responseOverrides[`${API}/state`] = () => {
+    const state = stateResult();
+    if (created) {
+      state.result.revision = 9;
+      state.result.workspaces[WORKSPACE].topics = [
+        { id: 'tp_new', name: '新建组', emoji: '', order: -2, createdAt: 9 },
+        ...state.result.workspaces[WORKSPACE].topics,
+      ];
+    }
+    return state;
+  };
+  responseOverrides[`${API}/topics/create`] = () => {
+    created = true;
+    return { ok: true, result: { revision: 9, result: { topic: { id: 'tp_new', name: '新建组', emoji: '' } } } };
+  };
+  window.localStorage.setItem('dsh-better-workspace:prefs:v1', JSON.stringify({ collapsedWorkspaces: [WORKSPACE] }));
+  const scrolled = [];
+  window.Element.prototype.scrollIntoView = function scrollIntoView(options) {
+    scrolled.push({ topic: this.getAttribute('data-dts-topic'), options });
+  };
+  await mount();
+  assert.equal(find('.dts-row--group').getAttribute('aria-expanded'), 'false', 'the workspace starts collapsed');
+
+  await openTopicCreateDialog();
+  const input = document.querySelector('.dts-dialog .dts-input');
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(input, '新建组');
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+  await act(async () => {
+    [...document.querySelectorAll('.dts-dialog .dts-btn')]
+      .find((node) => node.textContent.trim() === '创建')
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick(80);
+
+  assert.equal(find('.dts-row--group').getAttribute('aria-expanded'), 'true', 'the workspace holding the new group is expanded');
+  const row = find('.dts-row--topic', '新建组');
+  assert.ok(row, 'the new group is in the tree');
+  assert.equal(row.classList.contains('is-revealed'), true, 'and carries the landing highlight');
+  assert.deepEqual(scrolled.at(-1), { topic: 'tp_new', options: { block: 'nearest' } }, 'the row was scrolled into view');
+  await tick(1700);
+  assert.equal(find('.dts-row--topic', '新建组').classList.contains('is-revealed'), false, 'the highlight retires on its own');
+});
+
 test('the row menu offers the commands the panel can carry out itself', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   await mount();
@@ -2675,6 +2760,34 @@ test('double-clicking a session row opens the rename dialog', async () => {
   assert.equal(dialog.querySelector('.dts-input').value, '会话 1');
 });
 
+test('saving a session rename goes through the host sessions service', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const row = find('.dts-row--session', '会话 1');
+  await act(async () => {
+    row.dispatchEvent(new window.Event('dblclick', { bubbles: true }));
+  });
+  await tick();
+  const dialog = document.querySelector('.dts-dialog');
+  const input = dialog.querySelector('.dts-input');
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(input, '改名后的会话');
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+  await act(async () => {
+    [...dialog.querySelectorAll('.dts-dialog__foot .dts-btn')]
+      .find((node) => node.textContent.trim() === '保存')
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  // 0.2.1's `UiWorkspace` has no `renameSession`: the host dialog uses the sessions service.
+  // Requiring the missing method made every save fail with "this host build cannot rename".
+  assert.deepEqual(sessionRenameCalls, [['ses_1', 'workspaceOperation']], 'the official service carries the rename');
+  assert.deepEqual(sessionRenameTitles, ['改名后的会话']);
+  assert.equal(document.querySelector('.dts-dialog'), null, 'and the dialog closes after a successful save');
+});
+
 test('the composer chip opens a dialog rather than a menu', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   await mount();
@@ -2708,6 +2821,59 @@ test('the composer topic chip shows the open session topic and re-files it', asy
   const assign = calls.find((call) => call.url.endsWith('/assign'));
   assert.deepEqual(assign.body.sessionIds, ['ses_0'], 'the open session is the one re-filed');
   assert.equal(assign.body.topicId, 'tp_default', 'picking the default group files into it');
+});
+
+test('creating a group from the composer files the open session into it', async () => {
+  let state = stateResult();
+  responseOverrides[`${API}/state`] = () => state;
+  responseOverrides[`${API}/topics/create`] = () => {
+    state.result.revision = 9;
+    state.result.workspaces[WORKSPACE].topics = [
+      { id: 'tp_new', name: '新建组', emoji: '', order: -2, createdAt: 9 },
+      ...state.result.workspaces[WORKSPACE].topics,
+    ];
+    return { ok: true, result: { revision: 9, result: { topic: { id: 'tp_new', name: '新建组', emoji: '' } } } };
+  };
+  responseOverrides[`${API}/assign`] = (body) => {
+    state.result.revision = 10;
+    state.result.workspaces[WORKSPACE].assignments = {
+      ...state.result.workspaces[WORKSPACE].assignments,
+      ...Object.fromEntries((body.sessionIds ?? []).map((id) => [id, body.topicId])),
+    };
+    return { ok: true, result: { revision: 10, result: { changed: 1 } } };
+  };
+  await mount();
+  const chip = findAnywhere('.dts-composer-topic');
+  assert.match(chip.textContent, /设计/, 'the bar starts on the open session topic');
+  await act(async () => {
+    chip.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const add = [...document.querySelectorAll('.dts-pop--composer .dts-pop__foot .dts-menu__item')]
+    .find((node) => node.textContent.includes('新建分组'));
+  assert.ok(add, 'the bar offers creating a group');
+  await act(async () => {
+    add.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const input = document.querySelector('.dts-dialog .dts-input');
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(input, '新建组');
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+  await act(async () => {
+    [...document.querySelectorAll('.dts-dialog .dts-btn')]
+      .find((node) => node.textContent.trim() === '创建')
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick(80);
+  const assign = calls.find((call) => call.url.endsWith('/assign'));
+  assert.ok(assign, 'the open session is filed after the create');
+  assert.equal(assign.body.workspaceId, WORKSPACE, 'into the workspace the session belongs to');
+  assert.deepEqual(assign.body.sessionIds, ['ses_0'], 'the open session is the one re-filed');
+  assert.equal(assign.body.topicId, 'tp_new', 'and the new group is its destination');
+  assert.match(findAnywhere('.dts-composer-topic').textContent, /新建组/, 'the bar switches to the new group');
 });
 
 test('the composer topic chip survives the sidebar collapsing to the rail', async () => {
@@ -3036,4 +3202,66 @@ test('hiding the panel issues no sidecar read and no catalog re-read', async () 
   assert.ok(stateReads() > hiddenReads, 'returning re-reads the document instead of trusting a stale copy');
   assert.ok(scheduleReaders > hiddenCatalogReads, 'and re-reads the catalog instead of showing stale marks');
   assert.equal(scheduleSubscribers.size, 1, 'and re-attaches exactly one invalidation');
+});
+
+test('a topic filter resolves in the workspace it was paired with', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  const extra = { workspaceId: 'ws_two', path: 'D:/work/two', title: 'Two', sessionIds: [], createdAt: 2, updatedAt: 2 };
+  workspaceSource.set({ ...workspaceSource.getSnapshot(), items: [...workspaceSource.getSnapshot().items, extra] });
+  // `tp_default` exists in every workspace, so the id alone is ambiguous: an id-only lookup
+  // lands on whichever workspace comes first, which is not the one the user filtered.
+  window.localStorage.setItem('dsh-better-workspace:prefs:v1', JSON.stringify({ topicFilter: 'tp_default', topicFilterWorkspace: 'ws_two' }));
+  await mount();
+  await tick(60);
+  const groups = [...container.querySelectorAll('.dts-row--group')];
+  assert.equal(groups.length, 1, 'the filter scopes to a single workspace');
+  assert.ok(groups[0].textContent.includes('Two'), 'and it is the paired one, not the first owner of that id');
+});
+
+test('the delete-group confirmation counts the document, not the visible rows', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  window.localStorage.setItem('dsh-better-workspace:prefs:v1', JSON.stringify({ showArchived: true }));
+  // `ses_0` is the only member of 设计. Archiving it moves the row into the archived bucket
+  // while its assignment stays, so the group renders empty but still holds one session.
+  workspaceSource.set({ ...workspaceSource.getSnapshot(), archivedSessionIds: ['ses_0'] });
+  await mount();
+  await tick(60);
+  const topic = find('.dts-row--topic', '设计');
+  assert.equal(topic.querySelector('.dts-row__count').textContent, '0', 'the group renders no live rows');
+  const menu = topic.querySelector('.dts-row__actions .dts-iconbtn[aria-label="更多操作"]');
+  await act(async () => {
+    menu.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')]
+      .find((node) => node.textContent.includes('删除分组'))
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const body = document.querySelector('.dts-dialog__text').textContent;
+  assert.ok(body.includes('1 个会话'), `the confirmation names the real member count: ${body}`);
+});
+
+test('a collapsed bucket drops its rows from the DOM once the transition ends', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const section = find('.dts-row--topic', '设计').parentElement;
+  const header = section.querySelector('.dts-row--topic');
+  const rows = () => section.querySelectorAll('.dts-row--session').length;
+  assert.equal(rows(), 1, 'the group starts expanded with its row mounted');
+
+  await act(async () => {
+    header.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick(60);
+  assert.equal(rows(), 1, 'the row stays mounted while the height animates');
+  await tick(220);
+  assert.equal(rows(), 0, 'and leaves the DOM afterwards, so a collapsed workspace costs no layout');
+
+  await act(async () => {
+    header.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick(40);
+  assert.equal(rows(), 1, 'expanding mounts it again without waiting for a timer');
 });
