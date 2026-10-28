@@ -23,7 +23,7 @@ The plugin does not take over the rest of DSH: when the sidebar is collapsed to 
 - **Overlay, not replacement** — the panel renders in `shell.overlay`, locates the native Workspace region through structural selectors, and covers exactly that region's own box. The covered region gets `inert` + `aria-hidden`, released automatically while an official dialog is open.
 - **Topic data lives on its own** — groups and assignments are stored in a single sidecar file, `<DSH_HOME>/dsh-better-workspace/topics.v1.json`, so you can back it up and upgrade the host independently. Data survives uninstalling the plugin.
 - **Two kinds of ordering** — group order is written to the sidecar (shared across windows); workspace and session drag order lives in local `localStorage` preferences.
-- **Official commands only** — opening sessions, archiving, pinning, renaming, forking and creating workspaces all go through the host's `uiWorkspace` / `workspaces` services. The plugin does not declare or borrow another package's slots.
+- **Official commands only** — opening sessions, archiving, pinning, forking and creating workspaces go through the host's `uiWorkspace` / `workspaces` services, and renaming a session goes through the host's own `sessions.using(...)` path (0.2.1's `UiWorkspace` has no `renameSession`; the stock rename dialog does the same). The plugin does not declare or borrow another package's slots.
 
 ## Installation
 
@@ -145,7 +145,7 @@ Expect `200`, with `ok: true` and your group data under `result.workspaces`.
 
 ### Groups
 
-- **Create** — from the workspace `⋯` menu, or the "new topic and put it in…" item in the header ＋ menu; you can also drag a session onto a group to file it. A new group takes the top slot in its workspace's group list, so you do not have to scroll to the bottom to find it.
+- **Create** — from the workspace `⋯` menu, or the "new topic and put it in…" item in the header ＋ menu; you can also drag a session onto a group to file it. A new group takes the top slot in its workspace's group list, so you do not have to scroll to the bottom to find it. Creating from the workspace `⋯` menu also expands that workspace, scrolls the new row into view and highlights it briefly, so a previously collapsed workspace cannot hide what you just made. Creating from the group chip above the composer files the open session into the new group, and the chip names it right away.
 - **New session** — the ＋ on a group row starts a session directly in that group (a workspace row's ＋ starts one in that workspace).
 - **Rename** — double-click a group name to edit inline (duplicates and illegal characters are reported immediately, and the save is disabled).
 - **Reorder** — drag a group row; dropping on the upper or lower half of a target row decides the insert position, with an insertion line while dragging.
@@ -213,7 +213,7 @@ Once the sidebar is collapsed to the rail, the host's own "new session / add wor
 | `<DSH_HOME>/dsh-better-workspace/topics.v1.lock` | Cross-process write lock (contents: `<pid>-<random>` token) |
 | `localStorage["dsh-better-workspace:prefs:v1"]` | Workspace/group filters, collapse state, search, drag order |
 
-Writes go temporary file → `fsync` → `rename`, keeping `.bak` from the previous write. If the primary is corrupt, the store falls back to the backup and enters **read-only mode** (banner at the top of the panel); that recovery write does not overwrite `.bak` with the broken file. If **neither** the primary nor the backup can be parsed, every write is refused rather than starting from an empty document, and read-only mode clears itself as soon as the file is repaired — no host restart needed.
+Writes go temporary file → `fsync` → `rename`, keeping `.bak` from the previous write. If the primary is corrupt, the store falls back to the backup and **stays writable** (the banner at the top of the panel says why; the next successful write rebuilds the primary); that recovery write does not overwrite `.bak` with the broken file. If **neither** the primary nor the backup can be parsed, every write is refused rather than starting from an empty document, and read-only mode clears itself as soon as the file is repaired — no host restart needed. A primary written by a **newer** plugin (`version` unknown) makes the store read-only without touching any file: newer data is never downgraded, and updating the plugin restores writes.
 
 The lock is released only by its owner: the lock file carries a token that is compared before unlinking. A lock is reclaimed only when its `mtime` exceeds `staleLockMs` **and** the PID in its token is gone. Reclaiming first hard-links the current lock into a private claim, then verifies that the claim's token and inode/dev still identify the same old lock before `unlink`ing the path; on filesystems without hard links it falls back to `rename`, restoring the moved lock only when the path is free and never overwriting a successor. A slow writer is therefore never evicted mid-write, and the shorter default stale window (2 s) versus the wait deadline (6 s) keeps a crash-left lock from timing out every request just before it becomes reclaimable.
 
@@ -236,6 +236,7 @@ Prefix `/dsh-better-workspace/api`, registered on both `webServer` (browser) and
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/state` | Read the group document and read-only state |
+| `GET` | `/emojis` | The group marker glyphs (static, cacheable for a day; no longer re-sent with every `/state`) |
 | `POST` | `/topics/create` | Create a group (optionally filing sessions into it) |
 | `POST` | `/topics/update` | Rename / change icon / change order |
 | `POST` | `/topics/delete` | Delete a group (sessions return to the default group) |
@@ -245,7 +246,9 @@ Prefix `/dsh-better-workspace/api`, registered on both `webServer` (browser) and
 | `POST` | `/delete/preview` | Per-item deletion verdicts |
 | `POST` | `/delete/execute` | Perform the deletion |
 
-Every write **must** carry `expectedRevision` (missing → `400 revision-required`); a mismatch returns `409` with `currentRevision`, after which the client reloads and retries. `/delete/*` are imperative operations and `/sessions/adopt` is an idempotent repair of facts the host already owns, so neither participates in revision checks.
+Every write **must** carry `expectedRevision` (missing → `400 revision-required`); a mismatch returns `409` with `currentRevision`, after which the client reloads and retries. A write that turns out to change nothing (filing a session into the group it already sits in, renaming to the same name) is neither persisted nor given a new revision, so it cannot hand another window a phantom conflict. `/delete/*` are imperative operations and `/sessions/adopt` is an idempotent repair of facts the host already owns, so neither participates in revision checks.
+
+`/assign` and `/topics/create` carry one more guard: when the host can **prove** a session's `cwd` belongs to a different registered workspace, the request is refused with `400 cross-workspace`. It is allowed through when `workspaceRegistry` / `sessionPersistence` is missing or the session is not accounted yet — which is exactly the case for a brand-new session.
 
 ## Fallback behavior
 
@@ -262,7 +265,7 @@ DSH has no host-side command to delete a session, so the plugin implements one w
 1. The session id must be a single safe path segment (no `/`, `\`, `..`);
 2. The directory must live under `<DSH_HOME>/sessions`, with every path level checked via `lstat` + `realpath`, rejecting symlinks/junctions; a sessions root that is itself a link is refused outright;
 3. The first line (header) of `session.v3.jsonl[.zstd]` must be read and confirm `header.id === sessionId` — a directory-name match alone never deletes;
-4. A session whose artifact was **appended to recently** is blocked (subagent sessions are blocked too, and are cascaded by their parent with a count in the preview); a user fork carrying only `parentSession` is not a subagent. Note that DSH's write lease is *not* "a lock file exists": Windows uses a named kernel semaphore, and on POSIX `session.lock` is never removed once created — so this checks the artifact's recent modification time (a 15-second quiet window) rather than `*.lock` filenames;
+4. A session whose artifact was **appended to recently** is blocked (subagent sessions are blocked too, and are cascaded by their parent with a count in the preview; **an orphaned subagent whose parent artifact is gone is the exception** — the cascade entry point no longer exists, so it may be deleted on its own, otherwise the file would stay on disk forever); a user fork carrying only `parentSession` is not a subagent. Note that DSH's write lease is *not* "a lock file exists": Windows uses a named kernel semaphore, and on POSIX `session.lock` is never removed once created — so this checks the artifact's recent modification time (a 3-second quiet window when the host has positively confirmed the session is idle, a conservative 15 seconds when the running state cannot be probed) rather than `*.lock` filenames;
 5. A running session is stopped the official way (`agent.cancel({kind:'user'})`) and given up to 3 seconds to leave `running`; if it does not, nothing is deleted. Between analysis and the actual removal the running state and write lease are **re-probed** (the lease is checked before detaching, because a flush itself refreshes the mtime), and either hit skips the item with its data intact;
 6. Removal first `rename`s the target into a `.trash-<pid>-<rand>` quarantine inside the root, then deletes the quarantine — `rename` is atomic and resolves the path once, which closes the window where a parent directory swapped for a junction would redirect a recursive delete. The header is then re-read **from the quarantined object** and its `id` compared; a mismatch restores it and aborts (the subagent cascade runs the same check), and afterwards `lstat` proves the directory is really gone;
 7. Batches preflight as a whole, then execute item by item without rolling back successes, returning `deleted/skipped/partial/failed` per item; `partial` means the parent was deleted but some children were not (`subagentsFailed` lists them).
@@ -281,14 +284,14 @@ Both switches are configuration only and need no rebuild. Deleting the sidecar d
 npm install
 npm run build     # esbuild -> lib/client.js (window.__ModuleLoader__.load shell; externalizes react/react-dom/host primitives)
 npm run check     # loads lib/*.js as a real module graph and checks the bundle's registration id (not node --check)
-npm test          # 234 tests
+npm test          # 260 tests
 ```
 
 `client/` is the source; `lib/client.js` is the artifact (shipped in the package, do not edit by hand). `react`/`react-dom`/`jsdom` in the test setup are **dev dependencies only**: at runtime `require('react')` resolves to the instance the host already loaded (React 18.3.1, same as DSH 0.2.1), so a second React is never bundled.
 
-`test/` covers: sidecar locking/atomic writes/revisions/corruption recovery (including a lock changing hands and reclaiming a dead process's lock), **cross-process** concurrent writes (two forked node processes), the selection scope (`selectableIds`, shared by all three "select all" entry points), tree derivation and status aggregation, batch archive classification, deletion safety boundaries (including a deterministic directory swap between preview and execute, identity re-checking after quarantine, a swapped subagent directory, a failed quarantine, a session that starts running or writing after analysis, and a compressed header larger than the old window), drag and rename (including ordering inside Ungrouped), the panel's jsdom integration (loading the **built artifact**, with fabricated layout and `fetch`, including handing the region back for native dialogs and a trigger click closing its own menu), scheduled-task frequency and the hover block, and zh/en key-set symmetry.
+`test/` covers: sidecar locking/atomic writes/revisions/corruption recovery (including a lock changing hands, reclaiming a dead process's lock, a newer version staying read-only instead of being downgraded, and a recovered backup staying writable), **cross-process** concurrent writes (two forked node processes), the selection scope (`selectableIds`, shared by all three "select all" entry points), tree derivation and status aggregation, batch archive classification, deletion safety boundaries (including a deterministic directory swap between preview and execute, identity re-checking after quarantine, a swapped subagent directory, a failed quarantine, a session that starts running or writing after analysis, a compressed header larger than the old window, and an orphaned subagent removable on its own), drag and rename (the baseline of a second drag, ordering inside Ungrouped, and the rename going through the host's `sessions.using`), membership repair (refusing to guess without the raw table), the panel's jsdom integration (loading the **built artifact**, with fabricated layout and `fetch`, including handing the region back for native dialogs, a trigger click closing its own menu, and `enabled:false` answering only `/state`), scheduled-task frequency and the hover block, and zh/en key-set symmetry.
 
-Every safety fix in this round was **mutation-checked**: revert the implementation to the old behaviour and the corresponding test must go red. Do the same after touching safety-related code — adding happy-path cases alone easily yields tests that "look like they guard, but stay green when the code is deleted" (in the second review round 21 of 56 mutations still survived; see `review/round2/`).
+Every safety fix in this round was **mutation-checked**: revert the implementation to the old behaviour and the corresponding test must go red. Do the same after touching safety-related code — adding happy-path cases alone easily yields tests that "look like they guard, but stay green when the code is deleted" (in the second review round 21 of 56 mutations still survived; see `review/REVIEW-2026-10-27-round2.md`).
 
 All six behaviour fixes in this round have guarding tests, and each was mutation-checked: reverting `orderBy` to "unlisted ids last", `samePath` to strict equality, the implicit new-session path to filing into the newest group, removing the cross-workspace guard, restoring the ping-pong marquee, and zeroing the dead-zone threshold all turn their tests red.
 
@@ -301,13 +304,13 @@ lib/              Node side: entry, sidecar store, deletion, session file parsin
 client/           Browser source (.js logic + .jsx components + styles.css)
 lib/client.js     Built artifact, generated by client/build.mjs
 test/             node --test suites
-docs/assets/      README screenshots (not shipped in the npm package; the README links the raw URL)
+docs/assets/      README screenshots (not shipped in the npm package; the README links the jsDelivr URL)
 cordis.patch.yml  Profile patch (the enabled / enableDelete switches)
 ```
 
 ### Publishing
 
-The package is `@whybebabo/dsh-better-workspace` with `publishConfig.access: public`; the `files` allowlist ships only `lib`, `cordis.patch.yml`, `README.md`, `README.en.md`, `LICENSE` and `THIRD_PARTY_NOTICES.md` (no source; `docs/` is excluded too, so the preview uses an absolute GitHub raw URL — a relative path would 404 on the npmjs page).
+The package is `@whybebabo/dsh-better-workspace` with `publishConfig.access: public`; the `files` allowlist ships only `lib`, `cordis.patch.yml`, `README.md`, `README.en.md`, `LICENSE` and `THIRD_PARTY_NOTICES.md` (no source; `docs/` is excluded too, so the preview uses the absolute jsDelivr address for the file in the GitHub repo — a relative path would 404 on the npmjs page).
 
 The shipped `lib/client.js` must register with `__ModuleLoader__` under the **package name**, not the short `id` in `cordis.patch.yml`: the host builds the plugin graph from the package name, and a mismatched id makes it report `loaded without registering` and fail the whole Web boot. `client/build.mjs` reads that id from `package.json`, and `test/client-registration.test.mjs` pins the contract.
 
@@ -327,7 +330,7 @@ The `github:...#v0.1.6` install path only works once a tag exists; the two are i
 - The session row menu is drawn by the plugin (it cannot borrow the official entry, see above), but order, wording, icons and shortcut hints match the original item by item; hints come from the host's current default bindings, so rebinding them in settings leaves the hint text stale (the action itself still goes through official commands);
 - The group row's ＋ "new session" relies on the host marking new sessions as `blank`; if a future version stops doing that it degrades to "not auto-filed" (still movable), never to modifying existing sessions;
 - Permanent deletion depends on host-internal service names (`sessions`/`agents`/`workspaceRegistry`/`storageDomain` with `session_projcache` and `workspace`), which need re-checking on every DSH major version; if a cleanup service is missing the log is still deleted and failures are recorded in the result;
-- The cross-process "being written" check is a **conservative approximation**: the plugin cannot query the kernel lease from the browser or host process, so it uses the artifact's recent modification time (15-second quiet window). A session that just finished writing may be refused for up to 15 seconds (the preview reports `locked`; retry shortly), and conversely a quiet but still-running session may be missed — this boundary prefers to let something through rather than delete the wrong thing;
+- The cross-process "being written" check is a **conservative approximation**: the plugin cannot query the kernel lease from the browser or host process, so it uses the artifact's recent modification time (3 seconds when the session is known idle, 15 seconds when that cannot be probed). A session that just finished writing may be refused for that window (the preview reports `locked`; retry shortly), and conversely a quiet but still-running session may be missed — this boundary prefers to let something through rather than delete the wrong thing;
 - Inline rename and drag ordering depend on native DOM/junction behaviour; jsdom covers structure but not visuals ("status yields to the caret" is pure CSS, so deleting those rules leaves tests green and needs eyeballing);
 - The scheduled-task clock and hover block are drawn from `remote.schedule.catalog()`: the host's `sidebar.session.row.leading` / `.hover` slots can only be rendered by the declaring entry, so an overlay cannot borrow them; `cron` rules keep the host's raw `Cron {expression}（zone）` form without a human-readable preview. Note the namespace is an **independent cordis service** (`ctx.get('remote.schedule')`), not a property of `remote` — reading it as a property throws `cannot get property "remote.schedule" without inject`, which turns "service exists" into "service missing"; a resolution failure warns once via `console.warn`. If catalog fields are renamed in a later version these two surfaces stay blank, without affecting the rest of the panel;
 - The npm package ships the built artifact; to track `main` or change the code, use the source install and `npm run build`;
