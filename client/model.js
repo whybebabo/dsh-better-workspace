@@ -10,6 +10,11 @@
  * their group (the provisional New Session stays first). The same projection is applied to
  * every bucket here so clicking 置顶 actually moves the row, instead of only drawing a marker
  * the hover strip immediately covers.
+ *
+ * Row order inside a bucket is the workspace's account order permuted by the manual order, so
+ * `buildTree` itself stays a pure function of its inputs; a session that becomes active after it
+ * was attached is floated by `promoteSessionOrder`, which the panel runs on the session stream and
+ * writes back into the persisted order.
  */
 import { t } from './i18n.js';
 import { formatRelative } from './time.js';
@@ -129,14 +134,6 @@ export function mainSessionId(list) {
     if ((session?.retainedBy?.mainView ?? 0) > 0) return session.id;
   }
   return list?.current;
-}
-
-export function isVisibleSession(session, current, archived) {
-  if (!session) return false;
-  if (session.origin === 'subagent') return false;
-  if (session.blank && session.id !== current) return false;
-  if (archived.has(session.id)) return false;
-  return true;
 }
 
 function relativeKey(updatedAt) {
@@ -328,6 +325,77 @@ export function orderByManual(rows, manual, keyOf) {
   return next;
 }
 
+/** Element-wise identity for id lists; `undefined` never equals an empty list. */
+function sameIds(left, right) {
+  if (left === right) return true;
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) if (left[index] !== right[index]) return false;
+  return true;
+}
+
+/**
+ * Activity promotion for the panel's persisted session order — the native rule this panel was
+ * missing.
+ *
+ * Rows are rendered from `workspace.sessionIds` (the host's attach order) permuted by the manual
+ * `sessionOrder`. That order only moves when a session is *attached*, so a session that becomes
+ * active afterwards kept its old slot: the blank the host reuses for 新会话 (it never re-attaches
+ * a blank, it reuses the one it already has), a session whose first turn starts, one whose
+ * `attachSession` never landed. Each of them was only first while `blank` floated it — the moment
+ * the first turn cleared that flag the row dropped to wherever the account put it, i.e. usually
+ * *not* the top of its group, while the stock list (which promotes every Session whose `updatedAt`
+ * advanced, `nextSessionOrderAccount`) kept it on top.
+ *
+ * So: ids the previous call had not seen, or whose `updatedAt` moved forward, lead their workspace
+ * by recency; every other id keeps the relative order the user last saw. The caller writes the
+ * result back into `prefs.sessionOrder`, which is what makes the promotion *stick* — recomputing it
+ * from the account order on every build would drop the row again one build later.
+ *
+ * @param {object} input
+ * @param {Array} input.workspaces - normalized workspace items
+ * @param {object} input.byId - session summary map (`list.byId`)
+ * @param {Map|null} input.previousUpdatedAt - last call's `updatedAt`, `null` to prime only
+ * @param {object} input.sessionOrder - `prefs.sessionOrder`
+ * @returns {{sessionOrder: object, updatedAt: Map<string, number>, changed: boolean}}
+ */
+export function promoteSessionOrder({ workspaces, byId, previousUpdatedAt = null, sessionOrder = null }) {
+  const sessions = byId ?? {};
+  const stored = sessionOrder ?? {};
+  const stamps = previousUpdatedAt instanceof Map ? previousUpdatedAt : new Map(Object.entries(previousUpdatedAt ?? {}));
+  // A page load must not reshuffle every workspace: the first snapshot only primes the stamps.
+  const primed = previousUpdatedAt !== null;
+  const updatedAt = new Map();
+  for (const [id, session] of Object.entries(sessions)) {
+    updatedAt.set(id, Number.isFinite(session?.updatedAt) ? session.updatedAt : 0);
+  }
+  if (!primed) return { sessionOrder: stored, updatedAt, changed: false };
+
+  const pathIndex = buildPathIndex(sessions);
+  let changed = false;
+  let nextOrder = stored;
+  for (const workspace of Array.isArray(workspaces) ? workspaces : []) {
+    const ids = workspaceSessionIds({ workspace, byId: sessions, pathIndex });
+    if (ids.length === 0) continue;
+    const promoted = ids.filter((id) => {
+      const stamp = sessions[id]?.updatedAt;
+      if (!Number.isFinite(stamp)) return false;
+      const previous = stamps.get(id);
+      return previous === undefined || stamp > previous;
+    }).sort((left, right) => (sessions[right]?.updatedAt ?? 0) - (sessions[left]?.updatedAt ?? 0));
+    // Nothing advanced in this workspace: leave the stored list (or the absence of one) alone, so
+    // a workspace the user never dragged is not frozen against the host's own order.
+    if (promoted.length === 0) continue;
+    const base = orderByManual(ids, stored[workspace.workspaceId] ?? []);
+    const promotedSet = new Set(promoted);
+    const order = [...promoted, ...base.filter((id) => !promotedSet.has(id))];
+    if (sameIds(order, stored[workspace.workspaceId])) continue;
+    if (nextOrder === stored) nextOrder = { ...stored };
+    nextOrder[workspace.workspaceId] = order;
+    changed = true;
+  }
+  return { sessionOrder: nextOrder, updatedAt, changed };
+}
+
 /** Internal spelling; `buildTree` reads the manual lists itself. */
 const orderBy = orderByManual;
 
@@ -351,7 +419,13 @@ export function workspaceSessionIds({ workspace, byId, pathIndex = null }) {
   }
   const key = pathKey(workspace?.path);
   if (key === '') return ordered;
-  const matching = pathIndex?.get?.(key) ?? Object.values(byId ?? {}).filter((session) => pathKey(session?.cwd) === key);
+  // A provided index is authoritative: `get` returning undefined means "no session in this
+  // build has that cwd", not "fall back to a full scan". The `??` fallback here used to run
+  // `Object.values(byId).filter(...)` for every workspace with no cwd match, making each build
+  // O(workspaces × sessions) again — exactly what `buildPathIndex` exists to avoid.
+  const matching = pathIndex
+    ? (pathIndex.get(key) ?? [])
+    : Object.values(byId ?? {}).filter((session) => pathKey(session?.cwd) === key);
   const stragglers = matching
     .filter((session) => session && !seen.has(session.id) && session.origin !== 'subagent')
     .sort((left, right) => relativeKey(left.updatedAt) - relativeKey(right.updatedAt));

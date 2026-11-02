@@ -2,8 +2,9 @@
  * Thin, defensive wrapper over the host client services.
  *
  * Every command is feature-detected: a missing or renamed service in a future DSH build
- * surfaces as a toast in the panel instead of a crash in the shell, and the native list
- * stays reachable because the overlay hides itself on repeated failures.
+ * surfaces as a toast in the panel instead of a crash in the shell. The covered region is
+ * released by the store's own state (`enabled:false`, or `/state` missing/unreachable), not
+ * by counting command failures.
  */
 import { t } from './i18n.js';
 
@@ -47,9 +48,6 @@ export function createHostActions(ctx) {
     },
     get workspaceStore() {
       return workspaces()?.list ?? null;
-    },
-    get workspaceActions() {
-      return workspaces() ? { create: (input) => call(workspaces(), 'create', input) } : null;
     },
     openSession(sessionId) {
       call(uiWorkspace(), 'openSession', sessionId);
@@ -136,10 +134,6 @@ export function createHostActions(ctx) {
       const target = sessions();
       if (typeof target?.refresh === 'function') return call(target, 'refresh');
       return undefined;
-    },
-    supports(name) {
-      const target = uiWorkspace();
-      return typeof target?.[name] === 'function';
     },
   };
 }

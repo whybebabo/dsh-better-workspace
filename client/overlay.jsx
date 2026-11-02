@@ -10,7 +10,7 @@ import * as React from 'react';
 import { createPortal } from 'react-dom';
 import { observeComposerSlot, resolveComposerWorkspace } from './composer.js';
 import { observeWorkspaceRegion, setRegionCovered, setRegionInert, watchRegionModals } from './geometry.js';
-import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, mainSessionId, moveWithin, orderByManual, pendingStatusLabel, samePath, selectableIds, topicLabel, ungroupedSessionIds, UNGROUPED_WORKSPACE_ID, workspaceSessionIds } from './model.js';
+import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, mainSessionId, moveWithin, orderByManual, pendingStatusLabel, promoteSessionOrder, samePath, selectableIds, topicLabel, ungroupedSessionIds, UNGROUPED_WORKSPACE_ID, workspaceSessionIds } from './model.js';
 import { createPanelStore } from './store.js';
 import { beginReorder, currentDrag, endDrag, readDragPayload, reorderVerdict, sessionReorderVerdict, writeReorderPayload } from './dnd.js';
 import { runSessionAction, mergeOutcomes, BATCH_LIMIT } from './batch.js';
@@ -30,6 +30,20 @@ import { shortcutHint } from './shortcut-hints.js';
  * stylesheet as `--dts-reveal-ms`, so the fade and the class removal share one clock.
  */
 const REVEAL_HIGHLIGHT_MS = 1600;
+
+/**
+ * The tree projection is only rendered when the panel is on screen. A rail-collapsed panel
+ * still keeps the composer chip mounted, and that chip only needs the open session — building
+ * the full 1500-row tree for one id on every session-list publish was pure main-thread cost.
+ */
+const EMPTY_TREE = Object.freeze({
+  groups: [],
+  search: '',
+  truncated: false,
+  matched: 0,
+  currentSessionId: null,
+  currentWorkspaceId: null,
+});
 
 /**
  * Mirrors a host snapshot store into React state.
@@ -141,8 +155,8 @@ export function OverlayPanel({ actions, schedules }) {
    * selection.
    */
   const [revealedTopic, setRevealedTopic] = React.useState(null);
-  /** Transient collapse focus while a workspace/topic is dragged; never persisted. */
-  const [dragFocus, setDragFocus] = React.useState(null);
+  /** Transient drag source while a workspace/topic is dragged; never persisted. */
+  const [dragging, setDragging] = React.useState(null);
   const tipRef = React.useRef(null);
   const pendingRef = React.useRef(null);
   /** Blank-session watcher: the first ready snapshot primes the set, so reloads never re-file. */
@@ -183,6 +197,7 @@ export function OverlayPanel({ actions, schedules }) {
     if (!onScreen && !composerSeated) return undefined;
     return store.subscribe(() => setState(store.getState()));
   }, [store, onScreen, composerSeated]);
+  React.useEffect(() => () => store.dispose?.(), [store]);
   React.useEffect(() => {
     // The catalog is read only once the panel is on screen; the store coalesces refreshes.
     // Suspending it releases the two host invalidations, so a hidden rail costs nothing.
@@ -213,9 +228,11 @@ export function OverlayPanel({ actions, schedules }) {
    * as "the session moved/disappeared" even though the log is intact, and removing the plugin
    * leaves it there. The host route re-attaches exactly those sessions through the official
    * `attachSession`, which re-validates the path and prepends (so the row leads its workspace,
-   * like a freshly started one). Runs once, silently, and only on the first on-screen pass.
+   * like a freshly started one). Runs once per on-screen pass, with a bounded retry when the
+   * host services are not mounted yet (`available:false` on a successful response is a
+   * boot-order answer, not "nothing to repair").
    */
-  const adoptedRef = React.useRef(false);
+  const adoptState = React.useRef({ done: false, attempts: 0, timer: null });
   /**
    * One shared reporter for both call sites (first paint and the manual reload): a moved row is
    * announced, and a refused one is surfaced too — the host refuses when the session directory
@@ -226,18 +243,45 @@ export function OverlayPanel({ actions, schedules }) {
     const moved = result.moved ?? result.adopted ?? [];
     if (moved.length > 0) {
       // The host's own list is what the tree is built from; re-read it so the rows move now.
-      try {
-        actions.refreshSessions();
-      } catch { /* optional */ }
+      // `refresh()` returns a Promise; `then` also turns a synchronous throw into a rejection
+      // this chain can swallow.
+      void Promise.resolve().then(() => actions.refreshSessions()).catch(() => { /* optional */ });
       flash(t('session.adopted', { n: moved.length }));
     }
     const failed = Array.isArray(result.failed) ? result.failed : [];
     if (failed.length > 0) flash(t('session.adoptRefused', { n: failed.length }), 'bad');
   }, [actions]);
   React.useEffect(() => {
-    if (!onScreen || adoptedRef.current) return;
-    adoptedRef.current = true;
-    store.adoptSessions().then(reportAdopt);
+    if (!onScreen) return undefined;
+    const state = adoptState.current;
+    if (state.done) return undefined;
+    let active = true;
+    const run = () => {
+      store.adoptSessions().then((result) => {
+        if (!active || state.done) return;
+        // A 500/network failure already carries `error`; retrying it would hammer a broken host.
+        // The boot race is a successful `available:false`, which is worth another look.
+        if (result?.available === false && !result.error && state.attempts < 3) {
+          const delay = 500 * 2 ** state.attempts;
+          state.attempts += 1;
+          state.timer = setTimeout(() => {
+            state.timer = null;
+            run();
+          }, delay);
+          return;
+        }
+        state.done = true;
+        reportAdopt(result);
+      });
+    };
+    if (state.timer === null) run();
+    return () => {
+      active = false;
+      if (state.timer !== null) {
+        clearTimeout(state.timer);
+        state.timer = null;
+      }
+    };
   }, [onScreen, reportAdopt, store]);
   React.useEffect(() => {
     if (!onScreen) return undefined;
@@ -333,22 +377,33 @@ export function OverlayPanel({ actions, schedules }) {
   const pinnedIds = workspaceSnapshot?.pinnedSessionIds ?? [];
 
   const options = React.useMemo(() => buildWorkspaceOptions({ items, list, archivedIds }), [items, list, archivedIds]);
+  /**
+   * `buildTree` is only useful when the visible branch will actually render it. In rail mode
+   * the panel returns `null` below, but the composer chip keeps the session subscription alive;
+   * without this gate every session-list publish rebuilt the whole tree (measured ~2.5–3.3 ms
+   * for 1500 sessions, more once empty workspaces are present) to throw the result away.
+   */
+  const treeEnabled = onScreen && state.ready && state.reachable;
   const tree = React.useMemo(
     () =>
-      buildTree({
-        items,
-        list,
-        statuses: sessionStatuses,
-        archivedIds,
-        pinnedIds,
-        topicsOf: store.topicsOf,
-        assignmentsOf: store.assignmentsOf,
-        prefs,
-        query: prefs.searchOpen ? prefs.search : '',
-        now: minuteNow,
-      }),
-    [items, list, sessionStatuses, archivedIds, pinnedIds, prefs, state.workspaces, store, language, minuteNow],
+      treeEnabled
+        ? buildTree({
+          items,
+          list,
+          statuses: sessionStatuses,
+          archivedIds,
+          pinnedIds,
+          topicsOf: store.topicsOf,
+          assignmentsOf: store.assignmentsOf,
+          prefs,
+          query: prefs.searchOpen ? prefs.search : '',
+          now: minuteNow,
+        })
+        : EMPTY_TREE,
+    [treeEnabled, items, list, sessionStatuses, archivedIds, pinnedIds, prefs, state.workspaces, store, language, minuteNow],
   );
+  /** The open session for the composer chip / delete hand-off; independent of the tree. */
+  const currentSessionId = tree.currentSessionId ?? mainSessionId(list) ?? null;
 
   /**
    * The rows the current selection can still act on.
@@ -366,6 +421,17 @@ export function OverlayPanel({ actions, schedules }) {
   );
   /** Ids of the selected rows that still exist in the tree — what a batch may be sent. */
   const liveSelection = React.useMemo(() => selectedRows.map((row) => row.id), [selectedRows]);
+  /**
+   * A hover card belongs to a row that may disappear while the pointer never leaves it:
+   * archiving, a search/filter that hides it, or the sidebar collapsing to the rail (the tree
+   * unmounts, so the row never fires `mouseleave`). Clear it when its row is no longer in the
+   * projection, otherwise an old card can reappear at a stale rect after the panel returns.
+   */
+  React.useEffect(() => {
+    if (!hint) return;
+    const present = onScreen && tree.groups.some((group) => group.sections.some((section) => section.rows.some((row) => row.id === hint.row.id)));
+    if (!present) setHint(null);
+  }, [hint, onScreen, tree]);
 
   // A filter pointing at a closed workspace or a deleted topic must not strand the panel —
   // but only once the workspace list has actually arrived, or the first empty snapshot would
@@ -400,9 +466,11 @@ export function OverlayPanel({ actions, schedules }) {
    * This used to file every implicit blank into the workspace's most recently *created* topic:
    * clicking 新会话 dropped the row into a group the user was not looking at (and, before new
    * topics led the list, often at the bottom of the workspace), while the stock list puts a new
-   * session first in its workspace. The default group is the
-   * first bucket of every workspace and the blank sorts first inside a bucket, so leaving the
-   * row unfiled reproduces the stock placement. Nothing is written to the sidecar for it.
+   * session first in its workspace. The blank sorts first inside the default bucket; a
+   * workspace without custom topics has that as its only bucket, and after topics are created
+   * the user's own order decides where the default bucket sits. Leaving the row unfiled keeps
+   * the stock "new session leads its bucket" feel without filing it into a folder the user did
+   * not choose. Nothing is written to the sidecar for it.
    *
    * The first ready snapshot primes the seen set, so a blank that already existed when the
    * panel mounted (a reload with an unsaved New Session) is never re-filed.
@@ -454,9 +522,8 @@ export function OverlayPanel({ actions, schedules }) {
       clearTimeout(timersRef.current.arm);
       timersRef.current.arm = null;
       auto.seen.add(target);
-      // `topicId: null` is the explicit "default group" choice: start the session, but keep
-      // the topic-filter auto-filing below out of it.
-      if (active.topicId === null) return;
+      // `topicId` is always a concrete group id (`tp_default` for the default group, not
+      // `null`); a stale id simply fails the lookup below and leaves the blank unfiled.
       const topic = (store.topicsOf(active.workspaceId) ?? []).find((entry) => entry.id === active.topicId);
       if (!topic) return;
       auto.busy.add(target);
@@ -472,7 +539,7 @@ export function OverlayPanel({ actions, schedules }) {
     const blanks = fresh.filter((id) => byId[id]?.blank && !byId[id]?.parentId && !auto.busy.has(id));
     for (const id of fresh) if (!byId[id]?.blank || byId[id]?.parentId) auto.seen.add(id);
     // Only an active topic filter gives the implicit path a target. Without one the blank stays
-    // unfiled, which is the default group (first bucket) — the stock list's placement.
+    // unfiled, which is the default group — the stock list's placement inside that bucket.
     const filteredWorkspace = prefs.topicFilter
       ? options.find((option) => (store.topicsOf(option.workspaceId) ?? []).some((entry) => entry.id === prefs.topicFilter)) ?? null
       : null;
@@ -598,6 +665,110 @@ export function OverlayPanel({ actions, schedules }) {
     return store.setPrefs(changes);
   };
 
+  /**
+   * The native list's activity promotion, applied to the order this panel persists.
+   *
+   * The tree renders a workspace's rows in `sessionIds` order, permuted by `sessionOrder`, and
+   * that account order only moves when a Session is *attached*. A Session that becomes active
+   * afterwards therefore kept its old slot: the blank the host reuses for 新会话 (it reuses, it
+   * does not re-attach), a Session whose first turn starts, one whose `attachSession` never
+   * landed. Each looked right only while `blank` floated it; the first turn cleared that flag and
+   * the row dropped to its account slot instead of the top of its group, which is exactly where
+   * the stock list keeps it (`nextSessionOrderAccount` promotes every Session whose `updatedAt`
+   * advanced).
+   *
+   * Writing the promoted order into `sessionOrder` — instead of recomputing it per render — is what
+   * makes it stick; `promoteSessionOrder` explains the rest. The first ready snapshot only primes
+   * the stamps, so a reload never reshuffles every workspace.
+   */
+  const promotedRef = React.useRef(null);
+  /**
+   * Commit gate for the promotion.
+   *
+   * Every commit is a new `prefs` object: the tree is rebuilt and the whole list reconciled.
+   * That is fine once per burst, but two sessions replying in parallel advance `updatedAt` on
+   * alternating messages, so the "most recent leads" order flips on every message — one extra
+   * full render (and one whole-prefs `localStorage` write) per message, forever.
+   *
+   * The gate keeps the leading edge (a single event, e.g. a blank's first turn, is committed
+   * immediately) and coalesces everything inside the window into one trailing commit carrying
+   * the latest order. A drag holds the gate closed — the rows are being aimed at, and the drag
+   * baseline must stay the order on screen — then releases it so the pending order lands.
+   */
+  const PROMOTION_COMMIT_MS = 250;
+  const promotionGate = React.useRef({ last: 0, timer: null, pending: null, paused: false });
+
+  const flushPromotion = React.useCallback(() => {
+    const gate = promotionGate.current;
+    if (gate.timer !== null) {
+      clearTimeout(gate.timer);
+      gate.timer = null;
+    }
+    const order = gate.pending;
+    gate.pending = null;
+    if (!order) return;
+    gate.last = Date.now();
+    store.setPrefs({ sessionOrder: order });
+  }, [store]);
+
+  const queuePromotion = React.useCallback((order) => {
+    const gate = promotionGate.current;
+    gate.pending = order;
+    if (gate.paused) return;
+    const wait = Math.max(0, gate.last + PROMOTION_COMMIT_MS - Date.now());
+    if (wait === 0) {
+      flushPromotion();
+      return;
+    }
+    if (gate.timer !== null) return;
+    gate.timer = setTimeout(() => {
+      gate.timer = null;
+      if (!promotionGate.current.paused) flushPromotion();
+    }, wait);
+  }, [flushPromotion]);
+
+  /** Drop a queued promotion without applying it; the next activity re-queues one. */
+  const discardPendingPromotion = React.useCallback(() => {
+    const gate = promotionGate.current;
+    if (gate.timer !== null) {
+      clearTimeout(gate.timer);
+      gate.timer = null;
+    }
+    gate.pending = null;
+  }, []);
+
+  /** A drag owns the displayed order: hold the gate, then land whatever was queued. */
+  const holdPromotion = React.useCallback(() => { promotionGate.current.paused = true; }, []);
+  const releasePromotion = React.useCallback(() => {
+    promotionGate.current.paused = false;
+    flushPromotion();
+  }, [flushPromotion]);
+
+  React.useEffect(() => () => {
+    const gate = promotionGate.current;
+    if (gate.timer !== null) clearTimeout(gate.timer);
+    gate.timer = null;
+  }, []);
+
+  React.useEffect(() => {
+    const byId = list.byId ?? {};
+    if (promotedRef.current === null) {
+      if (list.phase !== 'ready' && Object.keys(byId).length === 0) return;
+      promotedRef.current = promoteSessionOrder({ workspaces: items, byId }).updatedAt;
+      return;
+    }
+    const promoted = promoteSessionOrder({
+      workspaces: items,
+      byId,
+      previousUpdatedAt: promotedRef.current,
+      sessionOrder: prefs.sessionOrder,
+    });
+    promotedRef.current = promoted.updatedAt;
+    // `store` is the stable leaf, so this effect does not re-run on every render the way a
+    // dependency on the render-local `setPrefs` closure would.
+    if (promoted.changed) queuePromotion(promoted.sessionOrder);
+  }, [list, items, prefs.sessionOrder, store, queuePromotion]);
+
   /** Stable handlers need stable leaves too: these read the store, never the render closure. */
   const toggleWorkspaceCollapse = (key) => store.toggleInList('collapsedWorkspaces', key);
   const toggleTopicCollapse = (key) => store.toggleInList('collapsedTopics', key);
@@ -658,10 +829,13 @@ export function OverlayPanel({ actions, schedules }) {
   prefsRef.current = prefs;
   const reorder = React.useMemo(() => ({
     hint: dropHint,
-    focus: dragFocus,
+    dragging,
     onStart: (level, payload, event) => {
       beginReorder({ level, ...payload });
-      setDragFocus({ level, id: payload.id, workspaceId: payload.workspaceId });
+      // The rows are being aimed at: a promotion landing mid-drag would shuffle them under
+      // the pointer. Held here, released (and flushed) by `onEnd`.
+      holdPromotion();
+      setDragging({ level, id: payload.id, workspaceId: payload.workspaceId });
       writeReorderPayload(event.dataTransfer, { level, ...payload });
       event.dataTransfer.effectAllowed = 'move';
     },
@@ -695,7 +869,7 @@ export function OverlayPanel({ actions, schedules }) {
       const drag = currentDrag();
       const verdict = reorderVerdict(drag, { level, ...target });
       setDropHint(null);
-      setDragFocus(null);
+      setDragging(null);
       if (!verdict.ok) return;
       event.preventDefault();
       event.stopPropagation();
@@ -720,9 +894,10 @@ export function OverlayPanel({ actions, schedules }) {
     onEnd: () => {
       endDrag();
       setDropHint(null);
-      setDragFocus(null);
+      setDragging(null);
+      releasePromotion();
     },
-  }), [dropHint, dragFocus, store]);
+  }), [dropHint, dragging, store, holdPromotion, releasePromotion]);
 
   /**
    * Collapsed sidebar (the rail). The host keeps its own 新建会话 / 添加工作区 / 搜索会话
@@ -982,6 +1157,9 @@ export function OverlayPanel({ actions, schedules }) {
       allSessionIdsInWorkspace(row.workspaceId),
       prefs.sessionOrder?.[row.workspaceId] ?? [],
     );
+    // A dropped order is the user's explicit ranking: a promotion queued before the drag must
+    // not flush afterwards and overwrite it (its session will be promoted on its next tick).
+    discardPendingPromotion();
     setPrefs({ sessionOrder: { ...(prefs.sessionOrder ?? {}), [row.workspaceId]: moveWithin(ids, dropped[0], row.id, position) } });
   };
 
@@ -1283,9 +1461,7 @@ export function OverlayPanel({ actions, schedules }) {
         // The manual refresh is also where a user retries the membership repair after moving a
         // directory back into place, so it is not limited to the once-per-page-load call.
         store.adoptSessions().then(reportAdopt);
-        try {
-          actions.refreshSessions();
-        } catch { /* optional */ }
+        void Promise.resolve().then(() => actions.refreshSessions()).catch(() => { /* optional */ });
       }}
     >
       {t('menu.reload')}
@@ -1369,7 +1545,7 @@ export function OverlayPanel({ actions, schedules }) {
    * the user file it (or move it out) without leaving the input. Rendered into the seat the
    * composer module keeps right after the native workspace picker.
    */
-  const composerSessionId = tree.currentSessionId ?? null;
+  const composerSessionId = currentSessionId;
   const composerSession = composerSessionId ? (list.byId ?? {})[composerSessionId] ?? null : null;
   /**
    * The composer's picker exposes a *title*, never an id, and titles are not unique (two
@@ -1464,15 +1640,191 @@ export function OverlayPanel({ actions, schedules }) {
   ) : null;
 
   /**
-   * A hidden panel owns only the composer chip. That seat lives in the host composer, so it
-   * must outlive a collision with the rail; the tree, dialogs and hover cards all belong to
-   * the covered region and stay unmounted.
+   * Floating surfaces do not belong to the covered region.
+   *
+   * A dialog or toast must survive the sidebar collapsing to the rail — and the composer chip
+   * can open the create dialog while the panel is hidden, where the visible branch (the only
+   * one that used to render it) is not mounted at all. Both are position:fixed, so rendering
+   * them outside `.dts-overlay` keeps them on screen in either state; the toast is also the
+   * only feedback a rail-side chip write has.
+   */
+  const floatingSurfaces = (
+    <>
+      {dialog?.type === 'create' ? (
+        <CreateTopicDialog
+          emojis={state.emojis}
+          workspaces={options}
+          workspaceId={dialog.workspaceId}
+          rowsFor={(workspaceId) => attachableRowsInWorkspace(workspaceId)}
+          topicsFor={topicsWithCounts}
+          onClose={() => setDialog(null)}
+          onSubmit={async (input) => {
+            const created = await store.createTopic(input);
+            flash(`✓ ${created.result.topic.name}`);
+            if (dialog.thenStartSession) startSessionUnderTopic(input.workspaceId, created.result.topic.id);
+            if (dialog.reveal) revealTopic(input.workspaceId, created.result.topic.id);
+            // The composer bar follows the open session, so a group created from the chip has to
+            // end with that session filed into it — otherwise the bar keeps naming the old one.
+            const target = dialog.composerSession;
+            if (target?.sessionId) {
+              if (target.workspaceId === input.workspaceId) {
+                try {
+                  await store.assign({ workspaceId: input.workspaceId, sessionIds: [target.sessionId], topicId: created.result.topic.id });
+                } catch (error) {
+                  // The group exists either way: a failed re-file is reported on its own instead
+                  // of leaving the dialog open as if the create had failed.
+                  flash(error?.message ?? String(error), 'bad');
+                }
+              } else {
+                // The chip is bound to one session in a known workspace; a group created in
+                // another one cannot own it (the panel refuses cross-workspace filing
+                // everywhere). Saying so beats a chip that silently keeps its old label.
+                flash(t('session.composerNotFiled'), 'bad');
+              }
+            }
+          }}
+        />
+      ) : null}
+
+      {dialog?.type === 'edit' ? (
+        <EditTopicDialog
+          topic={dialog.topic}
+          workspaceId={dialog.workspaceId}
+          topicsFor={topicsWithCounts}
+          emojis={state.emojis}
+          onClose={() => setDialog(null)}
+          onSubmit={async (input) => {
+            await store.updateTopic({ workspaceId: dialog.workspaceId, topicId: dialog.topic.id, ...input });
+          }}
+          onDelete={(topic) => setDialog({ type: 'deleteTopic', topic, workspaceId: dialog.workspaceId, count: topicSessionCount(dialog.workspaceId, topic.id) })}
+        />
+      ) : null}
+
+      {dialog?.type === 'deleteTopic' ? (
+        <DeleteTopicDialog
+          topic={dialog.topic}
+          count={dialog.count}
+          onClose={() => setDialog(null)}
+          onConfirm={async () => {
+            await store.deleteTopic({ workspaceId: dialog.workspaceId, topicId: dialog.topic.id });
+            if (prefs.topicFilter === dialog.topic.id) pickTopic(null);
+          }}
+        />
+      ) : null}
+
+      {dialog?.type === 'move' ? (
+        <MoveToTopicDialog
+          count={dialog.ids.length}
+          ids={dialog.ids}
+          workspaceId={dialog.workspaceId}
+          topicsFor={topicsWithCounts}
+          emojis={state.emojis}
+          topics={topicsWithCounts(dialog.workspaceId)}
+          onClose={() => setDialog(null)}
+          onMove={async (topicId) => {
+            const result = await store.assign({ workspaceId: dialog.workspaceId, sessionIds: dialog.ids, topicId });
+            flash(`✓ ${result.result.changed}`);
+          }}
+          onCreate={async (input) => {
+            const created = await store.createTopic({ workspaceId: dialog.workspaceId, ...input });
+            return created.result.topic;
+          }}
+        />
+      ) : null}
+
+      {dialog?.type === 'renameSession' ? (
+        <RenameSessionDialog
+          row={dialog.row}
+          onClose={() => setDialog(null)}
+          onSubmit={async (title) => {
+            await actions.renameSession(dialog.row.id, title);
+            flash(t('session.renamed', { name: title }));
+          }}
+        />
+      ) : null}
+
+      {dialog?.type === 'renameWorkspace' ? (
+        <RenameWorkspaceDialog
+          workspace={dialog.group}
+          workspaces={options}
+          onClose={() => setDialog(null)}
+          onSubmit={async (title) => {
+            await actions.renameWorkspace(dialog.group.workspaceId, title);
+            flash(t('workspace.renamed', { name: title }));
+          }}
+        />
+      ) : null}
+
+      {dialog?.type === 'deleteWorkspace' ? (
+        <DeleteWorkspaceDialog
+          workspace={dialog.group}
+          onClose={() => setDialog(null)}
+          onConfirm={async () => {
+            await actions.deleteWorkspace(dialog.group.workspaceId);
+            flash(t('workspace.deleted', { name: dialog.group.title }));
+          }}
+        />
+      ) : null}
+
+      {dialog?.type === 'delete' ? (
+        <DeleteSessionsDialog
+          ids={dialog.ids}
+          titles={titles}
+          onClose={() => {
+            setDialog(null);
+            store.clearSelection();
+            setPrefs({ selectMode: false });
+            store.load();
+          }}
+          onDone={async (result) => {
+            store.load();
+            // Deleting rewrites session artifacts behind the host's back, so its session list
+            // does not emit on its own — re-read it or the row lingers until a manual F5.
+            try {
+              await actions.refreshSessions();
+            } catch { /* optional */ }
+            // Keep the shell off a conversation whose log no longer exists.
+            // `partial` means the session's own artifact is already gone (only some children
+            // survived), so the shell must be moved off it exactly like a clean delete.
+            if ((result?.items ?? []).some((item) => (item.status === 'deleted' || item.status === 'partial') && item.sessionId === currentSessionId)) {
+              try {
+                actions.startSession();
+              } catch { /* the host may already have moved */ }
+            }
+          }}
+        />
+      ) : null}
+
+      {outcome ? (
+        <BatchResultDialog
+          outcome={{ ...outcome, titles }}
+          busy={progress !== null}
+          progress={progress}
+          onClose={() => {
+            setOutcome(null);
+            store.clearSelection();
+            setPrefs({ selectMode: false });
+          }}
+          onRetryFailed={() => runBatch(outcome.action, outcome.failed.map((entry) => entry.id))}
+          onStopRunning={() => runBatch(outcome.action, outcome.needsStop, { stopActivity: true })}
+        />
+      ) : null}
+
+      {toast ? <div className={cx('dts-toast', `is-${toast.tone}`)}>{toast.message}</div> : null}
+    </>
+  );
+
+  /**
+   * A hidden panel owns only the composer chip (and whatever floating surface it opened).
+   * That seat lives in the host composer, so it must outlive a collision with the rail; the
+   * tree, menus and hover cards all belong to the covered region and stay unmounted.
    */
   if (!geom.visible) {
     return (
       <>
         {composerChip}
         {composerPopover}
+        {floatingSurfaces}
       </>
     );
   }
@@ -1552,11 +1904,10 @@ export function OverlayPanel({ actions, schedules }) {
             onAddTopic={(workspaceId, extra) => setDialog({ type: 'create', workspaceId: workspaceId ?? null, ...extra })}
             onAddWorkspace={addWorkspace}
             onCreateSession={(workspaceId, topicId) => {
-              // `null` means the user explicitly picked 默认分组 — still arm the claim so the
-              // newest-topic auto-file does not move the blank out of it.
+              // `topicId` is the chosen group id (`tp_default` for the default group); arm the
+              // claim so the newest-topic auto-file does not move the blank out of it.
               startSessionUnderTopic(workspaceId, topicId);
             }}
-            onNewSession={newSession}
             onOpenHeaderMenu={(anchor) => handleMenu({ type: 'header', anchor })}
           />
         )}
@@ -1621,162 +1972,7 @@ export function OverlayPanel({ actions, schedules }) {
         </Popover>
       ) : null}
 
-      {dialog?.type === 'create' ? (
-        <CreateTopicDialog
-          emojis={state.emojis}
-          workspaces={options}
-          workspaceId={dialog.workspaceId}
-          rowsFor={(workspaceId) => attachableRowsInWorkspace(workspaceId)}
-          topicsFor={topicsWithCounts}
-          onClose={() => setDialog(null)}
-          onSubmit={async (input) => {
-            const created = await store.createTopic(input);
-            flash(`✓ ${created.result.topic.name}`);
-            if (dialog.thenStartSession) startSessionUnderTopic(input.workspaceId, created.result.topic.id);
-            if (dialog.reveal) revealTopic(input.workspaceId, created.result.topic.id);
-            // The composer bar follows the open session, so a group created from the chip has to
-            // end with that session filed into it — otherwise the bar keeps naming the old one.
-            const target = dialog.composerSession;
-            if (target?.sessionId) {
-              if (target.workspaceId === input.workspaceId) {
-                try {
-                  await store.assign({ workspaceId: input.workspaceId, sessionIds: [target.sessionId], topicId: created.result.topic.id });
-                } catch (error) {
-                  // The group exists either way: a failed re-file is reported on its own instead
-                  // of leaving the dialog open as if the create had failed.
-                  flash(error?.message ?? String(error), 'bad');
-                }
-              } else {
-                // The chip is bound to one session in a known workspace; a group created in
-                // another one cannot own it (the panel refuses cross-workspace filing
-                // everywhere). Saying so beats a chip that silently keeps its old label.
-                flash(t('session.composerNotFiled'), 'bad');
-              }
-            }
-          }}
-        />
-      ) : null}
-
-      {dialog?.type === 'edit' ? (
-        <EditTopicDialog
-          topic={dialog.topic}
-          workspaceId={dialog.workspaceId}
-          topicsFor={topicsWithCounts}
-          emojis={state.emojis}
-          onClose={() => setDialog(null)}
-          onSubmit={async (input) => {
-            await store.updateTopic({ workspaceId: dialog.workspaceId, topicId: dialog.topic.id, ...input });
-          }}
-          onDelete={(topic) => setDialog({ type: 'deleteTopic', topic, workspaceId: dialog.workspaceId, count: topicSessionCount(dialog.workspaceId, topic.id) })}
-        />
-      ) : null}
-
-      {dialog?.type === 'deleteTopic' ? (
-        <DeleteTopicDialog
-          topic={dialog.topic}
-          count={dialog.count}
-          onClose={() => setDialog(null)}
-          onConfirm={async () => {
-            await store.deleteTopic({ workspaceId: dialog.workspaceId, topicId: dialog.topic.id });
-            if (prefs.topicFilter === dialog.topic.id) pickTopic(null);
-          }}
-        />
-      ) : null}
-
-      {dialog?.type === 'move' ? (
-        <MoveToTopicDialog
-          count={dialog.ids.length}
-          emojis={state.emojis}
-          topics={topicsWithCounts(dialog.workspaceId)}
-          onClose={() => setDialog(null)}
-          onMove={async (topicId) => {
-            const result = await store.assign({ workspaceId: dialog.workspaceId, sessionIds: dialog.ids, topicId });
-            flash(`✓ ${result.result.changed}`);
-          }}
-          onCreate={async (input) => {
-            const created = await store.createTopic({ workspaceId: dialog.workspaceId, ...input });
-            return created.result.topic;
-          }}
-        />
-      ) : null}
-
-      {dialog?.type === 'renameSession' ? (
-        <RenameSessionDialog
-          row={dialog.row}
-          onClose={() => setDialog(null)}
-          onSubmit={async (title) => {
-            await actions.renameSession(dialog.row.id, title);
-            flash(t('session.renamed', { name: title }));
-          }}
-        />
-      ) : null}
-
-      {dialog?.type === 'renameWorkspace' ? (
-        <RenameWorkspaceDialog
-          workspace={dialog.group}
-          workspaces={options}
-          onClose={() => setDialog(null)}
-          onSubmit={async (title) => {
-            await actions.renameWorkspace(dialog.group.workspaceId, title);
-            flash(t('workspace.renamed', { name: title }));
-          }}
-        />
-      ) : null}
-
-      {dialog?.type === 'deleteWorkspace' ? (
-        <DeleteWorkspaceDialog
-          workspace={dialog.group}
-          onClose={() => setDialog(null)}
-          onConfirm={async () => {
-            await actions.deleteWorkspace(dialog.group.workspaceId);
-            flash(t('workspace.deleted', { name: dialog.group.title }));
-          }}
-        />
-      ) : null}
-
-      {dialog?.type === 'delete' ? (
-        <DeleteSessionsDialog
-          ids={dialog.ids}
-          titles={titles}
-          onClose={() => {
-            setDialog(null);
-            store.clearSelection();
-            setPrefs({ selectMode: false });
-            store.load();
-          }}
-          onDone={async (result) => {
-            store.load();
-            // Deleting rewrites session artifacts behind the host's back, so its session list
-            // does not emit on its own — re-read it or the row lingers until a manual F5.
-            try {
-              await actions.refreshSessions();
-            } catch { /* optional */ }
-            // Keep the shell off a conversation whose log no longer exists.
-            // `partial` means the session's own artifact is already gone (only some children
-            // survived), so the shell must be moved off it exactly like a clean delete.
-            if ((result?.items ?? []).some((item) => (item.status === 'deleted' || item.status === 'partial') && item.sessionId === tree.currentSessionId)) {
-              try {
-                actions.startSession();
-              } catch { /* the host may already have moved */ }
-            }
-          }}
-        />
-      ) : null}
-
-      {outcome ? (
-        <BatchResultDialog
-          outcome={{ ...outcome, titles }}
-          busy={progress !== null}
-          progress={progress}
-          onClose={() => {
-            setOutcome(null);
-            store.clearSelection();
-            setPrefs({ selectMode: false });
-          }}
-          onRetryFailed={() => runBatch(outcome.action, outcome.failed.map((entry) => entry.id))}
-          onStopRunning={() => runBatch(outcome.action, outcome.needsStop, { stopActivity: true })}
-        />
-      ) : null}
+      {floatingSurfaces}
 
       {composerChip}
       {composerPopover}
@@ -1829,7 +2025,6 @@ export function OverlayPanel({ actions, schedules }) {
           )}
         </div>
       ) : null}
-      {toast ? <div className={cx('dts-toast', `is-${toast.tone}`)}>{toast.message}</div> : null}
       {state.busy ? <div className="dts-busy" aria-live="polite">{t('state.loading')}</div> : null}
     </div>
   );

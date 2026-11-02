@@ -293,3 +293,17 @@ test('a session filed into another workspace is refused, a matching one is not',
     assert.equal(unknown.status, 200, 'a session the host has not accounted yet is exactly the case this must not block');
   });
 });
+
+test('a registry that cannot be read skips the membership guard instead of failing the write', async () => {
+  await withHome(async (home) => {
+    const services = {
+      // Exactly what `WorkspaceRegistry.list()` does before `[Service.init]` completes.
+      workspaceRegistry: { list() { throw new Error('workspace registry is not started yet'); } },
+      sessionPersistence: { list: async () => [] },
+    };
+    const { find } = await boot({ home, services });
+    const result = await call(find(`${API}/assign`), fakeRequest({ body: { workspaceId: 'ws_a', sessionIds: ['ses_a'], topicId: null, expectedRevision: 0 } }));
+    assert.equal(result.status, 200, 'the guard is best-effort: an unreadable registry must not 500');
+    assert.equal(result.json.ok, true);
+  });
+});

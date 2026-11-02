@@ -344,9 +344,19 @@ html[data-platform='darwin'] [data-dts-covered] {
    A 1fr → 0fr grid row animates the body's natural height without measuring it in JS; the
    inner box clips while it shrinks, and visibility switches only after the row has closed. */
 .dts-collapse {
+  --dts-collapse-ms: 0.2s;
   display: grid;
   grid-template-rows: 1fr;
-  transition: grid-template-rows 0.2s var(--ds-ease-in-out, ease-in-out);
+  transition: grid-template-rows var(--dts-collapse-ms) var(--ds-ease-in-out, ease-in-out);
+  transition-delay: var(--dts-collapse-delay, 0ms);
+}
+
+/* The drag focus fold is the same mechanism, paced to land softly: a longer symmetric curve
+   and a per-row delay written inline by `Collapse`, so the list folds outwards from the
+   pointer as a wave instead of snapping shut in one block. */
+.dts-collapse.is-focusing {
+  --dts-collapse-ms: 0.3s;
+  transition-timing-function: cubic-bezier(0.45, 0, 0.55, 1);
 }
 
 .dts-collapse__inner {
@@ -360,9 +370,10 @@ html[data-platform='darwin'] [data-dts-covered] {
   grid-template-rows: 0fr;
 }
 
+/* Hide the clipped body only once the row has actually finished closing. */
 .dts-collapse.is-collapsed > .dts-collapse__inner {
   visibility: hidden;
-  transition: visibility 0s 0.2s;
+  transition: visibility 0s calc(var(--dts-collapse-ms) + var(--dts-collapse-delay, 0ms));
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -375,10 +386,16 @@ html[data-platform='darwin'] [data-dts-covered] {
 }
 
 /* A topic drag grows the insert-after zone under the last group: its lower half plus this
-   strip, so appending is not a 14px target on the last header. */
+   strip, so appending is not a 14px target on the last header. It grows in instead of
+   appearing at full height, which would shove the rows below it by 28px in one frame. */
 .dts-drop-tail {
   flex: 0 0 auto;
   height: 28px;
+  animation: dts-drop-tail-in 140ms ease-out;
+}
+
+@keyframes dts-drop-tail-in {
+  from { height: 0; }
 }
 
 .dts-section--archived {
@@ -518,7 +535,9 @@ html[data-platform='darwin'] [data-dts-covered] {
   will-change: transform;
 }
 
-/* Drop position for row reordering: a hairline where the row would land. */
+/* Drop position for row reordering: a hairline where the row would land. It fades in from a
+   slightly narrower line so moving between targets reads as the marker travelling, not as a
+   hard cut between two rows. */
 .dts-row.is-dropbefore::before,
 .dts-row.is-dropafter::after {
   content: '';
@@ -530,6 +549,14 @@ html[data-platform='darwin'] [data-dts-covered] {
   background: var(--dsw-alias-state-business-primary, #4176e6);
   pointer-events: none;
   z-index: 2;
+  animation: dts-drop-mark-in 140ms ease-out;
+}
+
+@keyframes dts-drop-mark-in {
+  from {
+    opacity: 0;
+    transform: scaleX(0.88);
+  }
 }
 
 .dts-row.is-dropbefore::before { top: -1px; }
@@ -1767,8 +1794,33 @@ html[data-platform='darwin'] [data-dts-covered] {
 }
 
 /* ---------- drag & drop, inline rename, progressive reveal ---------- */
-.dts-row[data-dragging='true'] {
+/* The row the pointer picked up stays in the list (the browser's drag image travels with the
+   cursor) but reads as lifted out of it. The transition lives on the resting rule: putting it
+   on `[data-dragging]` would drop the transition together with the attribute and the row
+   would pop back to full opacity instead of fading in. */
+.dts-row,
+.dts-section,
+.dts-group {
+  transition: opacity 120ms ease-out;
+}
+
+.dts-row[data-dragging='true'],
+.dts-section[data-dragging='true'],
+.dts-group[data-dragging='true'] {
   opacity: 0.45;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dts-row,
+  .dts-section,
+  .dts-group {
+    transition: none;
+  }
+  .dts-row.is-dropbefore::before,
+  .dts-row.is-dropafter::after,
+  .dts-drop-tail {
+    animation: none;
+  }
 }
 
 .dts-row--topic.is-drop-ok {

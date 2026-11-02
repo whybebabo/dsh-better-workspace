@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTree, buildWorkspaceOptions, mainSessionId, basename, samePath, moveWithin, orderByManual, ungroupedSessionIds, workspaceSessionIds, DEFAULT_TOPIC_ID, UNGROUPED_WORKSPACE_ID } from '../client/model.js';
+import { buildTree, buildWorkspaceOptions, mainSessionId, basename, samePath, moveWithin, orderByManual, promoteSessionOrder, ungroupedSessionIds, workspaceSessionIds, DEFAULT_TOPIC_ID, UNGROUPED_WORKSPACE_ID } from '../client/model.js';
 
 const WS_A = 'ws_a';
 const WS_B = 'ws_b';
@@ -405,6 +405,19 @@ test('the drag baseline includes cwd-matched stragglers by recency and never sub
   assert.deepEqual(strays, ['ses_loose'], 'a session no workspace accounts for belongs to 未分组');
 });
 
+test('a provided path index is authoritative; a missing key does not rescan every session', () => {
+  const byId = {
+    ses_for_empty: { id: 'ses_for_empty', displayTitle: '在空工作区里', cwd: 'D:/work/empty', updatedAt: 10 },
+  };
+  const workspace = { workspaceId: 'ws_empty', path: 'D:/work/empty', sessionIds: [] };
+  assert.deepEqual(
+    workspaceSessionIds({ workspace, byId, pathIndex: new Map() }),
+    [],
+    'an index that has no key means no straggler, not a full scan',
+  );
+  assert.deepEqual(workspaceSessionIds({ workspace, byId }), ['ses_for_empty'], 'without an index the fallback still finds it');
+});
+
 test('a session created after a drag keeps its host position instead of sinking to the bottom', () => {
   // `attachSession` prepends, so a brand-new session is first in the workspace's own order.
   const created = { id: 'ses_new', displayTitle: '刚建的会话', cwd: 'D:/work/alpha', updatedAt: 999 };
@@ -427,6 +440,96 @@ test('a session created after a drag keeps its host position instead of sinking 
   const rows = flatten(built.groups.find((group) => group.workspaceId === WS_A));
   assert.equal(rows[0], 'ses_new', 'the unnamed new session keeps the front slot the host gave it');
   assert.deepEqual(rows.slice(1), ['ses_2', 'ses_3', 'ses_1'], 'and the named ids still permute among themselves');
+});
+
+/** The tree inputs a promotion test needs: one workspace item plus its session map. */
+function promotionFixture(sessionIds, byId) {
+  const items = [{ workspaceId: WS_A, path: 'D:/work/alpha', title: 'Alpha', sessionIds, createdAt: 1, updatedAt: 10 }];
+  return { items, byId };
+}
+
+const treeOf = (items, byId, sessionOrder, current) => buildTree({
+  items,
+  list: { ids: Object.keys(byId), byId, current, phase: 'ready' },
+  archivedIds: [],
+  pinnedIds: [],
+  topicsOf: () => [],
+  assignmentsOf: () => ({}),
+  prefs: { sessionOrder },
+  query: '',
+});
+
+test('a blank the host reuses for 新会话 leads its group once the first turn starts', () => {
+  // The host does not mint a new id when the workspace already owns a blank — `connectWorkspace`
+  // reuses it — so the row is first only while `blank` floats it, and its account slot is third.
+  const base = {
+    ses_1: { id: 'ses_1', cwd: 'D:/work/alpha', updatedAt: 100 },
+    ses_2: { id: 'ses_2', cwd: 'D:/work/alpha', updatedAt: 200 },
+    ses_blank: { id: 'ses_blank', cwd: 'D:/work/alpha', updatedAt: 150, blank: true },
+  };
+  const { items, byId } = promotionFixture(['ses_1', 'ses_2', 'ses_blank'], base);
+  const primed = promoteSessionOrder({ workspaces: items, byId });
+  assert.equal(primed.changed, false, 'a page load primes the stamps instead of reshuffling every workspace');
+
+  const typed = { ...base, ses_blank: { ...base.ses_blank, blank: false, updatedAt: 900 } };
+  const promoted = promoteSessionOrder({ workspaces: items, byId: typed, previousUpdatedAt: primed.updatedAt, sessionOrder: primed.sessionOrder });
+  assert.equal(promoted.changed, true, 'the first turn is an activity change');
+  assert.deepEqual(promoted.sessionOrder[WS_A], ['ses_blank', 'ses_1', 'ses_2'], 'the session that just started leads');
+
+  const built = treeOf(items, typed, promoted.sessionOrder, 'ses_blank');
+  assert.deepEqual(flatten(built.groups[0]), ['ses_blank', 'ses_1', 'ses_2'], 'the row renders on top, not at its old account slot');
+
+  // Promotion has to survive the next build: recomputing it from the account order every time was
+  // exactly the bug (the row came back down one render later).
+  const again = promoteSessionOrder({ workspaces: items, byId: typed, previousUpdatedAt: promoted.updatedAt, sessionOrder: promoted.sessionOrder });
+  assert.equal(again.changed, false);
+  assert.deepEqual(again.sessionOrder[WS_A], ['ses_blank', 'ses_1', 'ses_2']);
+  assert.deepEqual(flatten(treeOf(items, typed, again.sessionOrder, 'ses_blank').groups[0]), ['ses_blank', 'ses_1', 'ses_2']);
+});
+
+test('a session the workspace has not accounted for yet is promoted when it appears', () => {
+  const base = {
+    ses_1: { id: 'ses_1', cwd: 'D:/work/alpha', updatedAt: 100 },
+    ses_2: { id: 'ses_2', cwd: 'D:/work/alpha', updatedAt: 200 },
+  };
+  const { items } = promotionFixture(['ses_1', 'ses_2'], base);
+  const primed = promoteSessionOrder({ workspaces: items, byId: base });
+  const fresh = { ...base, ses_new: { id: 'ses_new', cwd: 'D:/work/alpha', updatedAt: 900 } };
+  const promoted = promoteSessionOrder({ workspaces: items, byId: fresh, previousUpdatedAt: primed.updatedAt, sessionOrder: primed.sessionOrder });
+  assert.deepEqual(promoted.sessionOrder[WS_A], ['ses_new', 'ses_1', 'ses_2'], 'a newcomer leads even before `attachSession` lands');
+
+  // While the account still lacks it, the tree appends stragglers last; the promoted order is what
+  // keeps the row on top through that window.
+  const built = treeOf(items, fresh, promoted.sessionOrder, 'ses_new');
+  assert.deepEqual(flatten(built.groups[0]), ['ses_new', 'ses_1', 'ses_2']);
+});
+
+test('promotion moves the touched row and keeps the rest of a dragged order', () => {
+  const base = {
+    ses_1: { id: 'ses_1', cwd: 'D:/work/alpha', updatedAt: 300 },
+    ses_2: { id: 'ses_2', cwd: 'D:/work/alpha', updatedAt: 100 },
+    ses_3: { id: 'ses_3', cwd: 'D:/work/alpha', updatedAt: 200 },
+  };
+  const { items } = promotionFixture(['ses_2', 'ses_1', 'ses_3'], base);
+  const primed = promoteSessionOrder({ workspaces: items, byId: base });
+  const dragged = { [WS_A]: ['ses_3', 'ses_2', 'ses_1'] };
+  const touched = { ...base, ses_1: { ...base.ses_1, updatedAt: 400 } };
+  const promoted = promoteSessionOrder({ workspaces: items, byId: touched, previousUpdatedAt: primed.updatedAt, sessionOrder: dragged });
+  assert.deepEqual(promoted.sessionOrder[WS_A], ['ses_1', 'ses_3', 'ses_2'], 'only the touched row jumps; the drag survives');
+});
+
+test('a workspace with no activity keeps the order it had, including no order at all', () => {
+  const base = {
+    ses_1: { id: 'ses_1', cwd: 'D:/work/alpha', updatedAt: 100 },
+    ses_2: { id: 'ses_2', cwd: 'D:/work/alpha', updatedAt: 200 },
+  };
+  const { items } = promotionFixture(['ses_1', 'ses_2'], base);
+  const primed = promoteSessionOrder({ workspaces: items, byId: base });
+  assert.deepEqual(primed.sessionOrder, {}, 'priming writes nothing');
+  const idle = promoteSessionOrder({ workspaces: items, byId: base, previousUpdatedAt: primed.updatedAt });
+  assert.equal(idle.changed, false);
+  assert.equal(idle.sessionOrder[WS_A], undefined, 'an untouched workspace keeps following the host order');
+  assert.equal(primed.updatedAt.get('ses_2'), 200, 'the stamps cover every session, not only the moved ones');
 });
 
 test('workspace options carry live and archived counts', () => {

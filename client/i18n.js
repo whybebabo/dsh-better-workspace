@@ -86,7 +86,6 @@ const zh = {
   'topic.moveHere': '新建分组并放入…',
   'topic.newSession': '在此分组下新建会话',
   'topic.newSessionAria': '在「{name}」下新建会话',
-  'topic.renameHint': '双击分组名可直接改名',
 
   'session.moveToTopic': '移动到分组…',
   'session.archive': '归档会话',
@@ -180,6 +179,7 @@ const zh = {
   'delete.resultsPartial': '部分完成:{n} 个会话已删除,但子智能体未能全部清理。',
   'delete.subagentCount': '{n} 个子智能体',
   'delete.cleanupFailed': '主题归属清理失败:{error}',
+  'delete.recheck': '重新检查',
 
   'result.title': '批量操作结果',
   'result.ok': '成功 {n}',
@@ -295,7 +295,6 @@ const en = {
   'topic.moveHere': 'Create a topic and move there…',
   'topic.newSession': 'New session in this topic',
   'topic.newSessionAria': 'New session in “{name}”',
-  'topic.renameHint': 'Double-click a topic name to rename it',
 
   'session.moveToTopic': 'Move to topic…',
   'session.archive': 'Archive session',
@@ -389,6 +388,7 @@ const en = {
   'delete.resultsPartial': 'Partially completed: {n} session(s) were deleted, but some subagents could not be cleaned up.',
   'delete.subagentCount': '{n} subagents',
   'delete.cleanupFailed': 'Topic assignment cleanup failed: {error}',
+  'delete.recheck': 'Check again',
 
   'result.title': 'Bulk action results',
   'result.ok': '{n} done',

@@ -175,6 +175,9 @@ export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
         {outcome.assignmentCleanup?.failed ? (
           <p className="dts-error">{t('delete.cleanupFailed', { error: outcome.assignmentCleanup.error })}</p>
         ) : null}
+        {/* A retry runs from this phase. Without this line its failure only re-enabled the
+            button, so the user saw no reason why the same items were still there. */}
+        {error ? <p className="dts-error">{error}</p> : null}
         <ItemList entries={entries} emptyText={t('result.none')} />
       </Dialog>
     );
@@ -188,6 +191,9 @@ export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
       footer={
         <>
           {phase === 'failed' ? <Button onClick={load} disabled={busy}>{t('menu.reload')}</Button> : null}
+          {phase === 'ready' && blocked.length > 0 ? (
+            <Button onClick={load} disabled={busy}>{t('delete.recheck')}</Button>
+          ) : null}
           <span className="dts-spacer" />
           <Button onClick={close} disabled={busy}>
             {t('action.cancel')}

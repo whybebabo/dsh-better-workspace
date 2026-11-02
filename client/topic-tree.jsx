@@ -10,6 +10,7 @@ import * as React from 'react';
 import { cx, Icon, IconButton, Checkbox, IconCaret, IconFolderOpen, IconFolderClose, StateMark, TopicMark } from './widgets.jsx';
 import { SessionRow } from './session-row.jsx';
 import { beginDrag, currentDrag, endDrag, evaluateDrop, readDragPayload, writeDragPayload } from './dnd.js';
+import { RowMotion } from './row-motion.jsx';
 import { pendingStatusLabel, REVEAL_LIMIT, selectableIds } from './model.js';
 import { t } from './i18n.js';
 
@@ -45,18 +46,36 @@ function sectionStatusLabel(section) {
  * `inert` keep the collapsed content out of the accessibility tree for the moment it is there.
  */
 const COLLAPSE_MS = 220; // matches the 0.2s grid-row transition in styles.css
+/** The drag focus fold is slower and staggered; the timer has to outlive both. */
+const FOCUS_COLLAPSE_MS = 340; // matches the 0.3s transition in styles.css plus a frame
+/** A fold that starts at the pointer and travels outwards, so the list settles as a wave. */
+const FOCUS_STAGGER_BASE_MS = 40;
+const FOCUS_STAGGER_STEP_MS = 20;
+const FOCUS_STAGGER_STEPS = 4;
 
-function Collapse({ open, children }) {
+/** Milliseconds a focus fold waits before it starts: the pointer's own row folds first. */
+function focusDelay(distance) {
+  if (!Number.isFinite(distance) || distance < 0) return FOCUS_STAGGER_BASE_MS;
+  return FOCUS_STAGGER_BASE_MS + Math.min(distance, FOCUS_STAGGER_STEPS) * FOCUS_STAGGER_STEP_MS;
+}
+
+function Collapse({ open, children, delay = 0, focusing = false }) {
   const [retained, setRetained] = React.useState(open);
   // Mount in the same commit as `open` so the opening transition has content to grow into.
   if (open && !retained) setRetained(true);
   React.useEffect(() => {
     if (open) return undefined;
-    const timer = setTimeout(() => setRetained(false), COLLAPSE_MS);
+    const timer = setTimeout(() => setRetained(false), (focusing ? FOCUS_COLLAPSE_MS : COLLAPSE_MS) + delay);
     return () => clearTimeout(timer);
-  }, [open]);
+  }, [open, delay, focusing]);
   return (
-    <div className={cx('dts-collapse', !open && 'is-collapsed')} aria-hidden={open ? undefined : 'true'} inert={open ? undefined : ''}>
+    <div
+      className={cx('dts-collapse', !open && 'is-collapsed', focusing && 'is-focusing')}
+      // Read by styles.css: a focused fold starts later the farther it sits from the drag.
+      style={{ '--dts-collapse-delay': `${delay}ms` }}
+      aria-hidden={open ? undefined : 'true'}
+      inert={open ? undefined : ''}
+    >
       <div className="dts-collapse__inner">{retained ? children : null}</div>
     </div>
   );
@@ -65,6 +84,14 @@ function Collapse({ open, children }) {
 /** Where a drop on this row lands: a topic (default included) files in. */
 function targetOf(section, group) {
   return { workspaceId: group.workspaceId, topicId: section.kind === 'topic' ? section.id : null };
+}
+
+/**
+ * The identity `row-motion.jsx` files a row under. Topic ids are only unique inside their
+ * workspace (`tp_default` exists in every one), so the owner is part of the key.
+ */
+function sectionMotionKey(group, section) {
+  return `${group.workspaceId}:${section.kind}:${section.id ?? ''}`;
 }
 
 function GroupHeader({ group, selectMode, selectionCount, groupIds, groupHidden = 0, allSelected, onToggleGroup, onToggleCollapse, onMenu, onNewSession, isActiveWorkspace, reorder }) {
@@ -87,9 +114,15 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, groupHidden 
       onClick={onToggleCollapse}
       onDragStart={(event) => {
         if (virtual) return;
+        // The whole workspace block is lifted, matching the topic section above: fading only
+        // the 34px header left the body at full opacity while the drag said "out of the list".
+        event.currentTarget.closest('.dts-group')?.setAttribute('data-dragging', 'true');
         reorder?.onStart?.('workspace', { id: group.workspaceId, workspaceId: group.workspaceId }, event);
       }}
-      onDragEnd={reorder?.onEnd}
+      onDragEnd={(event) => {
+        event.currentTarget.closest('.dts-group')?.removeAttribute('data-dragging');
+        reorder?.onEnd?.();
+      }}
       onDragOver={(event) => {
         if (virtual) return;
         reorder?.onHover?.(event, 'workspace', { id: group.workspaceId, workspaceId: group.workspaceId });
@@ -223,7 +256,6 @@ function SectionHeader({ section, group, selectMode, selectedIds, onToggleCollap
       style={{ '--dts-indent': selectMode ? '8px' : '10px' }}
       tabIndex={0}
       draggable={draggable}
-      title={section.kind === 'topic' && !section.system ? t('topic.renameHint') : undefined}
       onClick={onToggleCollapse}
       onDoubleClick={(event) => {
         if (section.kind !== 'topic' || section.system) return;
@@ -247,9 +279,15 @@ function SectionHeader({ section, group, selectMode, selectedIds, onToggleCollap
       }}
       onDragStart={(event) => {
         if (!draggable) return;
+        // The whole section is lifted, not just its 34px header: the body would otherwise
+        // stay at full opacity while the row is supposedly out of the list.
+        event.currentTarget.closest('.dts-section')?.setAttribute('data-dragging', 'true');
         reorder?.onStart?.('topic', { id: section.id, workspaceId: group.workspaceId }, event);
       }}
-      onDragEnd={reorder?.onEnd}
+      onDragEnd={(event) => {
+        event.currentTarget.closest('.dts-section')?.removeAttribute('data-dragging');
+        reorder?.onEnd?.();
+      }}
       onDragOver={(event) => {
         if (virtual) return;
         // Row reordering and session filing share this row, so the active drag decides.
@@ -334,7 +372,13 @@ function SectionHeader({ section, group, selectMode, selectedIds, onToggleCollap
           }}
         />
       ) : (
-        <span className="dts-row__title"><span className="dts-row__text">{label}</span></span>
+        // The hover text is the name itself: the label ellipsizes in a narrow sidebar, and a
+        // "double-click to rename" tip answered a question nobody asked while hiding the one
+        // thing the row could not show — the full name. Renaming is still discoverable from
+        // the ⋯ menu and the README.
+        <span className="dts-row__title" title={section.kind === 'topic' ? label : undefined}>
+          <span className="dts-row__text">{label}</span>
+        </span>
       )}
       <span className="dts-row__aside">
         <span className="dts-row__count">{selectMode ? ids.length : section.total}</span>
@@ -380,7 +424,7 @@ function SectionHeader({ section, group, selectMode, selectedIds, onToggleCollap
   );
 }
 
-const Section = React.memo(function Section({ section, group, schedules, selectMode, selectedIds, query, revealed, highlighted, onToggleReveal, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleWorkspaceCollapse, onToggleTopicCollapse, onSelectMany, onFilter, onNewSessionInTopic, onDropSessions, onRename, onDropOnRow, reorder }) {
+const Section = React.memo(function Section({ section, group, schedules, selectMode, selectedIds, query, revealed, highlighted, onToggleReveal, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleWorkspaceCollapse, onToggleTopicCollapse, onSelectMany, onFilter, onNewSessionInTopic, onDropSessions, onRename, onDropOnRow, reorder, focusing = false, collapseDelay = 0 }) {
   // Selecting is about existing records; hide the provisional New Session placeholder while
   // the batch toolbar is active instead of offering a checkbox that cannot do anything.
   const rows = selectMode ? section.rows.filter((row) => !row.blank) : section.rows;
@@ -445,10 +489,19 @@ const Section = React.memo(function Section({ section, group, schedules, selectM
   // A bare bucket (the virtual 未分组 workspace) has no grouping of its own, so it renders
   // its rows directly under the workspace header — no topic row to collapse or file into.
   if (section.bare) {
-    return <div className="dts-section dts-section--bare">{body}</div>;
+    return (
+      <div className="dts-section dts-section--bare" data-dts-motion="topic" data-dts-key={sectionMotionKey(group, section)}>
+        {body}
+      </div>
+    );
   }
   return (
-    <div className={cx('dts-section', `dts-section--${section.kind}`)}>
+    <div
+      className={cx('dts-section', `dts-section--${section.kind}`)}
+      // A topic travels with its header and its body: the whole section is the moving unit.
+      data-dts-motion="topic"
+      data-dts-key={sectionMotionKey(group, section)}
+    >
       <SectionHeader
         section={section}
         group={group}
@@ -466,7 +519,7 @@ const Section = React.memo(function Section({ section, group, schedules, selectM
         onRename={onRename}
         reorder={reorder}
       />
-      <Collapse open={!section.collapsed}>{body}</Collapse>
+      <Collapse open={!section.collapsed} delay={collapseDelay} focusing={focusing}>{body}</Collapse>
     </div>
   );
 });
@@ -509,8 +562,20 @@ export function TopicTree({
    * came to disagree). Keyed by `sectionKey`, the same composite key collapse uses.
    */
   const revealedBuckets = React.useMemo(() => new Set(prefs.revealedBuckets ?? []), [prefs.revealedBuckets]);
-  /** During a reorder drag, everything at the same level except the dragged row collapses. */
-  const focus = reorder?.focus ?? null;
+  /**
+   * The row being dragged, if any.
+   *
+   * It still folds the rest of its level away — that is what makes "move this workspace past
+   * the other seven" a usable drag — but the fold is now a slow, staggered wave instead of a
+   * single 200 ms snap: the rows nearest the pointer start folding first, everything further
+   * out follows, and each body eases shut over 300 ms. It also drives the taller append strips
+   * at the end of the list.
+   */
+  const focus = reorder?.dragging ?? null;
+  // Index of the dragged workspace, so the fold can radiate outwards from it.
+  const focusGroupIndex = focus?.level === 'workspace'
+    ? tree.groups.findIndex((group) => group.workspaceId === focus.id)
+    : -1;
   const lastRealWorkspace = [...tree.groups].reverse().find((group) => !group.virtual) ?? null;
   // With the virtual 未分组 group trailing the list, a workspace drag grows the end target
   // with a strip directly above it: that is the native "drop just before 未分组" position.
@@ -518,6 +583,21 @@ export function TopicTree({
     && tree.groups.some((group) => group.virtual)
     && lastRealWorkspace
     && lastRealWorkspace.workspaceId !== focus.id;
+  /**
+   * The rendered order of every level, for `RowMotion`. React already knows this; handing it
+   * over lets the glide skip its layout reads on every ordinary render.
+   */
+  const motionKeys = React.useMemo(() => {
+    const keys = { workspace: [], topic: [], session: [] };
+    for (const group of tree.groups) {
+      keys.workspace.push(group.workspaceId);
+      for (const section of group.sections) {
+        keys.topic.push(sectionMotionKey(group, section));
+        for (const row of section.rows) keys.session.push(row.id);
+      }
+    }
+    return keys;
+  }, [tree]);
 
   if (tree.groups.length === 0) {
     return (
@@ -529,24 +609,33 @@ export function TopicTree({
   }
 
   return (
-    <div
+    <RowMotion
       className={cx('dts-tree', selectMode && 'dts-tree--selecting')}
-      role="tree"
-      aria-label={t('section.workspaces')}
-      aria-multiselectable={selectMode ? true : undefined}
+      label={t('section.workspaces')}
+      multiselectable={selectMode}
+      keys={motionKeys}
     >
       {tree.truncated ? <div className="dts-note">{t('search.limit', { n: tree.matched })}</div> : null}
-      {tree.groups.map((group) => {
+      {tree.groups.map((group, groupIndex) => {
         // The same scope the section headers and the panel menus use: a workspace-level
         // "select all" can no longer reach rows the tree never mounted.
         const groupScope = group.sections.map((section) => selectableIds(section, { revealed: revealedBuckets.has(sectionKey(group, section)) }));
         const groupIds = groupScope.flatMap((scope) => scope.visible);
         const groupHidden = groupScope.reduce((total, scope) => total + scope.hidden.length, 0);
         const groupSelected = groupIds.filter((id) => selectedIds.has(id)).length;
-        const groupCollapsed = focus?.level === 'workspace' && group.workspaceId !== focus.id ? true : group.collapsed;
-        const shownGroup = groupCollapsed === group.collapsed ? group : { ...group, collapsed: groupCollapsed };
         const topics = group.sections.filter((section) => section.kind === 'topic');
         const lastTopic = topics[topics.length - 1] ?? null;
+        // Where the dragged topic sits in this group, so the sibling fold can start next to it.
+        const focusTopicIndex = focus?.level === 'topic' && group.workspaceId === focus.workspaceId
+          ? topics.findIndex((topic) => topic.id === focus.id)
+          : -1;
+        // While a workspace is dragged, every *other* workspace folds away so the pointer can
+        // reach a header across the list. The fold is paced as a wave: the neighbour folds
+        // first, the farther groups follow, and each body eases shut over 300 ms.
+        const focusGroup = focus?.level === 'workspace' && group.workspaceId !== focus.id;
+        const groupCollapsed = focusGroup ? true : group.collapsed;
+        const shownGroup = groupCollapsed === group.collapsed ? group : { ...group, collapsed: groupCollapsed };
+        const groupDelay = focusGroup ? focusDelay(Math.abs(groupIndex - focusGroupIndex)) : 0;
         // Dragging a topic leaves a taller append strip under the last group, so "move to the
         // end" does not depend on hitting a 28px header's lower half.
         const appendTail = focus?.level === 'topic'
@@ -555,7 +644,15 @@ export function TopicTree({
           && lastTopic.id !== focus.id;
         return (
           <React.Fragment key={group.workspaceId}>
-            <div className={cx('dts-group', groupCollapsed && 'is-collapsed')}>
+            {/* The group, not its header, is the moving unit: a workspace drop slides the
+                whole block (header + every topic and session inside it). `RowMotion` reads
+                this attribute, so putting it on the header animated 34px while the body
+                jumped — the header travelled across the list on its own. */}
+            <div
+              className={cx('dts-group', groupCollapsed && 'is-collapsed')}
+              data-dts-motion="workspace"
+              data-dts-key={group.workspaceId}
+            >
               {/* GroupHeader is not memoized, so its inline handlers cost one element each
                   rather than one subtree: rebuilding them here is cheaper than threading
                   stable callbacks through the group map. */}
@@ -576,15 +673,20 @@ export function TopicTree({
               onMenu={onMenu}
               reorder={reorder}
             />
-            <Collapse open={!groupCollapsed}>
+            <Collapse open={!groupCollapsed} delay={groupDelay} focusing={focusGroup}>
               <div className="dts-group__body">
                 {group.sections.map((section) => {
+                  // A topic drag folds the sibling topics of its own workspace, again as a wave
+                  // that starts next to the dragged row.
                   const sibling = focus?.level === 'topic'
                     && group.workspaceId === focus.workspaceId
                     && section.kind === 'topic'
                     && section.id !== focus.id;
                   const sectionCollapsed = sibling ? true : section.collapsed;
                   const shownSection = sectionCollapsed === section.collapsed ? section : { ...section, collapsed: sectionCollapsed };
+                  const sectionDelay = sibling && focusTopicIndex >= 0
+                    ? focusDelay(Math.abs(topics.indexOf(section) - focusTopicIndex))
+                    : 0;
                   // Landing aid for a topic the user just created: `reveal` names one row, and
                   // only that row gets the fade-out highlight.
                   const highlighted = Boolean(reveal) && reveal.workspaceId === group.workspaceId && reveal.topicId === section.id;
@@ -598,6 +700,8 @@ export function TopicTree({
                         selectedIds={selectedIds}
                         revealed={revealedBuckets.has(sectionKey(group, section))}
                         highlighted={highlighted}
+                        focusing={sibling}
+                        collapseDelay={sectionDelay}
                         onToggleReveal={onToggleReveal}
                         query={tree.search}
                         onOpenSession={onOpenSession}
@@ -645,6 +749,6 @@ export function TopicTree({
           </React.Fragment>
         );
       })}
-    </div>
+    </RowMotion>
   );
 }

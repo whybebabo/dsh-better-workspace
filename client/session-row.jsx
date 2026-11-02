@@ -168,6 +168,9 @@ export const SessionRow = React.memo(function SessionRow({
       role="treeitem"
       aria-selected={selectMode ? selected : row.isCurrent}
       tabIndex={0}
+      // Read by `RowMotion`: a session row is the moving unit at the innermost level.
+      data-dts-motion="session"
+      data-dts-key={row.id}
       draggable={!selectMode && !row.blank && !row.archived}
       onMouseEnter={(event) => startHint(event.currentTarget)}
       onMouseLeave={endHint}

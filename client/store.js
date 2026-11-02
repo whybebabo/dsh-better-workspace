@@ -10,6 +10,11 @@ import { t } from './i18n.js';
 import { withDefaultTopic } from './model.js';
 
 const PREFS_KEY = 'dsh-better-workspace:prefs:v1';
+/**
+ * A host that accepts the connection but never answers must not leave `load()` pending
+ * forever: it would keep the panel hidden and never reach the retry path.
+ */
+const STATE_TIMEOUT_MS = 10_000;
 const DEFAULT_PREFS = {
   workspaceFilter: null,
   topicFilter: null,
@@ -69,7 +74,8 @@ function writePrefs(prefs) {
   } catch { /* private mode / quota: preferences stay in memory */ }
 }
 
-export function createPanelStore() {
+export function createPanelStore(options = {}) {
+  const stateTimeoutMs = Number.isFinite(options.stateTimeoutMs) ? options.stateTimeoutMs : STATE_TIMEOUT_MS;
   const listeners = new Set();
   let state = {
     ready: false,
@@ -95,6 +101,10 @@ export function createPanelStore() {
   };
 
   function subscribe(listener) {
+    // A live listener means the store is in use again (React 18 StrictMode replays effects);
+    // clear the teardown marker so a lazy load can still run. A component that is really gone
+    // never subscribes again, and its queued work stays dormant.
+    disposed = false;
     listeners.add(listener);
     return () => listeners.delete(listener);
   }
@@ -107,23 +117,77 @@ export function createPanelStore() {
    * One request per page, coalesced while it is in flight.
    */
   let emojiRequest = null;
+  /**
+   * The glyph table is fetched once per page. A host without the route (or a composition that
+   * answers an empty list) must not turn every revisioned `load()` into another 404: the local
+   * fallback in the dialogs is enough for the rest of the session.
+   */
+  let emojiAttempted = false;
   /** Monotonic guard for `/state` reads; see `load()`. */
   let loadSeq = 0;
+  /**
+   * Bounded retry for a `/state` read that failed before the host answered.
+   *
+   * A 404 / unparsable answer / network error makes the panel hand the region back and render
+   * nothing (see `load()`), which also removes the only menu entry that reloads the document.
+   * Without this, one transient failure — the browser loading the page before the plugin's
+   * routes are registered, a proxy hiccup, a host restart — blanked the panel until the user
+   * reloaded the browser. The retries keep the region released while they run.
+   */
+  const RETRY_DELAYS = [500, 1_500, 3_000];
+  let retryTimer = null;
+  let retryAttempt = 0;
+  /**
+   * Teardown marker. `dispose()` clears listeners and bumps the generation, so an in-flight
+   * `/state` that fails afterwards cannot patch state, arm a new retry or issue another
+   * request. `subscribe()` clears it again: a store that regained a listener (React 18
+   * StrictMode replays effects) is live, while a store whose component is really gone stays
+   * dormant even if a queued mutation finishes later.
+   */
+  let disposed = false;
+  let generation = 0;
+  /** In-flight `/state` and `/emojis` requests, aborted on teardown. */
+  const activeControllers = new Set();
+
+  function cancelRetry() {
+    if (retryTimer !== null) clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+
+  function scheduleRetry(startedIn = generation) {
+    if (disposed || startedIn !== generation || retryTimer !== null || retryAttempt >= RETRY_DELAYS.length) return;
+    const delay = RETRY_DELAYS[retryAttempt];
+    retryAttempt += 1;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      if (disposed || startedIn !== generation) return;
+      void load();
+    }, delay);
+  }
   function loadEmojis() {
-    if (state.emojis.length > 0) return Promise.resolve(state.emojis);
+    if (disposed || state.emojis.length > 0) return Promise.resolve(state.emojis);
     if (emojiRequest) return emojiRequest;
-    emojiRequest = api.emojis()
+    if (emojiAttempted) return Promise.resolve([]);
+    emojiAttempted = true;
+    const startedIn = generation;
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    if (controller) activeControllers.add(controller);
+    emojiRequest = api.emojis(controller?.signal)
       .then((result) => {
         const list = Array.isArray(result?.emojis) ? result.emojis : [];
-        if (list.length > 0) patch({ emojis: list });
+        if (list.length > 0 && !disposed && startedIn === generation) patch({ emojis: list });
         return list;
       })
       .catch(() => [])
-      .finally(() => { emojiRequest = null; });
+      .finally(() => {
+        emojiRequest = null;
+        if (controller) activeControllers.delete(controller);
+      });
     return emojiRequest;
   }
 
   async function load() {
+    if (disposed) return false;
     // The glyph table is static and lives on its own route, so it is fetched once per page
     // rather than riding along with every revisioned document read.
     loadEmojis().catch(() => {});
@@ -131,13 +195,23 @@ export function createPanelStore() {
     // one may patch the mirror: a stale snapshot used to overwrite a newer revision and turn the
     // *next* write into a phantom "changed in another window" conflict.
     const seq = ++loadSeq;
+    const startedIn = generation;
+    let controller = null;
+    let timer = null;
     try {
-      const result = await api.state();
-      if (seq !== loadSeq) return false;
+      if (typeof AbortController === 'function') {
+        controller = new AbortController();
+        activeControllers.add(controller);
+        timer = setTimeout(() => controller.abort(), stateTimeoutMs);
+      }
+      const result = await api.state(controller?.signal);
+      if (seq !== loadSeq || disposed || startedIn !== generation) return false;
       if (result?.enabled === false) {
         // The host row is switched off (`config.enabled: false`). The bundle still loads — the
         // loader keys it by package name, not by that row's config — so without this the panel
         // covered the stock list with a 404 banner instead of handing it back.
+        cancelRetry();
+        retryAttempt = 0;
         patch({
           ready: false,
           loading: false,
@@ -164,16 +238,31 @@ export function createPanelStore() {
         revision: result.revision,
         workspaces: result.workspaces ?? {},
       });
+      cancelRetry();
+      retryAttempt = 0;
       return true;
     } catch (error) {
-      if (seq !== loadSeq) return false;
+      if (seq !== loadSeq || disposed || startedIn !== generation) return false;
+      // A 404 (or an unparsable answer, e.g. the web server's SPA fallback) means the host half
+      // is not there. Keeping `ready` true would cover the stock list with an error banner and
+      // inert it, leaving the user no way back; release the region instead. An abort is our own
+      // timeout: treat it as "nothing answered" and enter the same bounded retry.
+      const aborted = error?.name === 'AbortError';
+      const missing = error instanceof ApiError && (error.status === 404 || error.code === 'bad-response');
+      const transport = missing || (error instanceof ApiError && error.code === 'network') || aborted;
       patch({
-        ready: true,
+        ready: !missing,
         loading: false,
-        reachable: !(error instanceof ApiError && error.code === 'network'),
-        error: error instanceof ApiError ? error.message : String(error),
+        reachable: !transport,
+        error: aborted ? t('state.unavailable') : error instanceof ApiError ? error.message : String(error),
       });
+      // Only the "nothing answered" cases are worth retrying: a 500 with a valid body still
+      // renders the panel (with its banner), so retrying it would only add requests.
+      if (transport) scheduleRetry(startedIn);
       return false;
+    } finally {
+      if (controller) activeControllers.delete(controller);
+      if (timer !== null) clearTimeout(timer);
     }
   }
 
@@ -187,8 +276,6 @@ export function createPanelStore() {
     const list = state.prefs[key] ?? [];
     setPrefs({ [key]: list.includes(value) ? list.filter((entry) => entry !== value) : [...list, value] });
   }
-
-  const selected = () => state.selection;
 
   function setSelection(ids) {
     patch({ selection: [...new Set(ids)] });
@@ -325,6 +412,18 @@ export function createPanelStore() {
     patch({ error: null });
   }
 
+  /** Page teardown: a pending retry must not fire against a replaced document. */
+  function dispose() {
+    disposed = true;
+    generation += 1;
+    cancelRetry();
+    for (const controller of activeControllers) {
+      try { controller.abort(); } catch { /* already settled */ }
+    }
+    activeControllers.clear();
+    listeners.clear();
+  }
+
   /**
    * Drops filters whose target disappeared (workspace closed, topic deleted).
    *
@@ -350,10 +449,8 @@ export function createPanelStore() {
     subscribe,
     getState,
     load,
-    loadEmojis,
     setPrefs,
     toggleInList,
-    selected,
     setSelection,
     toggleSelection,
     clearSelection,
@@ -366,6 +463,7 @@ export function createPanelStore() {
     assign,
     adoptSessions,
     dismissError,
+    dispose,
     reconcile,
   };
 }

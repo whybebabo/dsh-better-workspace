@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, writeFile, utimes } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile, utimes, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTopicStore, StoreError, validateSessionIds, normalizeTopicName, normalizeTopicEmoji, pickTopicEmoji, TOPIC_EMOJIS, DEFAULT_TOPIC_ID } from '../lib/store.js';
@@ -19,6 +19,101 @@ test('a missing file reads as an empty writable state', async () => {
   assert.equal(snapshot.revision, 0);
   assert.equal(snapshot.readOnly, false);
   assert.deepEqual(Object.keys(snapshot.workspaces), []);
+});
+
+test('a missing primary recovers the readable backup instead of starting empty', async () => {
+  const { store } = await freshStore();
+  await store.createTopic({ workspaceId: 'ws_a', name: 'Alpha', expectedRevision: 0 });
+  await store.createTopic({ workspaceId: 'ws_a', name: 'Beta', expectedRevision: 1 });
+  const backupBefore = await readFile(store.bakFile, 'utf8');
+  await rm(store.file);
+
+  const snapshot = await store.snapshot();
+  assert.equal(snapshot.readOnly, false, 'a readable backup keeps the store writable');
+  assert.equal(snapshot.warningCode, 'recovered-backup');
+  assert.match(snapshot.warning, /主文件缺失/);
+  assert.ok(snapshot.workspaces.ws_a.topics.some((topic) => topic.name === 'Alpha'), 'the backup data is surfaced');
+
+  // The recovery write must not replace the only good copy with the new (empty) document.
+  const first = await store.createTopic({ workspaceId: 'ws_a', name: 'Gamma', expectedRevision: snapshot.revision });
+  assert.equal(await readFile(store.bakFile, 'utf8'), backupBefore, 'the recovery write leaves the good backup alone');
+
+  // A later write may rotate the backup again, but by then it holds the repaired document.
+  await store.createTopic({ workspaceId: 'ws_a', name: 'Delta', expectedRevision: first.revision });
+  const backupAfter = JSON.parse(await readFile(store.bakFile, 'utf8'));
+  assert.ok(backupAfter.workspaces.ws_a.topics.some((topic) => topic.name === 'Alpha'), 'the old topics survive in the rotated backup');
+  assert.ok(backupAfter.workspaces.ws_a.topics.some((topic) => topic.name === 'Gamma'));
+});
+
+test('a missing primary with a newer backup is read-only, not a fresh document', async () => {
+  const { store } = await freshStore();
+  await store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 });
+  await store.createTopic({ workspaceId: 'ws_a', name: 'B', expectedRevision: 1 });
+  await rm(store.file);
+  const backup = JSON.parse(await readFile(store.bakFile, 'utf8'));
+  backup.version = 2;
+  await writeFile(store.bakFile, JSON.stringify(backup), 'utf8');
+
+  const snapshot = await store.snapshot();
+  assert.equal(snapshot.readOnly, true);
+  assert.equal(snapshot.warningCode, 'future-version');
+  assert.match(snapshot.warning, /版本 2/);
+  await assert.rejects(
+    () => store.createTopic({ workspaceId: 'ws_a', name: 'C', expectedRevision: 0 }),
+    (error) => error.code === 'store-future-version' && error.status === 503,
+  );
+  assert.equal(JSON.parse(await readFile(store.bakFile, 'utf8')).version, 2, 'the newer backup is untouched');
+});
+
+test('a missing primary with a corrupt backup is read-only, never treated as fresh', async () => {
+  const { store } = await freshStore();
+  await store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 });
+  await store.createTopic({ workspaceId: 'ws_a', name: 'B', expectedRevision: 1 });
+  await rm(store.file);
+  await writeFile(store.bakFile, '{ broken', 'utf8');
+
+  const snapshot = await store.snapshot();
+  assert.equal(snapshot.readOnly, true);
+  assert.equal(snapshot.warningCode, 'unreadable');
+  await assert.rejects(
+    () => store.createTopic({ workspaceId: 'ws_a', name: 'C', expectedRevision: 0 }),
+    (error) => error.code === 'store-read-only' && error.status === 503,
+  );
+  assert.equal(await readFile(store.bakFile, 'utf8'), '{ broken', 'the unreadable backup is left for manual salvage');
+});
+
+test('a corrupt primary with a newer backup reports the version instead of "unreadable"', async () => {
+  const { store } = await freshStore();
+  await store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 });
+  await store.createTopic({ workspaceId: 'ws_a', name: 'B', expectedRevision: 1 });
+  await writeFile(store.file, '{ broken', 'utf8');
+  const backup = JSON.parse(await readFile(store.bakFile, 'utf8'));
+  backup.version = 2;
+  await writeFile(store.bakFile, JSON.stringify(backup), 'utf8');
+
+  const snapshot = await store.snapshot();
+  assert.equal(snapshot.readOnly, true);
+  assert.equal(snapshot.warningCode, 'future-version');
+  await assert.rejects(
+    () => store.createTopic({ workspaceId: 'ws_a', name: 'C', expectedRevision: 0 }),
+    (error) => error.code === 'store-future-version' && error.status === 503,
+  );
+});
+
+test('one bad emoji field does not discard the rest of the document', async () => {
+  const { store } = await freshStore();
+  await store.createTopic({ workspaceId: 'ws_a', name: 'Alpha', expectedRevision: 0 });
+  await store.createTopic({ workspaceId: 'ws_a', name: 'Beta', expectedRevision: 1 });
+  const doc = JSON.parse(await readFile(store.file, 'utf8'));
+  const beta = doc.workspaces.ws_a.topics.find((topic) => topic.name === 'Beta');
+  beta.emoji = 123;
+  await writeFile(store.file, JSON.stringify(doc), 'utf8');
+
+  const snapshot = await store.snapshot();
+  assert.equal(snapshot.readOnly, false);
+  assert.equal(snapshot.warningCode, null, 'a single bad field is not document damage');
+  assert.ok(snapshot.workspaces.ws_a.topics.some((topic) => topic.name === 'Alpha'));
+  assert.equal(snapshot.workspaces.ws_a.topics.find((topic) => topic.name === 'Beta')?.emoji, '', 'the bad marker is normalized');
 });
 
 test('the emoji picker enumerates Zen Browser\'s emoji set in order', () => {
@@ -433,6 +528,43 @@ test('a document written by a newer plugin is read-only, never downgraded', asyn
   assert.equal(JSON.parse(await readFile(store.bakFile, 'utf8')).version, 1, 'and the backup is not overwritten either');
 });
 
+test('a parseable document without a valid version is damage, not a future version', async () => {
+  const cases = [
+    ['missing', JSON.stringify({ revision: 3, updatedAt: 1, workspaces: {} })],
+    ['zero', JSON.stringify({ version: 0, revision: 3, updatedAt: 1, workspaces: {} })],
+    ['string', JSON.stringify({ version: '1', revision: 3, updatedAt: 1, workspaces: {} })],
+  ];
+  for (const [label, doc] of cases) {
+    const { store } = await freshStore();
+    await store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 });
+    await store.createTopic({ workspaceId: 'ws_a', name: 'B', expectedRevision: 1 });
+    await writeFile(store.file, doc, 'utf8');
+
+    const snapshot = await store.snapshot();
+    assert.equal(snapshot.readOnly, false, `${label}: a readable backup keeps the store writable`);
+    assert.equal(snapshot.warningCode, 'recovered-backup', `${label}: this is damage, not "future data"`);
+    assert.ok(snapshot.workspaces.ws_a.topics.some((topic) => topic.name === 'A'), `${label}: the backup data is surfaced`);
+
+    const repaired = await store.createTopic({ workspaceId: 'ws_a', name: `C-${label}`, expectedRevision: snapshot.revision });
+    assert.ok(repaired.revision > snapshot.revision);
+    assert.equal(JSON.parse(await readFile(store.file, 'utf8')).version, 1, `${label}: the next write rebuilds a v1 primary`);
+  }
+});
+
+test('a malformed version without a backup is read-only, never misreported as a newer plugin', async () => {
+  const { store } = await freshStore();
+  await mkdir(store.dir, { recursive: true });
+  await writeFile(store.file, JSON.stringify({ revision: 1, updatedAt: 1, workspaces: {} }), 'utf8');
+
+  const snapshot = await store.snapshot();
+  assert.equal(snapshot.readOnly, true);
+  assert.equal(snapshot.warningCode, 'unreadable', 'no backup: unreadable, not future-version');
+  await assert.rejects(
+    () => store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 }),
+    (error) => error.code === 'store-read-only' && error.status === 503,
+  );
+});
+
 test('a primary recovered from the backup stays writable and reports the recovery', async () => {
   const { store } = await freshStore();
   await store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 });
@@ -469,21 +601,70 @@ test('workspace ids must be single safe segments', async () => {
   }
 });
 
+test('reordering refuses duplicate topic ids instead of applying the last slot', async () => {
+  const { store } = await freshStore();
+  await assert.rejects(
+    () => store.reorderTopics({ workspaceId: 'ws_a', topicIds: [DEFAULT_TOPIC_ID, DEFAULT_TOPIC_ID], expectedRevision: 0 }),
+    (error) => error.code === 'bad-topic-ids',
+  );
+});
+
 test('a lock held by a live process is waited out, never stolen', async () => {
   const { store } = await freshStore({ staleLockMs: 100, lockWaitMs: 400 });
   await store.snapshot();
   await mkdir(store.dir, { recursive: true });
-  // A lock whose mtime is far past the stale window but whose owner is *this* process: the
-  // PID check is what has to keep it, not the clock.
+  // A *different* live PID. A token carrying this process's own PID no longer proves a live
+  // holder by itself: the store grants that only to a token it currently holds itself (see
+  // the leaked-release case below), so the synthetic same-PID lock would be reclaimable.
+  const { spawn } = await import('node:child_process');
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
+  try {
+    await new Promise((resolve, reject) => {
+      child.once('spawn', resolve);
+      child.once('error', reject);
+    });
+    await writeFile(store.lockFile, `${child.pid}-deadbeef`, 'utf8');
+    const old = new Date(Date.now() - 60_000);
+    await utimes(store.lockFile, old, old);
+
+    const started = Date.now();
+    await assert.rejects(
+      () => store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 }),
+      (error) => error.code === 'store-locked' && error.status === 409,
+    );
+    assert.ok(Date.now() - started >= 300, 'it waits for the holder instead of evicting it mid-write');
+    assert.equal(await readFile(store.lockFile, 'utf8'), `${child.pid}-deadbeef`, 'and the live lock survives');
+  } finally {
+    child.kill();
+  }
+});
+
+test('a zero-byte lock left by a crash is reclaimed, not waited on forever', async () => {
+  const { store } = await freshStore({ staleLockMs: 30, lockWaitMs: 1_000 });
+  await store.snapshot();
+  await mkdir(store.dir, { recursive: true });
+  // What a crash between open('wx') and writeFile(token) leaves behind. Its token cannot name
+  // a live owner, so the stale branch must reclaim it; before the fix every write waited out
+  // the full lock deadline and returned 409.
+  await writeFile(store.lockFile, '', 'utf8');
+  const old = new Date(Date.now() - 60_000);
+  await utimes(store.lockFile, old, old);
+
+  const written = await store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 });
+  assert.equal(written.revision, 1);
+  assert.equal(await readFile(store.lockFile, 'utf8').then(() => true, () => false), false, 'and the lock is released after use');
+});
+
+test('a stale lock this process failed to unlink is reclaimed instead of blocking forever', async () => {
+  const { store } = await freshStore({ staleLockMs: 30, lockWaitMs: 1_000 });
+  await store.snapshot();
+  await mkdir(store.dir, { recursive: true });
+  // A release that could not unlink leaves a token with *this* PID. It is not "a live holder":
+  // no acquisition holds it, so the next writer must be able to reclaim it after the window.
   await writeFile(store.lockFile, `${process.pid}-deadbeef`, 'utf8');
   const old = new Date(Date.now() - 60_000);
   await utimes(store.lockFile, old, old);
 
-  const started = Date.now();
-  await assert.rejects(
-    () => store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 }),
-    (error) => error.code === 'store-locked' && error.status === 409,
-  );
-  assert.ok(Date.now() - started >= 300, 'it waits for the holder instead of evicting it mid-write');
-  assert.equal(await readFile(store.lockFile, 'utf8'), `${process.pid}-deadbeef`, 'and the live lock survives');
+  const written = await store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 });
+  assert.equal(written.revision, 1);
 });

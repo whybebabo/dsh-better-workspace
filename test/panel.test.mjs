@@ -651,6 +651,18 @@ test('double-clicking a topic renames it inline', async () => {
   assert.equal(update.body.topicId, TOPIC);
 });
 
+test('hovering a topic name shows the name, not the rename hint', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const rows = [...container.querySelectorAll('.dts-row--topic')];
+  assert.ok(rows.length >= 2, 'both topics rendered');
+  for (const row of rows) {
+    const name = row.querySelector('.dts-row__text').textContent;
+    assert.equal(row.querySelector('.dts-row__title').getAttribute('title'), name, `the tooltip for 「${name}」 is its name`);
+  }
+  assert.equal(rows.some((row) => row.getAttribute('title') === '双击分组名可直接改名'), false, 'the instructional hint is gone');
+});
+
 test('a rejected rename keeps the old label and reports the conflict', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   responseOverrides[`${API}/topics/update`] = () => ({ ok: false, error: '该工作区已有同名分组', code: 'topic-name-taken', status: 400 });
@@ -765,6 +777,46 @@ test('a blank from the stock New Session button stays un-filed, which puts it fi
   assert.deepEqual(buckets, ['默认分组', '设计', '最新分组'], 'and the newest group stays last, where a file would have hidden the row');
   const firstSection = container.querySelector('.dts-collapse');
   assert.ok(firstSection.querySelector('.dts-row--session').textContent.includes('新会话'), 'the blank leads the first bucket');
+});
+
+test('a reused blank that starts its first turn leads its group and keeps that slot', async () => {
+  // The host reuses the blank it already owns instead of minting a new id, so the row is only
+  // first while `blank` floats it; the stock list keeps it on top by promoting activity, and the
+  // panel has to do the same or the row drops to its attach slot on the first message.
+  responseOverrides[`${API}/state`] = stateResult;
+  const sessions = makeSessions(3);
+  const blank = { id: 'ses_fresh', displayTitle: '', cwd: 'D:/work/one', updatedAt: 1_700_000_000_500, blank: true, retainedBy: { mainView: 1 } };
+  const list = {
+    ids: [...sessions.ids, 'ses_fresh'],
+    byId: { ...sessions.byId, ses_fresh: blank },
+    current: 'ses_fresh',
+    phase: 'ready',
+  };
+  sessionSource = makeSource(list);
+  workspaceSource = makeSource({
+    items: [{ workspaceId: WORKSPACE, path: 'D:/work/one', title: 'One', sessionIds: ['ses_0', 'ses_1', 'ses_fresh', 'ses_2'], createdAt: 1, updatedAt: 1 }],
+    archivedSessionIds: [],
+    pinnedSessionIds: [],
+    phase: 'ready',
+    state: 'idle',
+  });
+  await mount();
+
+  const bucket = () => container.querySelector('.dts-section--topic');
+  const titles = () => [...bucket().querySelectorAll('.dts-row--session .dts-row__text')].map((node) => node.textContent);
+  assert.deepEqual(titles(), ['新会话', '会话 1', '会话 2'], 'the blank leads the default group while it is blank');
+
+  await act(async () => {
+    sessionSource.set({
+      ...list,
+      byId: { ...list.byId, ses_fresh: { ...blank, blank: false, displayTitle: '刚建好的', updatedAt: 1_700_000_009_000 } },
+    });
+  });
+  await tick();
+
+  assert.deepEqual(titles(), ['刚建好的', '会话 1', '会话 2'], 'the first turn promotes it instead of dropping it to its attach slot');
+  const stored = JSON.parse(window.localStorage.getItem('dsh-better-workspace:prefs:v1'));
+  assert.deepEqual(stored.sessionOrder[WORKSPACE][0], 'ses_fresh', 'and the promotion is persisted, so it survives the next build');
 });
 
 test('a blank created while a topic filter is active joins that topic', async () => {
@@ -926,6 +978,25 @@ test('the panel asks the host to repair workspace membership once per page load'
   assert.equal(adopts().length, 1, 'a single repair call on the first on-screen pass');
   assert.equal(sessionRefreshCalls, 1, 'and the host session list is re-read so the rows move');
   assert.ok(findAnywhere('.dts-toast')?.textContent.includes('2'), 'the user is told how many sessions moved');
+});
+
+test('a repair that cannot run yet is retried instead of being forgotten', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  let attempt = 0;
+  responseOverrides[`${API}/sessions/adopt`] = () => {
+    attempt += 1;
+    return attempt === 1
+      ? { ok: true, result: { available: false, adopted: [], moved: [], failed: [] } }
+      : { ok: true, result: { available: true, adopted: ['ses_lost'], moved: ['ses_lost'], failed: [] } };
+  };
+  await mount();
+  await tick();
+  const adopts = () => calls.filter((call) => call.url.endsWith('/sessions/adopt'));
+  assert.equal(adopts().length, 1, 'the first pass asks once');
+
+  await tick(700);
+  assert.equal(adopts().length, 2, 'a boot-race available:false is retried');
+  assert.ok(findAnywhere('.dts-toast')?.textContent.includes('1'), 'and the eventual repair is announced');
 });
 
 test('a failed repair stays silent instead of turning into a banner', async () => {
@@ -1486,6 +1557,22 @@ test('a host build without the icon exports still renders via local fallbacks', 
     await mount();
     assert.ok(find('.dts-row--group'), 'the tree still mounts');
     assert.ok(find('.dts-row--group .dts-folder svg'), 'a fallback glyph is drawn');
+    assert.ok(find('.dts-row--group .dts-folder svg').querySelectorAll('path').length > 0, 'the open folder has real geometry');
+    const select = find('.dts-header .dts-iconbtn[title="批量选择"] svg');
+    assert.ok(select?.querySelectorAll('path').length > 0, 'the header batch-select glyph has real geometry too');
+
+    const one = workspaceSource.getSnapshot();
+    workspaceSource.set({ ...one, pinnedSessionIds: ['ses_1'] });
+    await tick();
+    const pin = find('.dts-row--session', '会话 1').querySelector('.dts-row__pin svg');
+    assert.ok(pin?.querySelectorAll('path').length > 0, 'the pinned marker is not an empty svg');
+
+    await act(async () => {
+      find('.dts-row--group').dispatchEvent(new window.Event('click', { bubbles: true }));
+    });
+    await tick();
+    const closed = find('.dts-row--group .dts-folder svg');
+    assert.ok(closed?.querySelectorAll('path').length > 0, 'the collapsed folder is not an empty svg');
   } finally {
     global.__noIcons = original;
   }
@@ -2053,12 +2140,13 @@ test('a session dragged from another topic can be dropped on a row of that topic
   assert.equal(assign.body.topicId, TOPIC);
 });
 
-test('dragging a topic collapses its sibling groups until the drag ends', async () => {
+test('dragging a topic folds its siblings on the slow, staggered curve', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   await mount();
   const source = find('.dts-row--topic', '设计');
   const sibling = find('.dts-row--topic', '默认分组');
   const siblingSection = sibling.closest('.dts-section');
+  const collapse = siblingSection.querySelector('.dts-collapse');
   assert.equal(sibling.getAttribute('aria-expanded'), 'true');
   await act(async () => {
     const start = new window.Event('dragstart', { bubbles: true });
@@ -2068,12 +2156,16 @@ test('dragging a topic collapses its sibling groups until the drag ends', async 
   await tick();
   assert.equal(source.getAttribute('aria-expanded'), 'true', 'the group being dragged stays open');
   assert.equal(sibling.getAttribute('aria-expanded'), 'false', 'other groups in the workspace fold away');
-  assert.equal(siblingSection.querySelector('.dts-collapse').classList.contains('is-collapsed'), true, 'and their bodies animate closed');
+  assert.ok(collapse.classList.contains('is-collapsed'), 'their bodies close');
+  assert.ok(collapse.classList.contains('is-focusing'), 'the fold uses the slower drag curve');
+  assert.equal(collapse.style.getPropertyValue('--dts-collapse-delay'), '60ms', 'and waits its turn in the wave');
   assert.ok(siblingSection.querySelector('.dts-row--session'), 'the folded body stays mounted so the height can animate');
+  assert.equal(source.closest('.dts-section').getAttribute('data-dragging'), 'true', 'the lifted section is marked, body included');
 
   await act(async () => source.dispatchEvent(new window.Event('dragend', { bubbles: true })));
   await tick();
   assert.equal(sibling.getAttribute('aria-expanded'), 'true', 'releasing restores the previous fold state');
+  assert.equal(collapse.classList.contains('is-focusing'), false, 'and the slow drag curve is gone');
 });
 
 test('a strip under the last topic appends a dragged topic to the end', async () => {
@@ -2124,7 +2216,7 @@ test('a strip under the last topic appends a dragged topic to the end', async ()
   assert.equal(container.querySelector('.dts-drop-tail'), null, 'the strip disappears with the drag');
 });
 
-test('dragging a workspace collapses the other workspaces until the drag ends', async () => {
+test('dragging a workspace folds the others on the slow, staggered curve', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   const snapshot = workspaceSource.getSnapshot();
   workspaceSource.set({
@@ -2141,9 +2233,82 @@ test('dragging a workspace collapses the other workspaces until the drag ends', 
   await tick();
   assert.equal(source.getAttribute('aria-expanded'), 'true', 'the dragged workspace stays open');
   assert.equal(sibling.getAttribute('aria-expanded'), 'false', 'the other workspace folds away');
+  const collapse = sibling.closest('.dts-group').querySelector('.dts-collapse');
+  assert.ok(collapse.classList.contains('is-focusing'), 'with the slower drag curve');
+  assert.equal(collapse.style.getPropertyValue('--dts-collapse-delay'), '60ms', 'and a wave delay of its own');
+  assert.equal(source.closest('.dts-group').getAttribute('data-dragging'), 'true', 'the dragged block reads as lifted');
+  assert.equal(source.getAttribute('data-dragging'), null, 'not only its header');
   await act(async () => source.dispatchEvent(new window.Event('dragend', { bubbles: true })));
   await tick();
   assert.equal(sibling.getAttribute('aria-expanded'), 'true', 'releasing restores it');
+  assert.equal(source.closest('.dts-group').getAttribute('data-dragging'), null, 'and the lifted state is cleared');
+});
+
+test('a workspace drop glides the whole group, not just its header', async () => {
+  // jsdom has no layout and no Web Animations API, so the reorder glide was never executed by
+  // the suite — which is how "the attribute sits on the 34px header" survived: the animations
+  // ran on the row that moves while the body it belongs to jumped. Both are stubbed here.
+  responseOverrides[`${API}/state`] = stateResult;
+  const sessions = sessionSource.getSnapshot();
+  sessionSource.set({
+    ...sessions,
+    ids: [...sessions.ids, 'ses_two'],
+    byId: { ...sessions.byId, ses_two: { id: 'ses_two', displayTitle: '会话 two', cwd: 'D:/work/two', updatedAt: 1_700_000_000_500, blank: false } },
+  });
+  const workspace = workspaceSource.getSnapshot();
+  workspaceSource.set({
+    ...workspace,
+    items: [
+      { ...workspace.items[0], sessionIds: sessions.ids },
+      { workspaceId: 'ws_two', path: 'D:/work/two', title: 'Two', sessionIds: ['ses_two'], createdAt: 2, updatedAt: 2 },
+    ],
+  });
+  await mount();
+  const titles = () => [...container.querySelectorAll('.dts-group')].map((group) => group.querySelector('.dts-row--group .dts-row__text').textContent);
+  assert.deepEqual(titles(), ['One', 'Two'], 'two groups are on screen');
+
+  const motionRows = () => [...document.querySelectorAll('[data-dts-motion]')];
+  const hostRect = window.Element.prototype.getBoundingClientRect;
+  const animated = [];
+  window.Element.prototype.getBoundingClientRect = function measure() {
+    // Motion rows get a position derived from their document order (40px per row); everything
+    // else keeps the shell geometry the rest of the panel is mounted against.
+    if (this.hasAttribute?.('data-dts-motion')) {
+      const top = motionRows().indexOf(this) * 40;
+      return { top, left: 0, width: 200, height: 40, bottom: top + 40, right: 200, x: 0, y: top, toJSON: () => ({}) };
+    }
+    return hostRect.call(this);
+  };
+  window.Element.prototype.animate = function animate() {
+    const entry = { element: this, motion: this.getAttribute('data-dts-motion'), key: this.getAttribute('data-dts-key'), cancelled: false };
+    animated.push(entry);
+    return { onfinish: null, cancel: () => { entry.cancelled = true; } };
+  };
+  const swap = async () => {
+    const items = workspaceSource.getSnapshot().items;
+    workspaceSource.set({ ...workspaceSource.getSnapshot(), items: [...items].reverse() });
+    await tick(50);
+  };
+  try {
+    await swap();
+    assert.deepEqual(titles(), ['Two', 'One'], 'the drop reordered the groups');
+    assert.deepEqual(animated.map((entry) => entry.key).sort(), ['ws_one', 'ws_two'], 'both groups glide');
+    for (const entry of animated) {
+      assert.equal(entry.motion, 'workspace');
+      assert.ok(entry.element.classList.contains('dts-group'), 'the animated element is the whole group block');
+      assert.ok(entry.element.querySelector('.dts-row--group'), 'the block starts at its header');
+      assert.ok(entry.element.querySelector('.dts-row--session'), 'and carries the body, not only the header');
+    }
+
+    const first = animated.splice(0);
+    await swap();
+    assert.deepEqual(titles(), ['One', 'Two'], 'a second drop swaps them back');
+    assert.equal(animated.length, 2, 'the second drop animates again');
+    assert.ok(first.every((entry) => entry.cancelled), 'the in-flight glide is cancelled instead of stacking');
+  } finally {
+    window.Element.prototype.getBoundingClientRect = hostRect;
+    delete window.Element.prototype.animate;
+  }
 });
 
 test('sessions outside every workspace trail in a virtual 未分组 group', async () => {
@@ -2468,6 +2633,192 @@ test('the create dialog offers the host emoji list and submits the chosen glyph'
   assert.ok(create, 'the create request reached the host');
   assert.equal(create.body.name, '图标测试');
   assert.equal(create.body.emoji, '\u{1F3A8}', 'the third glyph was submitted');
+});
+
+test('clicking the icon field label does not clear the topic marker', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  await act(async () => {
+    find('.dts-row--topic', '设计').dispatchEvent(new window.Event('contextmenu', { bubbles: true, cancelable: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')]
+      .find((node) => node.textContent.trim() === '重命名分组')
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const picker = document.querySelector('.dts-dialog .dts-emojis');
+  assert.ok(picker, 'the edit dialog offers the marker picker');
+  const label = picker.closest('.dts-field').querySelector('.dts-field__label');
+  const activeBefore = picker.querySelector('.dts-emojis__item.is-active')?.textContent.trim();
+  await act(async () => label.dispatchEvent(new window.Event('click', { bubbles: true })));
+  assert.equal(
+    picker.querySelector('.dts-emojis__item.is-active')?.textContent.trim(),
+    activeBefore,
+    'clicking the label must not activate the first (no-marker) radio',
+  );
+});
+
+test('a failed delete retry is visible in the result phase', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/delete/preview`] = () => ({
+    ok: true,
+    result: {
+      items: [{ sessionId: 'ses_1', blockers: [] }],
+      rootAvailable: true,
+      hardBlocked: false,
+      running: 0,
+      subagents: 0,
+      bytes: 1,
+    },
+  });
+  let executions = 0;
+  responseOverrides[`${API}/delete/execute`] = () => {
+    executions += 1;
+    if (executions === 1) {
+      return {
+        ok: true,
+        result: {
+          summary: { deleted: 0, skipped: 0, failed: 1, partial: 0, subagents: 0 },
+          items: [{ sessionId: 'ses_1', status: 'failed', code: 'boom', error: 'first failure', notes: [], subagentsRemoved: [] }],
+        },
+      };
+    }
+    return { ok: false, status: 500, error: 'retry failed', code: 'internal' };
+  };
+  await mount();
+  const row = find('.dts-row--session', '会话 1');
+  await act(async () => {
+    row.querySelector('.dts-row__act').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')]
+      .find((node) => node.textContent.trim() === '永久删除')
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const ack = document.querySelector('.dts-ack input');
+  await act(async () => ack.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true, view: window })));
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-dialog .dts-btn')].find((node) => node.textContent.trim() === '永久删除')
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const retry = [...document.querySelectorAll('.dts-dialog .dts-btn')].find((node) => node.textContent.includes('重试'));
+  assert.ok(retry, 'the failed item is offered for retry');
+  await act(async () => retry.dispatchEvent(new window.Event('click', { bubbles: true })));
+  await tick();
+  assert.equal(executions, 2);
+  assert.match(document.querySelector('.dts-dialog')?.textContent ?? '', /retry failed/, 'the retry error is rendered instead of silently swallowed');
+});
+
+test('the create dialog refuses more than the sidecar batch limit', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  const many = makeSessions(205);
+  sessionSource.set(many);
+  workspaceSource.set({
+    ...workspaceSource.getSnapshot(),
+    items: [{ workspaceId: WORKSPACE, path: 'D:/work/one', title: 'One', sessionIds: many.ids, createdAt: 1, updatedAt: 1 }],
+  });
+  await mount();
+  await openTopicCreateDialog();
+  const input = document.querySelector('.dts-dialog .dts-input');
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(input, '超限测试');
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+  await act(async () => {
+    document.querySelector('.dts-picker__bar .dts-linkbtn').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const create = [...document.querySelectorAll('.dts-dialog .dts-btn')].find((node) => node.textContent.trim() === '创建');
+  assert.equal(create.disabled, true, 'the create button is disabled above the sidecar cap');
+  assert.ok(
+    document.querySelector('.dts-dialog .dts-field__hint.is-error')?.textContent.includes('200'),
+    'and the limit explains why',
+  );
+});
+
+test('creating a topic from the move dialog files the sessions in one write', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/topics/create`] = () => ({
+    ok: true,
+    result: { revision: 9, result: { topic: { id: 'tp_new', name: '移动组', emoji: '' } } },
+  });
+  await mount();
+  const row = find('.dts-row--session', '会话 1');
+  await act(async () => {
+    row.querySelector('.dts-row__act').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')]
+      .find((node) => node.textContent.includes('移动到分组'))
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-dialog .dts-btn')]
+      .find((node) => node.textContent.includes('新建分组并放入'))
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const input = document.querySelector('.dts-dialog .dts-input');
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(input, '移动组');
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+  await act(async () => {
+    [...document.querySelectorAll('.dts-dialog .dts-btn')]
+      .find((node) => node.textContent.trim() === '创建')
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const create = calls.find((call) => call.url.endsWith('/topics/create'));
+  assert.ok(create, 'the group is created');
+  assert.deepEqual(create.body.sessionIds, ['ses_1'], 'with the selected session in the same write');
+  assert.equal(calls.some((call) => call.url.endsWith('/assign')), false, 'no second, independently-failing write');
+});
+
+test('a blocked delete offers a recheck instead of forcing a reopen', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  let previews = 0;
+  responseOverrides[`${API}/delete/preview`] = () => {
+    previews += 1;
+    return {
+      ok: true,
+      result: {
+        items: [{ sessionId: 'ses_1', blockers: [{ code: 'locked', severity: 'hard', message: '刚被写入' }] }],
+        rootAvailable: true,
+        hardBlocked: true,
+        running: 0,
+        subagents: 0,
+        bytes: 0,
+      },
+    };
+  };
+  await mount();
+  const row = find('.dts-row--session', '会话 1');
+  await act(async () => {
+    row.querySelector('.dts-row__act').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')]
+      .find((node) => node.textContent.trim() === '永久删除')
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const recheck = [...document.querySelectorAll('.dts-dialog .dts-btn')].find((node) => node.textContent.trim() === '重新检查');
+  assert.ok(recheck, 'the ready phase offers a recheck for a hard-blocked item');
+  await act(async () => recheck.dispatchEvent(new window.Event('click', { bubbles: true })));
+  await tick();
+  assert.equal(previews, 2, 'the preview is re-read');
 });
 
 test('creating a group from the workspace menu expands, scrolls and highlights it', async () => {
@@ -3264,4 +3615,114 @@ test('a collapsed bucket drops its rows from the DOM once the transition ends', 
   });
   await tick(40);
   assert.equal(rows(), 1, 'expanding mounts it again without waiting for a timer');
+});
+
+test('the rail can create a group from the composer and sees its feedback', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const frame = document.querySelector('.BynINW_frame');
+  await act(async () => {
+    frame.setAttribute('data-sidebar-collapsed', '');
+  });
+  await tick(1200);
+  assert.equal(find('.dts-overlay'), undefined, 'the panel itself stepped aside for the rail');
+
+  let chip = findAnywhere('.dts-composer-topic');
+  assert.ok(chip, 'the composer chip survives the collapse');
+  await act(async () => {
+    chip.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const add = [...document.querySelectorAll('.dts-pop--composer .dts-pop__foot .dts-menu__item')]
+    .find((node) => node.textContent.includes('新建分组'));
+  assert.ok(add, 'the rail popover offers creating a group');
+  await act(async () => {
+    add.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  assert.ok(document.querySelector('.dts-dialog'), 'the create dialog is mounted outside the covered region');
+
+  await act(async () => {
+    document.querySelector('.dts-dialog').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+  await tick();
+  responseOverrides[`${API}/assign`] = () => ({ ok: false, status: 500, error: 'assign failed' });
+  chip = findAnywhere('.dts-composer-topic');
+  await act(async () => {
+    chip.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const topic = [...document.querySelectorAll('.dts-pop--composer .dts-menu__item')]
+    .find((node) => node.textContent.includes('默认分组'));
+  await act(async () => {
+    topic.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const toast = findAnywhere('.dts-toast');
+  assert.ok(toast, 'a failed chip write is visible while the panel is hidden');
+  assert.match(toast.textContent, /assign failed/);
+});
+
+test('a /state 404 hands the native region back instead of covering it', async () => {
+  responseOverrides[`${API}/state`] = () => ({ ok: false, status: 404, error: 'not found', code: 'not-found' });
+  await mount();
+  assert.equal(find('.dts-overlay'), undefined, 'a missing host half must not cover the stock list');
+  assert.equal(document.querySelector('[class*="regionArea"]').hasAttribute('inert'), false, 'and the native region stays reachable');
+  assert.equal(findAnywhere('.dts-toast'), undefined, 'the failed read does not turn into a toast over the stock UI');
+});
+
+test('a /state 404 retries instead of leaving the panel gone for the whole page', async () => {
+  // The panel renders nothing while `ready` is false, so the only thing that could bring it
+  // back was a browser reload: the menu entry that reloads the document lives inside the panel.
+  let attempts = 0;
+  responseOverrides[`${API}/state`] = () => {
+    attempts += 1;
+    return attempts === 1
+      ? { ok: false, status: 404, error: 'not found', code: 'not-found' }
+      : stateResult();
+  };
+  await mount();
+  assert.equal(find('.dts-overlay'), undefined, 'the failed read still hands the region back first');
+  assert.equal(document.querySelector('[class*="regionArea"]').hasAttribute('inert'), false, 'and does not inert the stock list');
+  assert.equal(attempts, 1, 'one attempt so far');
+
+  await tick(700);
+  assert.equal(attempts, 2, 'a bounded retry followed the transient 404');
+  assert.ok(find('.dts-overlay'), 'the panel comes up on its own, without a browser reload');
+  assert.equal(document.querySelector('[class*="regionArea"]').hasAttribute('inert'), true, 'and covers the region again');
+});
+
+test('activity promotion coalesces a burst into one commit instead of one per message', async () => {
+  // Two sessions replying in parallel flip the "most recent leads" order on every message.
+  // Committing each flip re-renders the whole tree and rewrites the prefs blob; the gate keeps
+  // the leading edge (a single event is still instant) and coalesces the rest.
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const key = 'dsh-better-workspace:prefs:v1';
+  const base = sessionSource.getSnapshot();
+  const writes = [];
+  const storageProto = window.Storage.prototype;
+  const originalSetItem = storageProto.setItem;
+  storageProto.setItem = function setItem(name, value) {
+    if (name === key) writes.push(value);
+    return originalSetItem.call(this, name, value);
+  };
+  try {
+    let byId = base.byId;
+    let stamp = 1_800_000_000_000;
+    for (let index = 0; index < 12; index++) {
+      const id = index % 2 === 0 ? 'ses_0' : 'ses_1';
+      stamp += 1;
+      byId = { ...byId, [id]: { ...byId[id], updatedAt: stamp } };
+      sessionSource.set({ ...base, byId });
+      await tick(20);
+    }
+    await tick(400);
+    assert.ok(writes.length >= 1, 'the promoted order is persisted');
+    assert.ok(writes.length <= 3, `12 alternating messages commit at most 3 times, got ${writes.length}`);
+    const stored = JSON.parse(writes[writes.length - 1]);
+    assert.equal(stored.sessionOrder[WORKSPACE][0], 'ses_1', 'and the last message still ends up first');
+  } finally {
+    storageProto.setItem = originalSetItem;
+  }
 });

@@ -6,6 +6,7 @@
 import * as React from 'react';
 import { cx, Dialog, Button, TextInput, Checkbox, Icon, TopicMark } from './widgets.jsx';
 import { t } from './i18n.js';
+import { BATCH_LIMIT } from './batch.js';
 
 /** Offline fallback; every glyph is also present in the host's Zen-sourced list. */
 const FALLBACK_EMOJIS = ['\u{1F4C1}', '\u{1F4A1}', '\u{1F3A8}', '\u{1F6E0}\u{FE0F}', '\u{1F9EA}', '\u{1F41E}', '\u{1F680}', '\u{1F4DD}'];
@@ -98,13 +99,21 @@ function SessionPicker({ rows, selected, onToggle, onSelectAll, query, onQuery }
       <div className="dts-picker__list">
         {matches.length === 0 ? <div className="dts-picker__empty">{t('topic.noSessions')}</div> : null}
         {matches.map((row) => (
-          <label key={row.id} className={cx('dts-picker__row', selected.has(row.id) && 'is-on')}>
-            <Checkbox checked={selected.has(row.id)} onChange={() => onToggle(row.id)} label={row.title} />
+          <div
+            key={row.id}
+            className={cx('dts-picker__row', selected.has(row.id) && 'is-on')}
+            onClick={() => onToggle(row.id)}
+          >
+            {/* The checkbox is its own label (see the ack row in results.jsx): nesting it in
+                another <label> is invalid and can toggle twice in some browsers. */}
+            <span onClick={(event) => event.stopPropagation()}>
+              <Checkbox checked={selected.has(row.id)} onChange={() => onToggle(row.id)} label={row.title} />
+            </span>
             <span className="dts-picker__title" title={row.title}>
               {row.title}
             </span>
             <span className="dts-picker__group">{row.topicName}</span>
-          </label>
+          </div>
         ))}
       </div>
     </div>
@@ -129,6 +138,9 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, topic
     if (!busy) onClose();
   };
   const rows = chosen ? (rowsFor?.(chosen) ?? []) : [];
+  // The sidecar caps one write at BATCH_LIMIT session ids; enforce the same cap here so the
+  // dialog cannot assemble a request the host will reject with `batch-too-large`.
+  const overLimit = selected.size > BATCH_LIMIT;
   // The create button greys out on a bad name; the hint explains why instead of leaving the
   // user guessing.
   const problem = nameProblem({ name, workspaceId: chosen, topicsFor, ignoreId: null });
@@ -154,6 +166,10 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, topic
       setError(problemLabel);
       return;
     }
+    if (overLimit) {
+      setError(t('batch.limit'));
+      return;
+    }
     setBusy(true);
     try {
       await onSubmit({ workspaceId: chosen, name: trimmed, emoji, sessionIds: [...selected] });
@@ -174,7 +190,7 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, topic
       footer={
         <>
           <Button variant="ghost" onClick={close} disabled={busy}>{t('action.cancel')}</Button>
-          <Button variant="primary" disabled={busy || Boolean(problem) || !chosen} onClick={submit}>
+          <Button variant="primary" disabled={busy || Boolean(problem) || !chosen || overLimit} onClick={submit}>
             {busy ? t('state.loading') : t('action.create')}
           </Button>
         </>
@@ -238,6 +254,7 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, topic
             onToggle={toggle}
             onSelectAll={(ids) => setSelected(selected.size === 0 ? new Set(ids) : new Set())}
           />
+          {overLimit ? <span className="dts-field__hint is-error">{t('batch.limit')}</span> : null}
         </div>
       ) : null}
       {chosen && rows.length === 0 ? <p className="dts-dialog__hint">{t('topic.noSessions')}</p> : null}
@@ -295,10 +312,10 @@ export function EditTopicDialog({ topic, workspaceId, topicsFor, emojis, onSubmi
         <TextInput autoFocus value={name} onChange={setName} maxLength={40} onEnter={submit} invalid={Boolean(problem)} />
         {problem ? <span className="dts-field__hint is-error">{problemLabel}</span> : null}
       </label>
-      <label className="dts-field">
+      <div className="dts-field">
         <span className="dts-field__label">{t('topic.icon')}</span>
         <EmojiPicker emojis={glyphList(emojis)} value={emoji} onChange={setEmoji} name={t('topic.icon')} />
-      </label>
+      </div>
       {error ? <p className="dts-error">{error}</p> : null}
     </Dialog>
   );
@@ -487,14 +504,15 @@ export function RenameSessionDialog({ row, onSubmit, onClose }) {
 }
 
 /** Move one or many sessions into a topic (the default group included) or into a brand-new one. */
-export function MoveToTopicDialog({ count, topics, emojis, onMove, onCreate, onClose }) {
+export function MoveToTopicDialog({ count, ids = [], workspaceId = null, topics, topicsFor, emojis, onMove, onCreate, onClose }) {
   const [creating, setCreating] = React.useState(false);
   const [name, setName] = React.useState('');
   const [emoji, setEmoji] = React.useState(() => nextUnusedEmoji(emojis, topics));
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(null);
-  // Same rules as the create dialog: the new name has to be unique in this workspace.
-  const problem = nameProblem({ name, workspaceId: null, topicsFor: () => topics, ignoreId: null });
+  // Same rules (and the same source) as the create dialog: the new name has to be unique in
+  // this workspace. `topics` is the precomputed list for callers that already have it.
+  const problem = nameProblem({ name, workspaceId, topicsFor: topicsFor ?? (() => topics), ignoreId: null });
   const problemLabel = problemText(problem);
 
   const run = async (topicId) => {
@@ -527,8 +545,10 @@ export function MoveToTopicDialog({ count, topics, emojis, onMove, onCreate, onC
                 }
                 setBusy(true);
                 try {
-                  const topic = await onCreate({ name: name.trim(), emoji, sessionIds: [] });
-                  await onMove(topic.id);
+                  // Create the group with the sessions in the same write. The old
+                  // create-then-assign pair could leave an empty group behind when the second
+                  // request failed, and the retry then hit a duplicate name.
+                  await onCreate({ name: name.trim(), emoji, sessionIds: ids });
                   onClose();
                 } catch (caught) {
                   setBusy(false);
