@@ -2154,18 +2154,50 @@ test('dragging a topic folds its siblings on the slow, staggered curve', async (
     source.dispatchEvent(start);
   });
   await tick();
-  assert.equal(source.getAttribute('aria-expanded'), 'true', 'the group being dragged stays open');
+  assert.equal(source.getAttribute('aria-expanded'), 'false', 'the dragged group folds too, so its body stops covering the targets');
   assert.equal(sibling.getAttribute('aria-expanded'), 'false', 'other groups in the workspace fold away');
   assert.ok(collapse.classList.contains('is-collapsed'), 'their bodies close');
   assert.ok(collapse.classList.contains('is-focusing'), 'the fold uses the slower drag curve');
   assert.equal(collapse.style.getPropertyValue('--dts-collapse-delay'), '60ms', 'and waits its turn in the wave');
   assert.ok(siblingSection.querySelector('.dts-row--session'), 'the folded body stays mounted so the height can animate');
-  assert.equal(source.closest('.dts-section').getAttribute('data-dragging'), 'true', 'the lifted section is marked, body included');
+  const sourceSection = source.closest('.dts-section');
+  const sourceCollapse = sourceSection.querySelector('.dts-collapse');
+  assert.ok(sourceCollapse.classList.contains('is-collapsed'), 'the dragged body closes as well');
+  assert.equal(sourceCollapse.style.getPropertyValue('--dts-collapse-delay'), '40ms', 'the wave starts at the dragged row');
+  assert.equal(sourceSection.getAttribute('data-dragging'), 'true', 'the lifted section is marked, body included');
 
   await act(async () => source.dispatchEvent(new window.Event('dragend', { bubbles: true })));
   await tick();
-  assert.equal(sibling.getAttribute('aria-expanded'), 'true', 'releasing restores the previous fold state');
+  assert.equal(source.getAttribute('aria-expanded'), 'true', 'releasing restores the dragged group');
+  assert.equal(sibling.getAttribute('aria-expanded'), 'true', 'and the rest of the previous fold state');
   assert.equal(collapse.classList.contains('is-focusing'), false, 'and the slow drag curve is gone');
+});
+
+test('dragging a session folds the other groups but keeps its own rows', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const source = find('.dts-row--session', '会话 1');
+  const ownGroup = find('.dts-row--topic', '默认分组');
+  const otherGroup = find('.dts-row--topic', '设计');
+  const collapse = otherGroup.closest('.dts-section').querySelector('.dts-collapse');
+  assert.equal(otherGroup.getAttribute('aria-expanded'), 'true');
+  await act(async () => {
+    const start = new window.Event('dragstart', { bubbles: true });
+    start.dataTransfer = makeDataTransfer(['ses_1']);
+    source.dispatchEvent(start);
+  });
+  await tick();
+  assert.equal(ownGroup.getAttribute('aria-expanded'), 'true', 'the source topic keeps its rows, which are the reorder area');
+  assert.equal(source.isConnected, true, 'the dragged row stays in the list');
+  assert.equal(otherGroup.getAttribute('aria-expanded'), 'false', 'the other groups of the workspace fold away');
+  assert.ok(collapse.classList.contains('is-focusing'), 'with the slower drag curve');
+  assert.equal(collapse.style.getPropertyValue('--dts-collapse-delay'), '60ms', 'and waits its turn in the wave');
+  assert.equal(find('.dts-row--group').getAttribute('aria-expanded'), 'true', 'the workspace itself stays open');
+
+  await act(async () => source.dispatchEvent(new window.Event('dragend', { bubbles: true })));
+  await tick();
+  assert.equal(otherGroup.getAttribute('aria-expanded'), 'true', 'releasing restores the fold');
+  assert.equal(collapse.classList.contains('is-focusing'), false, 'and the drag curve is gone');
 });
 
 test('a strip under the last topic appends a dragged topic to the end', async () => {
@@ -2231,16 +2263,20 @@ test('dragging a workspace folds the others on the slow, staggered curve', async
     source.dispatchEvent(start);
   });
   await tick();
-  assert.equal(source.getAttribute('aria-expanded'), 'true', 'the dragged workspace stays open');
+  assert.equal(source.getAttribute('aria-expanded'), 'false', 'the dragged workspace folds too, so its body stops covering the other headers');
   assert.equal(sibling.getAttribute('aria-expanded'), 'false', 'the other workspace folds away');
   const collapse = sibling.closest('.dts-group').querySelector('.dts-collapse');
   assert.ok(collapse.classList.contains('is-focusing'), 'with the slower drag curve');
   assert.equal(collapse.style.getPropertyValue('--dts-collapse-delay'), '60ms', 'and a wave delay of its own');
+  const sourceCollapse = source.closest('.dts-group').querySelector('.dts-collapse');
+  assert.ok(sourceCollapse.classList.contains('is-collapsed'), 'the dragged body closes as well');
+  assert.equal(sourceCollapse.style.getPropertyValue('--dts-collapse-delay'), '40ms', 'the wave starts at the dragged row');
   assert.equal(source.closest('.dts-group').getAttribute('data-dragging'), 'true', 'the dragged block reads as lifted');
   assert.equal(source.getAttribute('data-dragging'), null, 'not only its header');
   await act(async () => source.dispatchEvent(new window.Event('dragend', { bubbles: true })));
   await tick();
-  assert.equal(sibling.getAttribute('aria-expanded'), 'true', 'releasing restores it');
+  assert.equal(source.getAttribute('aria-expanded'), 'true', 'releasing restores the dragged workspace');
+  assert.equal(sibling.getAttribute('aria-expanded'), 'true', 'and the others');
   assert.equal(source.closest('.dts-group').getAttribute('data-dragging'), null, 'and the lifted state is cleared');
 });
 

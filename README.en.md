@@ -149,7 +149,7 @@ Expect `200`, with `ok: true` and your group data under `result.workspaces`.
 - **New session** — the ＋ on a group row starts a session directly in that group (a workspace row's ＋ starts one in that workspace).
 - **Rename** — double-click a group name to edit inline (duplicates and illegal characters are reported immediately, and the save is disabled).
 - **Hover a group name** — shows the full name, so a label clipped with an ellipsis is still readable.
-- **Reorder** — drag a group row; dropping on the upper or lower half of a target row decides the insert position. When a drag starts, the other rows at that level fold away in a wave that starts at the pointer (300 ms ease, 20 ms per row, up to four steps) while the pointer's own row stays open; on release they expand again and the rows glide to their new slots over 200 ms instead of snapping to a new order.
+- **Reorder** — drag a group row; dropping on the upper or lower half of a target row decides the insert position. When a drag starts, every row at that level — the dragged one included — folds away in a wave that starts at the pointer (300 ms ease, 20 ms per row, up to four steps), so a long session list cannot cover the headers you are aiming at; on release they expand again and the rows glide to their new slots over 200 ms instead of snapping to a new order. Session drags behave the same way: the other groups of the workspace fold away while the source topic keeps its rows (that is the reorder area), so filing a session into a distant group only needs a drop on its header.
 - **Only this group** — the filter in a group's `⋯` menu also locks to that group's workspace, so identically named groups never bleed across workspaces.
 - **Delete** — clears assignments only; sessions return to the system default group. No sessions are deleted.
 
@@ -161,7 +161,7 @@ Every workspace has a system default group. It cannot be renamed or deleted, but
 - **Hover** for the native hover card: full title, relative time, idle/working/waiting status, and an archived marker when archived;
 - **Hover a clipped title**: like the native list, it crawls to its far edge at ~30 px/s and **rests there** (no bounce, no back-and-forth); leaving returns it to the start at once. Overflow under 8 px is left alone (it would read as jitter), and reduced-motion jumps straight to the end;
 - **Row hover** reveals `⋯ / archive / pin`, with the inline timestamp yielding to them;
-- **Drag** — onto another workspace is refused (guard); onto another group files the session there;
+- **Drag** — onto another workspace is refused (guard); onto another group files the session there. While dragging, the other groups of the workspace fold away (the source topic stays open for in-group reordering), so a distant group only needs its header as the target;
 - **Pin** actually floats the row to the top of its group (host pin order, most recent first).
 
 ### Where a new session lands

@@ -839,6 +839,16 @@ export function OverlayPanel({ actions, schedules }) {
       writeReorderPayload(event.dataTransfer, { level, ...payload });
       event.dataTransfer.effectAllowed = 'move';
     },
+    /**
+     * A session drag is a file drag (it may end on another topic), so `beginDrag` already owns
+     * the payload; this only publishes the fold focus. The source topic keeps its rows — that
+     * is the reorder area — while the tree folds the other topics of the workspace so a far
+     * header can be reached without dragging through every row in between.
+     */
+    onSessionStart: (payload) => {
+      holdPromotion();
+      setDragging({ level: 'session', id: payload.id, workspaceId: payload.workspaceId, topicId: payload.topicId });
+    },
     onHover: (event, level, target, forcedPosition) => {
       const drag = currentDrag();
       // Session drags are file drags; only a sibling row of the same topic is a reorder.

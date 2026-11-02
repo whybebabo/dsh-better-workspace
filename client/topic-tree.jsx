@@ -455,7 +455,8 @@ const Section = React.memo(function Section({ section, group, schedules, selectM
     beginDrag({ ids: [row.id], workspaceId: row.workspaceId, fromTopicId: row.topicId });
     writeDragPayload(event.dataTransfer, [row.id]);
     event.dataTransfer.effectAllowed = 'move';
-  }, []);
+    reorder?.onSessionStart?.({ id: row.id, workspaceId: row.workspaceId, topicId: row.topicId });
+  }, [reorder]);
   const body = (
     <>
       {visible.map((row) => (
@@ -565,15 +566,25 @@ export function TopicTree({
   /**
    * The row being dragged, if any.
    *
-   * It still folds the rest of its level away — that is what makes "move this workspace past
-   * the other seven" a usable drag — but the fold is now a slow, staggered wave instead of a
-   * single 200 ms snap: the rows nearest the pointer start folding first, everything further
-   * out follows, and each body eases shut over 300 ms. It also drives the taller append strips
-   * at the end of the list.
+   * A drag folds the rest of its level away — that is what makes "move this workspace past
+   * the other seven" or "file this session into a far group" a usable drag — but the fold is
+   * a slow, staggered wave instead of a single 200 ms snap: the rows nearest the pointer
+   * start folding first, everything further out follows, and each body eases shut over
+   * 300 ms. It also drives the taller append strips at the end of the list.
+   *
+   * The dragged workspace/topic folds too (carrying its open body left every target header
+   * hidden behind it). A session drag folds only the *other* topics of its workspace: its own
+   * topic keeps its rows, because those rows are where the session is reordered.
    */
   const focus = reorder?.dragging ?? null;
+  const focusLevel = focus?.level ?? null;
+  const focusTopicId = focusLevel === 'topic'
+    ? focus.id
+    : focusLevel === 'session'
+      ? focus.topicId ?? null
+      : null;
   // Index of the dragged workspace, so the fold can radiate outwards from it.
-  const focusGroupIndex = focus?.level === 'workspace'
+  const focusGroupIndex = focusLevel === 'workspace'
     ? tree.groups.findIndex((group) => group.workspaceId === focus.id)
     : -1;
   const lastRealWorkspace = [...tree.groups].reverse().find((group) => !group.virtual) ?? null;
@@ -625,20 +636,21 @@ export function TopicTree({
         const groupSelected = groupIds.filter((id) => selectedIds.has(id)).length;
         const topics = group.sections.filter((section) => section.kind === 'topic');
         const lastTopic = topics[topics.length - 1] ?? null;
-        // Where the dragged topic sits in this group, so the sibling fold can start next to it.
-        const focusTopicIndex = focus?.level === 'topic' && group.workspaceId === focus.workspaceId
-          ? topics.findIndex((topic) => topic.id === focus.id)
+        // Where the dragged row sits in this group, so the fold can start next to it.
+        const focusTopicIndex = focusTopicId && group.workspaceId === focus.workspaceId
+          ? topics.findIndex((topic) => topic.id === focusTopicId)
           : -1;
-        // While a workspace is dragged, every *other* workspace folds away so the pointer can
-        // reach a header across the list. The fold is paced as a wave: the neighbour folds
-        // first, the farther groups follow, and each body eases shut over 300 ms.
-        const focusGroup = focus?.level === 'workspace' && group.workspaceId !== focus.id;
+        // While a workspace is dragged, every workspace folds away — the dragged one included,
+        // so its open body cannot hide the headers the pointer is aiming at. The fold is paced
+        // as a wave: the source folds first, the farther groups follow, and each body eases
+        // shut over 300 ms.
+        const focusGroup = focusLevel === 'workspace';
         const groupCollapsed = focusGroup ? true : group.collapsed;
         const shownGroup = groupCollapsed === group.collapsed ? group : { ...group, collapsed: groupCollapsed };
         const groupDelay = focusGroup ? focusDelay(Math.abs(groupIndex - focusGroupIndex)) : 0;
         // Dragging a topic leaves a taller append strip under the last group, so "move to the
         // end" does not depend on hitting a 28px header's lower half.
-        const appendTail = focus?.level === 'topic'
+        const appendTail = focusLevel === 'topic'
           && group.workspaceId === focus.workspaceId
           && lastTopic
           && lastTopic.id !== focus.id;
@@ -676,15 +688,17 @@ export function TopicTree({
             <Collapse open={!groupCollapsed} delay={groupDelay} focusing={focusGroup}>
               <div className="dts-group__body">
                 {group.sections.map((section) => {
-                  // A topic drag folds the sibling topics of its own workspace, again as a wave
-                  // that starts next to the dragged row.
-                  const sibling = focus?.level === 'topic'
+                  // A topic drag folds the topics of its own workspace — the dragged one too, so
+                  // its body stops covering the headers it is aimed at. A session drag folds the
+                  // other topics so a far group stays reachable, while the source topic keeps the
+                  // rows that make up the reorder area.
+                  const focusSection = (focusLevel === 'topic' || focusLevel === 'session')
                     && group.workspaceId === focus.workspaceId
                     && section.kind === 'topic'
-                    && section.id !== focus.id;
-                  const sectionCollapsed = sibling ? true : section.collapsed;
+                    && (focusLevel === 'topic' || section.id !== focusTopicId);
+                  const sectionCollapsed = focusSection ? true : section.collapsed;
                   const shownSection = sectionCollapsed === section.collapsed ? section : { ...section, collapsed: sectionCollapsed };
-                  const sectionDelay = sibling && focusTopicIndex >= 0
+                  const sectionDelay = focusSection && focusTopicIndex >= 0
                     ? focusDelay(Math.abs(topics.indexOf(section) - focusTopicIndex))
                     : 0;
                   // Landing aid for a topic the user just created: `reveal` names one row, and
@@ -700,7 +714,7 @@ export function TopicTree({
                         selectedIds={selectedIds}
                         revealed={revealedBuckets.has(sectionKey(group, section))}
                         highlighted={highlighted}
-                        focusing={sibling}
+                        focusing={focusSection}
                         collapseDelay={sectionDelay}
                         onToggleReveal={onToggleReveal}
                         query={tree.search}
