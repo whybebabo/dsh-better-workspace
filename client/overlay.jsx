@@ -10,7 +10,7 @@ import * as React from 'react';
 import { createPortal } from 'react-dom';
 import { observeComposerSlot, resolveComposerWorkspace } from './composer.js';
 import { observeWorkspaceRegion, setRegionCovered, setRegionInert, watchRegionModals } from './geometry.js';
-import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, mainSessionId, moveWithin, orderByManual, pendingStatusLabel, promoteSessionOrder, samePath, selectableIds, topicLabel, ungroupedSessionIds, UNGROUPED_WORKSPACE_ID, workspaceSessionIds } from './model.js';
+import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, mainSessionId, moveWithin, orderByManual, pendingStatusLabel, promoteSessionOrder, samePath, selectableIds, topicLabel, topicOfSession, ungroupedSessionIds, UNGROUPED_WORKSPACE_ID, workspaceSessionIds } from './model.js';
 import { createPanelStore } from './store.js';
 import { beginReorder, currentDrag, endDrag, readDragPayload, reorderVerdict, sessionReorderVerdict, writeReorderPayload } from './dnd.js';
 import { runSessionAction, mergeOutcomes, BATCH_LIMIT } from './batch.js';
@@ -250,6 +250,10 @@ export function OverlayPanel({ actions, schedules }) {
     }
     const failed = Array.isArray(result.failed) ? result.failed : [];
     if (failed.length > 0) flash(t('session.adoptRefused', { n: failed.length }), 'bad');
+    // The host caps one repair pass at 200 registry writes; say so instead of leaving the rest
+    // silently in 未分组 until the next refresh.
+    const deferred = Number(result.deferred) || 0;
+    if (deferred > 0) flash(t('session.adoptDeferred', { n: deferred }));
   }, [actions]);
   React.useEffect(() => {
     if (!onScreen) return undefined;
@@ -457,11 +461,40 @@ export function OverlayPanel({ actions, schedules }) {
   }, [options, state.workspaces, store, workspaceSnapshot?.phase]);
 
   /**
+   * Files a freshly forked child into the group its source was showing in.
+   *
+   * The host attaches a fork to the source's workspace but knows nothing about the topic
+   * sidecar, so an unfiled child renders in the default group. The reserved default group needs
+   * no write — an unfiled session already lives there — and the virtual 未分组 bucket has no
+   * sidecar document. A child that already carries an assignment (the row menu or another
+   * window filed it first) keeps that group.
+   */
+  function fileForkedSession(childId, workspaceId, topicId) {
+    if (!childId || !workspaceId || workspaceId === UNGROUPED_WORKSPACE_ID) return;
+    if (!topicId || topicId === DEFAULT_TOPIC_ID) return;
+    if ((store.assignmentsOf(workspaceId) ?? {})[childId]) return;
+    const topic = (store.topicsOf(workspaceId) ?? []).find((entry) => entry.id === topicId);
+    if (!topic) return;
+    const auto = autoFileRef.current;
+    // The watcher below sees the same child in the list; `busy` keeps it from writing a second
+    // time while this request is in flight.
+    auto.busy.add(childId);
+    store
+      .assign({ workspaceId, sessionIds: [childId], topicId })
+      .catch(() => { /* stays in the default bucket; the row menu can still move it */ })
+      .finally(() => auto.busy.delete(childId));
+  }
+
+  /**
    * New-session filing. Two paths share one watcher so a blank is claimed exactly once:
    *
    * - an explicit "new session in this topic" arms `pendingRef`, and that topic wins;
    * - otherwise the blank stays in the workspace's **default group** unless the panel is
    *   filtered to a topic, in which case it joins the topic being looked at.
+   *
+   * A forked child is the one non-blank arrival with a rule of its own: it joins the group its
+   * source is showing in. The row menu files its own fork immediately; the watcher below covers
+   * the stock fork shortcut, a branch made from the chat view, and a fork another window made.
    *
    * This used to file every implicit blank into the workspace's most recently *created* topic:
    * clicking 新会话 dropped the row into a group the user was not looking at (and, before new
@@ -484,6 +517,28 @@ export function OverlayPanel({ actions, schedules }) {
       auto.primed = true;
       for (const id of ids) auto.seen.add(id);
       return;
+    }
+
+    const fresh = ids.filter((id) => !auto.seen.has(id));
+    // A user fork carries `parentId` (the host stamps the source onto the child) but is not a
+    // subagent, and the host attached it to the source's workspace. It arrives with no topic
+    // assignment, so without this it lands in the default group while its source sits in a
+    // topic. Checked before the armed-topic branch so an arm waiting for a blank cannot delay
+    // a fork's filing.
+    for (const id of fresh) {
+      const child = byId[id];
+      if (!child?.parentId || child.origin === 'subagent' || auto.busy.has(id)) continue;
+      const parentId = child.parentId;
+      const workspace = options.find((option) => option.sessionIds.includes(parentId))
+        ?? options.find((option) => samePath(option.path, byId[parentId]?.cwd));
+      if (!workspace) continue;
+      const assignments = store.assignmentsOf(workspace.workspaceId) ?? {};
+      // Already filed by the row menu or another window: respect that group.
+      if (assignments[id]) continue;
+      const topicId = assignments[parentId] ?? DEFAULT_TOPIC_ID;
+      // An unfiled child already renders in the default group, where its parent is.
+      if (topicId === DEFAULT_TOPIC_ID) continue;
+      fileForkedSession(id, workspace.workspaceId, topicId);
     }
 
     const pending = pendingRef.current;
@@ -535,7 +590,6 @@ export function OverlayPanel({ actions, schedules }) {
       return;
     }
 
-    const fresh = ids.filter((id) => !auto.seen.has(id));
     const blanks = fresh.filter((id) => byId[id]?.blank && !byId[id]?.parentId && !auto.busy.has(id));
     for (const id of fresh) if (!byId[id]?.blank || byId[id]?.parentId) auto.seen.add(id);
     // Only an active topic filter gives the implicit path a target. Without one the blank stays
@@ -749,6 +803,50 @@ export function OverlayPanel({ actions, schedules }) {
     if (gate.timer !== null) clearTimeout(gate.timer);
     gate.timer = null;
   }, []);
+
+  /**
+   * A drag normally ends through the source row's `dragend`. If that row disappears while the
+   * pointer is still down — another window deleted or archived the session, a filter excluded
+   * it — the browser never dispatches `dragend` on a removed element. Without this, `dragging`
+   * stays set: every other group of the workspace keeps the focus fold (and ignores header
+   * clicks), and the promotion gate stays paused so the session order stops updating.
+   */
+  React.useEffect(() => {
+    if (!dragging || dragging.level !== 'session') return undefined;
+    if (list.byId?.[dragging.id]) return undefined;
+    endDrag();
+    setDropHint(null);
+    setDragging(null);
+    releasePromotion();
+    return undefined;
+  }, [dragging, list, releasePromotion]);
+
+  /**
+   * Bubble-phase backstop for a drag whose source never reports `dragend` (dropped outside the
+   * window, source removed by a publish that did not reach the effect above). It runs after the
+   * panel's own drop handlers — a capture listener here would clear `currentDrag()` before they
+   * could read the payload.
+   */
+  React.useEffect(() => {
+    if (!dragging) return undefined;
+    const stop = () => {
+      endDrag();
+      setDropHint(null);
+      setDragging(null);
+      releasePromotion();
+    };
+    document.addEventListener('dragend', stop);
+    document.addEventListener('drop', stop);
+    return () => {
+      document.removeEventListener('dragend', stop);
+      document.removeEventListener('drop', stop);
+    };
+  }, [dragging, releasePromotion]);
+
+  /** The composer seat owns the chip; a popover must not outlive the seat it is anchored to. */
+  React.useEffect(() => {
+    if (!composer.container && composerMenu) setComposerMenu(null);
+  }, [composer.container, composerMenu]);
 
   React.useEffect(() => {
     const byId = list.byId ?? {};
@@ -1077,10 +1175,9 @@ export function OverlayPanel({ actions, schedules }) {
     for (const id of allSessionIdsInWorkspace(workspaceId)) {
       const session = byId[id];
       if (!session || session.origin === 'subagent') continue;
-      // A stale assignment (the group was deleted in another window) belongs to the default
-      // bucket, exactly like the tree treats it, instead of vanishing from this list.
-      const assigned = assignments[id] ?? DEFAULT_TOPIC_ID;
-      const topicId = known.has(assigned) ? assigned : DEFAULT_TOPIC_ID;
+      // The same group the tree renders: a stale assignment and an unfiled fork resolve exactly
+      // like they do in `buildTree`, so this picker cannot disagree with the rows behind it.
+      const topicId = topicOfSession({ id, byId, assignments, topicIds: known });
       buckets.get(topicId)?.push({
         id,
         title: session.displayTitle || session.title || id,
@@ -1221,25 +1318,43 @@ export function OverlayPanel({ actions, schedules }) {
   };
 
   /**
-   * Groups with their session counts, in one pass over the assignment map. This runs on every
-   * header render and inside two dialogs; counting per group made it O(groups x sessions).
+   * Groups with their session counts, in one pass over the workspace's rendered members.
+   * This runs inside the header menus and two dialogs; the count uses the same `topicOfSession`
+   * derivation as the tree, so an inherited fork is counted in the group it visually sits in.
+   * `storedName` keeps the persisted name for duplicate checks: `name` is the localized label.
    */
   function topicsWithCounts(workspaceId) {
+    const topics = store.topicsOf(workspaceId) ?? [];
+    const known = new Set(topics.map((topic) => topic.id));
+    const byId = list.byId ?? {};
+    const assignments = store.assignmentsOf(workspaceId) ?? {};
     const counts = new Map();
-    for (const topicId of Object.values(store.assignmentsOf(workspaceId) ?? {})) {
+    for (const id of allSessionIdsInWorkspace(workspaceId)) {
+      const topicId = topicOfSession({ id, byId, assignments, topicIds: known });
       counts.set(topicId, (counts.get(topicId) ?? 0) + 1);
     }
-    return (store.topicsOf(workspaceId) ?? []).map((topic) => ({ ...topic, name: topicLabel(topic), count: counts.get(topic.id) ?? 0 }));
+    return topics.map((topic) => ({
+      ...topic,
+      name: topicLabel(topic),
+      storedName: topic.name,
+      count: counts.get(topic.id) ?? 0,
+    }));
   }
 
   /**
-   * How many sessions a group actually holds, read from the document rather than from the rows
-   * on screen: a search or an active filter hides rows, but deleting the group still releases
-   * every session in it, and the confirmation must not understate that.
+   * How many sessions a group actually holds, read through the same derivation the rows use:
+   * a search or an active filter hides rows, but deleting the group still releases every
+   * session it visibly owns, and the confirmation must not understate that.
    */
   const topicSessionCount = (workspaceId, topicId) => {
+    const topics = store.topicsOf(workspaceId) ?? [];
+    const known = new Set(topics.map((topic) => topic.id));
+    const byId = list.byId ?? {};
+    const assignments = store.assignmentsOf(workspaceId) ?? {};
     let total = 0;
-    for (const assigned of Object.values(store.assignmentsOf(workspaceId) ?? {})) if (assigned === topicId) total += 1;
+    for (const id of allSessionIdsInWorkspace(workspaceId)) {
+      if (topicOfSession({ id, byId, assignments, topicIds: known }) === topicId) total += 1;
+    }
     return total;
   };
 
@@ -1277,22 +1392,41 @@ export function OverlayPanel({ actions, schedules }) {
       >
         {t('action.rename')}
       </MenuItem>,
-      <MenuItem
-        key="fork"
-        icon={<Icon name="fork" />}
-        hint={shortcutHint('fork')}
-        onSelect={async () => {
-          setMenu(null);
-          try {
-            const childId = await actions.forkSession(row.id);
-            if (childId) actions.openSession(childId);
-          } catch (error) {
-            flash(error?.message ?? String(error), 'bad');
-          }
-        }}
-      >
-        {t('session.fork')}
-      </MenuItem>,
+    );
+    // The stock item hides itself when the peer may not call `session/fork`; mirror that so a
+    // restricted session does not offer a command the host will refuse. A host without the
+    // access service answers "allowed", which keeps local/older compositions unchanged.
+    const forkAllowed = actions.canAccessSession?.(row.id, 'session/fork') !== false;
+    if (forkAllowed) {
+      items.push(
+        <MenuItem
+          key="fork"
+          icon={<Icon name="fork" />}
+          hint={shortcutHint('fork')}
+          onSelect={async () => {
+            setMenu(null);
+            try {
+              const childId = await actions.forkSession(row.id);
+              if (!childId) return;
+              // The host attaches the child to the source's workspace but knows nothing about
+              // the topic sidecar; copy the group the source row is showing in.
+              fileForkedSession(childId, row.workspaceId, row.topicId);
+              actions.openSession(childId);
+            } catch (error) {
+              // The stock action maps this one refusal to "open the session first"; the raw
+              // host text ("Open the source Session to complete migration…") is not actionable.
+              const migration = error?.rpcError?.code === 'session/migration-required'
+                || error?.code === 'session/migration-required'
+                || /migration-required/i.test(String(error?.message ?? ''));
+              flash(migration ? t('session.forkNeedsOpen') : error?.message ?? String(error), 'bad');
+            }
+          }}
+        >
+          {t('session.fork')}
+        </MenuItem>,
+      );
+    }
+    items.push(
       <MenuItem
         key="archive"
         icon={<Icon name={row.archived ? 'unarchive' : 'archive'} />}
@@ -1572,10 +1706,16 @@ export function OverlayPanel({ actions, schedules }) {
     ?? resolveComposerWorkspace(composer.workspaceTitle, options);
   const composerTopics = composerWorkspaceId ? store.topicsOf(composerWorkspaceId) ?? [] : [];
   const composerAssignedId = composerWorkspaceId && composerSessionId
-    ? (store.assignmentsOf(composerWorkspaceId) ?? {})[composerSessionId] ?? DEFAULT_TOPIC_ID
+    ? topicOfSession({
+      id: composerSessionId,
+      byId: list.byId ?? {},
+      assignments: store.assignmentsOf(composerWorkspaceId) ?? {},
+      topicIds: new Set(composerTopics.map((topic) => topic.id)),
+    })
     : null;
-  // A stale assignment (topic deleted in another window) falls back to the default group,
-  // matching what the tree does with the same document.
+  // The chip names the group the session is *shown* in: an unfiled fork follows its source, so
+  // it must not say "default" while the row sits under the source's group. A stale assignment
+  // resolves to the default group, matching what the tree does with the same document.
   const composerTopic = composerAssignedId === null
     ? null
     : composerTopics.find((entry) => entry.id === composerAssignedId)
@@ -1613,7 +1753,7 @@ export function OverlayPanel({ actions, schedules }) {
     composer.container,
   ) : null;
 
-  const composerPopover = composerMenu ? createPortal(
+  const composerPopover = composerMenu && composer.container ? createPortal(
     <Popover anchor={composerMenu.rect} anchorEl={composerMenu.el} onClose={() => setComposerMenu(null)} width={240} align="left" className="dts-pop--composer">
       <div className="dts-pop__head">{t('composer.pickTopic')}</div>
       <div className="dts-pop__list">
@@ -1733,7 +1873,8 @@ export function OverlayPanel({ actions, schedules }) {
           onClose={() => setDialog(null)}
           onMove={async (topicId) => {
             const result = await store.assign({ workspaceId: dialog.workspaceId, sessionIds: dialog.ids, topicId });
-            flash(`✓ ${result.result.changed}`);
+            const changed = Number(result.result.changed) || 0;
+            flash(changed > 0 ? t('session.movedCount', { n: changed }) : t('session.movedNone'));
           }}
           onCreate={async (input) => {
             const created = await store.createTopic({ workspaceId: dialog.workspaceId, ...input });

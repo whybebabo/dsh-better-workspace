@@ -14,6 +14,7 @@ import { JSDOM } from 'jsdom';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const BUNDLE = join(here, '..', 'lib', 'client.js');
+const PKG = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8'));
 
 const WORKSPACE = 'ws_one';
 const TOPIC = 'tp_one';
@@ -25,7 +26,7 @@ const API = '/dsh-better-workspace/api';
  * "no marker" swatch.
  */
 const DEFAULT_RESPONSES = {
-  [`${API}/emojis`]: () => ({ ok: true, result: { emojis: ['\u{1F4C1}', '\u{1F4A1}', '\u{1F3A8}', '\u{1F680}'] } }),
+  [`${API}/emojis?v=${encodeURIComponent(PKG.version)}`]: () => ({ ok: true, result: { emojis: ['\u{1F4C1}', '\u{1F4A1}', '\u{1F3A8}', '\u{1F680}'] } }),
 };
 
 let dom;
@@ -47,6 +48,9 @@ let archiveImpl;
 let startSessionImpl;
 let startSessionCalls = 0;
 let startSessionArgs = [];
+let forkSessionImpl;
+let forkSessionCalls = [];
+let forkSessionOptions;
 let openSessionCalls = 0;
 let toggleSidebarCalls = 0;
 let workspaceRenameCalls = [];
@@ -59,6 +63,8 @@ let pickDirectoryCalls = 0;
 let sessionRefreshCalls = 0;
 /** Per-test override for `pinSession`, so a click can move the host's pin set. */
 let pinImpl;
+/** Optional `remoteAccess` stand-in; absent means "no access service, everything allowed". */
+let remoteAccessImpl = null;
 /** Global scheduled-task catalog the fake Remote face answers with. */
 let scheduleCatalog;
 let scheduleReaders;
@@ -308,6 +314,11 @@ function applyPlugin(mod) {
             startSessionArgs.push(workspaceId);
             return startSessionImpl ? startSessionImpl(workspaceId) : undefined;
           },
+          forkSession(sessionId, onCreated, options) {
+            forkSessionCalls.push(sessionId);
+            forkSessionOptions = options;
+            return Promise.resolve(forkSessionImpl ? forkSessionImpl(sessionId) : undefined);
+          },
           archiveSession: async (id) => (archiveImpl ? archiveImpl(id) : undefined),
           unarchiveSession: async () => {},
           pinSession: async (id) => (pinImpl ? pinImpl(id) : undefined),
@@ -343,6 +354,7 @@ function applyPlugin(mod) {
           },
         };
       }
+      if (name === 'remoteAccess' && remoteAccessImpl) return remoteAccessImpl;
       throw new Error(`no such service: ${name}`);
     },
     slots: {
@@ -377,9 +389,13 @@ beforeEach(async () => {
   slotCalls = [];
   archiveImpl = null;
   pinImpl = null;
+  remoteAccessImpl = null;
   startSessionImpl = null;
   startSessionCalls = 0;
   startSessionArgs = [];
+  forkSessionImpl = null;
+  forkSessionCalls = [];
+  forkSessionOptions = undefined;
   openSessionCalls = 0;
   toggleSidebarCalls = 0;
   workspaceRenameCalls = [];
@@ -462,6 +478,10 @@ test('the bundle mounts over the workspace region and inert the native list', as
   assert.equal(document.querySelector('[class*="_regionArea"]').getAttribute('aria-hidden'), 'true');
   assert.ok(find('.dts-row--topic', '设计'));
   assert.equal(container.querySelectorAll('.dts-row--session').length, 3);
+  assert.ok(
+    calls.some((call) => call.url.includes('/emojis?v=')),
+    'the cached glyph table is versioned by the release, so a plugin upgrade cannot serve yesterday’s copy',
+  );
 });
 
 test('a native dialog rendered inside the covered region hands the region back until it closes', async () => {
@@ -726,6 +746,129 @@ test('a session started from a topic is filed into it', async () => {
   assert.ok(assign, 'the new session was filed into the topic');
   assert.deepEqual(assign.body.sessionIds, ['ses_new']);
   assert.equal(assign.body.topicId, TOPIC);
+});
+
+/** Opens a row's ⋯ menu and picks the command with the given label. */
+async function runRowCommand(rowText, label) {
+  const row = find('.dts-row--session', rowText);
+  await act(async () => {
+    row.querySelector('.dts-row__act').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const item = [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')]
+    .find((node) => node.querySelector('.dts-menu__label')?.textContent.trim() === label);
+  assert.ok(item, `the row menu offers ${label}`);
+  await act(async () => {
+    item.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+}
+
+test('a forked session is filed into the group its source sits in', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
+  forkSessionImpl = async () => 'ses_fork';
+  await mount();
+  await runRowCommand('会话 0', '分叉会话');
+
+  assert.deepEqual(forkSessionCalls, ['ses_0'], 'the host command forks the clicked row');
+  assert.deepEqual(forkSessionOptions, { allowMigration: false }, 'the stock preflight is preserved: a migrating source is refused, not silently forked');
+  const assign = calls.find((call) => call.url.endsWith('/assign'));
+  assert.ok(assign, 'the child is filed instead of falling into the default group');
+  assert.equal(assign.body.workspaceId, WORKSPACE);
+  assert.deepEqual(assign.body.sessionIds, ['ses_fork']);
+  assert.equal(assign.body.topicId, TOPIC, 'the child stays in the source row\'s group');
+  assert.equal(openSessionCalls, 1, 'the child still opens');
+});
+
+test('a fork of a default-group session needs no assignment write', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
+  forkSessionImpl = async () => 'ses_fork_default';
+  await mount();
+  await runRowCommand('会话 1', '分叉会话');
+
+  assert.equal(calls.some((call) => call.url.endsWith('/assign')), false, 'an unassigned child already renders in the default group');
+  assert.equal(openSessionCalls, 1, 'the child still opens');
+});
+
+test('a fork created outside the row menu follows its source group', async () => {
+  // The stock fork shortcut and the chat view's branch command create the child without going
+  // through this panel's menu; its `parentId` and the source's assignment are the only signal.
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
+  await mount();
+  const before = sessionSource.getSnapshot();
+  const child = { id: 'ses_child', displayTitle: '会话 0 的分叉', cwd: 'D:/work/one', updatedAt: Date.now(), blank: false, parentId: 'ses_0' };
+  await act(async () => {
+    sessionSource.set({ ...before, ids: [child.id, ...before.ids], byId: { ...before.byId, [child.id]: child } });
+  });
+  await tick();
+
+  const assign = calls.find((call) => call.url.endsWith('/assign'));
+  assert.ok(assign, 'the parented child is filed');
+  assert.equal(assign.body.workspaceId, WORKSPACE);
+  assert.deepEqual(assign.body.sessionIds, ['ses_child']);
+  assert.equal(assign.body.topicId, TOPIC);
+});
+
+test('a fork renders inside its source group without a default-group flash', async () => {
+  // The mocked `/state` never reports the child's assignment, so the placement below can only
+  // come from the tree deriving the group from `parentId` — the same path the first paint uses
+  // before the panel's assignment write has landed.
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
+  await mount();
+  const before = sessionSource.getSnapshot();
+  const child = { id: 'ses_visible_fork', displayTitle: '会话 0 的分叉', cwd: 'D:/work/one', updatedAt: Date.now(), blank: false, parentId: 'ses_0' };
+  await act(async () => {
+    sessionSource.set({ ...before, ids: [child.id, ...before.ids], byId: { ...before.byId, [child.id]: child }, current: child.id });
+  });
+  await tick(60);
+
+  const sections = [...container.querySelectorAll('.dts-section--topic')];
+  const sectionOf = (label) => sections.find((node) => node.querySelector('.dts-row--topic')?.textContent.includes(label));
+  assert.ok(sectionOf('设计').textContent.includes('会话 0 的分叉'), 'the child is rendered under its source group');
+  assert.equal(sectionOf('默认分组').textContent.includes('会话 0 的分叉'), false, 'and never passes through the default group');
+
+  // The chip and the group counts are the same derivation as the row: an unfiled fork must not be
+  // named "default" by the composer while the tree shows it under its source, and the picker
+  // counts must agree with the rows.
+  const chipLabel = document.querySelector('.dts-composer-topic .dts-composer-topic__label')?.textContent?.trim();
+  assert.match(String(chipLabel), /设计/, 'the open child is labelled with the group it renders in');
+  await act(async () => {
+    document.querySelector('.dts-composer-topic').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const counts = [...document.querySelectorAll('.dts-pop--composer .dts-menu__item')].map((node) => ({
+    name: node.querySelector('.dts-menu__label')?.textContent?.trim(),
+    count: node.querySelector('.dts-menu__hint')?.textContent?.trim(),
+  }));
+  assert.equal(counts.find((entry) => entry.name === '设计')?.count, '2', 'the source group counts the child');
+  assert.equal(counts.find((entry) => entry.name === '默认分组')?.count, '2', 'and the default group does not');
+});
+
+test('the fork watcher leaves default-group parents and subagent children alone', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
+  await mount();
+  const before = sessionSource.getSnapshot();
+  const fromDefault = { id: 'ses_default_child', displayTitle: '', cwd: 'D:/work/one', updatedAt: Date.now(), blank: false, parentId: 'ses_1' };
+  const subagent = { id: 'ses_sub_child', displayTitle: '子智能体', cwd: 'D:/work/one', updatedAt: Date.now(), blank: false, parentId: 'ses_0', origin: 'subagent' };
+  await act(async () => {
+    sessionSource.set({
+      ...before,
+      ids: [fromDefault.id, ...before.ids],
+      byId: { ...before.byId, [fromDefault.id]: fromDefault, [subagent.id]: subagent },
+    });
+  });
+  await tick();
+
+  assert.equal(
+    calls.some((call) => call.url.endsWith('/assign')),
+    false,
+    'neither an unfiled parent\'s fork nor a subagent child is written to the sidecar',
+  );
 });
 
 test('an unrelated session appearing later is not claimed by a pending topic', async () => {
@@ -3761,4 +3904,140 @@ test('activity promotion coalesces a burst into one commit instead of one per me
   } finally {
     storageProto.setItem = originalSetItem;
   }
+});
+
+test('a dragged session that disappears releases the fold and the promotion gate', async () => {
+  // Another window deleting/archiving the dragged row unmounts it, so no `dragend` reaches the
+  // panel. The fold must not stay latched: the other groups have to reopen and the promotion
+  // gate has to release without a reload.
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const source = find('.dts-row--session', '会话 1');
+  const other = find('.dts-row--topic', '设计');
+  await act(async () => {
+    const start = new window.Event('dragstart', { bubbles: true });
+    start.dataTransfer = makeDataTransfer(['ses_1']);
+    source.dispatchEvent(start);
+  });
+  await tick();
+  assert.equal(other.getAttribute('aria-expanded'), 'false', 'the session drag folds the other group');
+
+  const before = sessionSource.getSnapshot();
+  const byId = { ...before.byId };
+  delete byId.ses_1;
+  await act(async () => {
+    sessionSource.set({ ...before, ids: before.ids.filter((id) => id !== 'ses_1'), byId, current: 'ses_0' });
+  });
+  await tick(80);
+
+  const design = find('.dts-row--topic', '设计');
+  assert.equal(design.getAttribute('aria-expanded'), 'true', 'the fold is released when its source disappears');
+  assert.equal(
+    design.closest('.dts-section').querySelector('.dts-collapse').classList.contains('is-focusing'),
+    false,
+    'and the drag curve is gone',
+  );
+});
+
+test('the composer popover closes when its seat disappears', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const chip = document.querySelector('.dts-composer-topic');
+  assert.ok(chip, 'the chip is seated');
+  await act(async () => {
+    chip.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  assert.ok(document.querySelector('.dts-pop--composer'), 'the popover is open');
+
+  await act(async () => {
+    document.querySelector('.Hqq-bq_workspaceRow').remove();
+  });
+  await tick(1300);
+  assert.equal(document.querySelector('.dts-pop--composer'), null, 'the popover does not outlive its seat');
+});
+
+test('search commits once after a pause instead of on every keystroke', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const searchButton = [...container.querySelectorAll('.dts-header .dts-iconbtn')]
+    .find((node) => node.getAttribute('aria-label') === '搜索会话');
+  await act(async () => {
+    searchButton.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const input = document.querySelector('.dts-header__search input');
+  assert.ok(input, 'the search field opened');
+
+  const storageProto = window.Storage.prototype;
+  const original = storageProto.setItem;
+  const writes = [];
+  storageProto.setItem = function setItem(key, value) {
+    writes.push(String(value));
+    return original.call(this, key, value);
+  };
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+  try {
+    for (const value of ['会', '会话', '会话 0']) {
+      await act(async () => {
+        setter.call(input, value);
+        input.dispatchEvent(new window.Event('input', { bubbles: true }));
+      });
+      await tick(10);
+    }
+    assert.equal(writes.length, 0, 'typing does not write the preference document');
+    await tick(220);
+    assert.ok(writes.length >= 1, 'the pause commits');
+    assert.match(writes[writes.length - 1], /"search":"会话 0"/);
+    assert.equal(container.querySelectorAll('.dts-row--session').length, 1, 'the tree filters on the committed query');
+  } finally {
+    storageProto.setItem = original;
+  }
+});
+
+test('the fork item is hidden when the peer may not call session/fork', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  remoteAccessImpl = {
+    source: () => ({ getSnapshot: () => false, subscribe: () => () => {} }),
+  };
+  await mount();
+  const row = find('.dts-row--session', '会话 0');
+  await act(async () => {
+    row.querySelector('.dts-row__act').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const labels = [...document.querySelectorAll('.dts-pop--menu .dts-menu__label')].map((node) => node.textContent.trim());
+  assert.equal(labels.includes('分叉会话'), false, 'a denied action is not offered');
+  assert.ok(labels.includes('重命名'), 'the rest of the menu is intact');
+});
+
+test('the duplicate check compares the stored name, not the localized label', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  document.documentElement.lang = 'en';
+  await tick(60);
+  const menu = find('.dts-row--group').querySelector('.dts-row__actions .dts-iconbtn[aria-label="More actions"]');
+  assert.ok(menu, 'the panel follows the host language');
+  await act(async () => {
+    menu.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')]
+      .find((node) => node.textContent.trim() === 'New topic')
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const input = document.querySelector('.dts-dialog .dts-input');
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(input, 'Default');
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+  await tick();
+  assert.equal(document.querySelector('.dts-dialog .dts-field__hint.is-error'), null, '"Default" is not the stored name of the system group');
+  const create = [...document.querySelectorAll('.dts-dialog .dts-btn')].find((node) => node.textContent.trim() === 'Create');
+  assert.equal(create.disabled, false, 'the create button stays available');
+  document.documentElement.lang = 'zh-CN';
+  await tick(60);
 });

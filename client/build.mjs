@@ -25,10 +25,16 @@ const finalPath = join(outDir, 'client.js');
  * makes the loader report "loaded without registering" and the whole entry fails to boot.
  * Note the loader normalizes a trailing `/client`, so the bare package name is the id.
  */
-const MODULE_ID = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).name;
+const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+const MODULE_ID = pkg.name;
 if (typeof MODULE_ID !== 'string' || MODULE_ID.length === 0) {
   throw new Error('package.json 缺少 name:无法确定 client 模块注册 id');
 }
+/**
+ * The package version also versions the cached `/emojis` URL. Bumping the release busts the
+ * browser cache that would otherwise serve yesterday's glyph table for a day.
+ */
+const PACKAGE_VERSION = typeof pkg.version === 'string' ? pkg.version : 'dev';
 
 const external = [
   'react',
@@ -60,7 +66,10 @@ await build({
   loader: { '.css': 'text' },
   // The browser half stamps its <style> with the same id the loader keys plugins by, so HMR
   // can inventory and remove exactly this plugin's styles.
-  define: { __DSH_CLIENT_ID__: JSON.stringify(MODULE_ID) },
+  define: {
+    __DSH_CLIENT_ID__: JSON.stringify(MODULE_ID),
+    __DSH_CLIENT_VERSION__: JSON.stringify(PACKAGE_VERSION),
+  },
   external,
   charset: 'utf8',
   legalComments: 'none',

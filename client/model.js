@@ -286,15 +286,49 @@ function aggregateMembers(ids, { byId, archived, current, statuses }) {
 }
 
 /**
+ * The group a session renders in, for one workspace's assignment map.
+ *
+ * An explicit assignment always wins; a stale one (the group was deleted in another window)
+ * resolves to the default group, exactly like the tree has always drawn it. A fork the sidecar
+ * has not caught up with yet follows its source's group, so the child never flashes in the
+ * default bucket between the host publishing it and the panel's own assignment landing. Only
+ * user forks reach a row (subagents are filtered out), and the chain is walked with a guard.
+ *
+ * Exported because the panel must derive "which group is this session in" the same way in every
+ * surface: the tree, the composer chip, the group counts and the attach picker. They used to
+ * read the raw assignment map, which made a child render under its source while the chip named
+ * the default group.
+ *
  * @param {object} input
- * @param {Array} input.items - `useWorkspaces(s => s.items)`
- * @param {object} input.list - `useSessions(s => s)` snapshot
- * @param {Set|Array} input.archivedIds - registry-global archive set
- * @param {Set|Array} input.pinnedIds
- * @param {object} input.store - panel store (topics/assignments lookups)
- * @param {object} input.prefs - {workspaceFilter, topicFilter, showArchived, collapsedWorkspaces, collapsedTopics}
- * @param {string} input.query - local search text
+ * @param {string} input.id - session id
+ * @param {object} input.byId - session summary map (`list.byId`)
+ * @param {object} input.assignments - this workspace's session -> topic map
+ * @param {Set|Map|null} [input.topicIds] - known group ids; an assignment outside it is stale
+ * @returns {string} a group id (never null)
  */
+export function topicOfSession({ id, byId, assignments, topicIds = null }) {
+  // Subagents are filtered out of the tree; if this is ever asked about one, do not let it
+  // inherit a group it would never render in.
+  if (byId?.[id]?.origin === 'subagent') return DEFAULT_TOPIC_ID;
+  const known = (topicId) => {
+    if (topicIds === null || topicIds === undefined) return true;
+    if (typeof topicIds.has !== 'function') return true;
+    return topicIds.has(topicId);
+  };
+  const resolve = (topicId) => (known(topicId) ? topicId : DEFAULT_TOPIC_ID);
+  if (assignments?.[id] !== undefined) return resolve(assignments[id]);
+  const seen = new Set([id]);
+  let parentId = byId?.[id]?.parentId;
+  while (parentId !== undefined && !seen.has(parentId)) {
+    seen.add(parentId);
+    const parent = byId?.[parentId];
+    if (parent?.origin === 'subagent') return DEFAULT_TOPIC_ID;
+    if (assignments?.[parentId] !== undefined) return resolve(assignments[parentId]);
+    parentId = parent?.parentId;
+  }
+  return DEFAULT_TOPIC_ID;
+}
+
 /**
  * Manual drag order, as a permutation of the ids it names — never as an absolute order.
  *
@@ -525,6 +559,16 @@ function buildPathIndex(byId) {
   return byPath;
 }
 
+/**
+ * @param {object} input
+ * @param {Array} input.items - `useWorkspaces(s => s.items)`
+ * @param {object} input.list - `useSessions(s => s)` snapshot
+ * @param {Set|Array} input.archivedIds - registry-global archive set
+ * @param {Set|Array} input.pinnedIds
+ * @param {object} input.store - panel store (topics/assignments lookups)
+ * @param {object} input.prefs - {workspaceFilter, topicFilter, showArchived, collapsedWorkspaces, collapsedTopics}
+ * @param {string} input.query - local search text
+ */
 export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topicsOf, assignmentsOf, prefs, query, now }) {
   const workspaces = orderBy(normalizeWorkspaces(items), prefs?.workspaceOrder ?? [], (entry) => entry.workspaceId);
   const archived = toSet(archivedIds);
@@ -585,6 +629,11 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
     const assignments = assignmentsOf(workspace.workspaceId) ?? {};
     const topicById = new Map(topics.map((topic) => [topic.id, topic]));
 
+    // The same derivation every other surface uses (chip, counts, pickers): an explicit
+    // assignment wins, a stale one resolves to the default group, and an unfiled fork follows
+    // its source's group until the sidecar catches up.
+    const renderedTopicId = (id) => topicOfSession({ id, byId, assignments, topicIds: topicById });
+
     // The same derivation the panel's drag handler uses (`workspaceSessionIds`): the workspace
     // account first, then cwd-matched stragglers by recency. A drag baseline that disagreed with
     // this order is what made the second drag of a row land somewhere else than the pointer.
@@ -602,7 +651,7 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
       if (session?.blank && id !== current) continue;
       if (isArchived && !showArchived) continue;
       if (!session) continue;
-      const topicId = assignments[id] ?? DEFAULT_TOPIC_ID;
+      const topicId = renderedTopicId(id);
       const topic = topicById.get(topicId) ?? topicById.get(DEFAULT_TOPIC_ID) ?? null;
       // A topic filter means "only this folder" — archived rows stay only when they belong
       // to that topic, so the bucket never shows unrelated history.
@@ -620,7 +669,9 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
         topicEmoji: topic?.emoji ?? '',
       });
       if (search) {
-        const haystack = `${row.title} ${workspace.title} ${workspace.path} ${topic?.name ?? ''}`.toLowerCase();
+        // The visible labels are localized (`topicLabel`), so search matches what is on screen:
+        // the English UI finds the default group by "Default", not only by its stored Chinese name.
+        const haystack = `${row.title} ${workspace.title} ${workspace.path} ${row.topicName ?? ''}`.toLowerCase();
         if (!haystack.includes(search)) continue;
         if (matched >= SEARCH_RESULT_LIMIT) {
           truncated = true;
@@ -806,13 +857,22 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
   return { groups, search, truncated, matched, currentSessionId: current, currentWorkspaceId: highlightedWorkspaceId };
 }
 
-/** Workspace option list for the header dropdown, with per-workspace session counts. */
+/**
+ * Workspace option list for the header dropdown, with per-workspace session counts.
+ *
+ * The count is the same set the tree renders (`workspaceSessionIds`): the workspace's account
+ * plus cwd-matched stragglers. Counting only `workspace.sessionIds` made the dropdown say
+ * "0 sessions" for a workspace whose reopened history the host had not accounted yet, while the
+ * tree showed those rows right below it.
+ */
 export function buildWorkspaceOptions({ items, list, archivedIds }) {
   const archived = toSet(archivedIds);
   const byId = list?.byId ?? {};
   const current = mainSessionId(list);
+  const pathIndex = buildPathIndex(byId);
   return normalizeWorkspaces(items).map((workspace) => {
-    const known = workspace.sessionIds.filter((id) => byId[id] && byId[id].origin !== 'subagent' && !(byId[id].blank && id !== current) && !archived.has(id));
-    return { ...workspace, visibleCount: known.length, archivedCount: workspace.sessionIds.filter((id) => archived.has(id)).length };
+    const ids = workspaceSessionIds({ workspace, byId, pathIndex });
+    const known = ids.filter((id) => byId[id] && byId[id].origin !== 'subagent' && !(byId[id].blank && id !== current) && !archived.has(id));
+    return { ...workspace, visibleCount: known.length, archivedCount: ids.filter((id) => archived.has(id)).length };
   });
 }

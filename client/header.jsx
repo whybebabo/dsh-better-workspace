@@ -125,6 +125,27 @@ export function Header({
 }) {
   const [dropdown, setDropdown] = React.useState(null);
   const [create, setCreate] = React.useState(null);
+  /**
+   * The search field is controlled locally and committed to `prefs` on a short pause.
+   *
+   * Every keystroke used to write the whole preference document to localStorage and rebuild the
+   * tree (55–63ms of work for a 1500-session list, per the model notes). Typing stays responsive
+   * now, the persisted document is written once per pause, and `buildTree` runs on the same
+   * commit. External clears (the ✕ button, leaving search, a reset) still win: the committed
+   * value flows back into the draft.
+   */
+  const [searchDraft, setSearchDraft] = React.useState(prefs.search ?? '');
+  const setPrefsRef = React.useRef(onSetPrefs);
+  setPrefsRef.current = onSetPrefs;
+  React.useEffect(() => {
+    setSearchDraft(prefs.search ?? '');
+  }, [prefs.search]);
+  React.useEffect(() => {
+    const committed = prefs.search ?? '';
+    if (searchDraft === committed) return undefined;
+    const timer = setTimeout(() => setPrefsRef.current({ search: searchDraft }), 180);
+    return () => clearTimeout(timer);
+  }, [searchDraft, prefs.search]);
   const total = options.reduce((sum, option) => sum + (option.visibleCount ?? 0), 0);
   const filtered = Boolean(prefs.workspaceFilter) || Boolean(prefs.topicFilter);
 
@@ -182,7 +203,7 @@ export function Header({
 
       {prefs.searchOpen ? (
         <div className="dts-header__search">
-          <TextInput autoFocus value={prefs.search ?? ''} placeholder={t('search.placeholder')} onChange={(value) => onSetPrefs({ search: value })} />
+          <TextInput autoFocus value={searchDraft} placeholder={t('search.placeholder')} onChange={(value) => setSearchDraft(value)} />
           <IconButton label={t('action.close')} onClick={() => onSetPrefs({ searchOpen: false, search: '' })}>
             <Icon name="close" size={14} />
           </IconButton>

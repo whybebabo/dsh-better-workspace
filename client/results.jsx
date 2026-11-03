@@ -98,7 +98,7 @@ export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
     setPhase('preview');
     setError(null);
     try {
-      setPreview(await api.deletePreview(ids));
+      setPreview(await api.deletePreview(ids, { timeoutMs: 30_000 }));
       setPhase('ready');
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : String(caught));
@@ -117,7 +117,7 @@ export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
     setBusy(true);
     setError(null);
     try {
-      const result = await api.deleteExecute({ sessionIds: subset, confirm: true });
+      const result = await api.deleteExecute({ sessionIds: subset, confirm: true }, { timeoutMs: 120_000 });
       setOutcome(result);
       setPhase('result');
       onDone(result);

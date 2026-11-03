@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTree, buildWorkspaceOptions, mainSessionId, basename, samePath, moveWithin, orderByManual, promoteSessionOrder, ungroupedSessionIds, workspaceSessionIds, DEFAULT_TOPIC_ID, UNGROUPED_WORKSPACE_ID } from '../client/model.js';
+import { buildTree, buildWorkspaceOptions, mainSessionId, basename, samePath, moveWithin, orderByManual, promoteSessionOrder, topicOfSession, ungroupedSessionIds, workspaceSessionIds, DEFAULT_TOPIC_ID, UNGROUPED_WORKSPACE_ID } from '../client/model.js';
+import { setLanguage } from '../client/i18n.js';
 
 const WS_A = 'ws_a';
 const WS_B = 'ws_b';
@@ -64,6 +65,39 @@ test('topics folder the sessions and unassigned ones land in the default group',
   assert.equal(design.rows[0].topicEmoji, '{1F4A1}');
   assert.equal(alpha.topicCount, 3);
   assert.equal(alpha.liveCount, 3);
+});
+
+test('a fork with no assignment yet renders in its source group, not the default one', () => {
+  // The host publishes the child before the panel's own assignment write lands. Rendering the
+  // raw assignment map made the row appear in the default bucket for that round trip, so the
+  // projection derives the group from `parentId` until the sidecar catches up.
+  const topics = {
+    [WS_A]: [
+      { id: 'tp_1', name: '设计', order: 0 },
+      { id: 'tp_2', name: '排查', order: 1 },
+    ],
+  };
+  const base = fixture({ topics, assignments: { [WS_A]: { ses_1: 'tp_1' } } });
+  base.items[0].sessionIds = [...base.items[0].sessionIds, 'ses_fork', 'ses_grandchild', 'ses_default_fork', 'ses_explicit_fork'];
+  base.list.byId = {
+    ...base.list.byId,
+    ses_fork: { id: 'ses_fork', displayTitle: '分叉', cwd: 'D:/work/alpha', updatedAt: 600, parentId: 'ses_1' },
+    ses_grandchild: { id: 'ses_grandchild', displayTitle: '再分叉', cwd: 'D:/work/alpha', updatedAt: 700, parentId: 'ses_fork' },
+    ses_default_fork: { id: 'ses_default_fork', displayTitle: '默认分叉', cwd: 'D:/work/alpha', updatedAt: 800, parentId: 'ses_3' },
+    ses_explicit_fork: { id: 'ses_explicit_fork', displayTitle: '已移动分叉', cwd: 'D:/work/alpha', updatedAt: 900, parentId: 'ses_1' },
+  };
+  base.list.ids.push('ses_fork', 'ses_grandchild', 'ses_default_fork', 'ses_explicit_fork');
+  // An explicit assignment outranks inheritance: a child the user already moved stays put.
+  base.assignmentsOf = (workspaceId) => (workspaceId === WS_A
+    ? { ses_1: 'tp_1', ses_explicit_fork: 'tp_2' }
+    : {});
+
+  const built = buildTree({ ...base, prefs: {}, query: '' });
+  const alpha = built.groups.find((group) => group.workspaceId === WS_A);
+  const byTopic = (id) => alpha.sections.find((section) => section.id === id);
+  assert.deepEqual(byTopic('tp_1').rows.map((row) => row.id), ['ses_1', 'ses_fork', 'ses_grandchild'], 'the fork and its own fork lead inside the source group');
+  assert.deepEqual(byTopic(DEFAULT_TOPIC_ID).rows.map((row) => row.id), ['ses_3', 'ses_2', 'ses_default_fork'], 'a fork of an unfiled session stays in the default group');
+  assert.deepEqual(byTopic('tp_2').rows.map((row) => row.id), ['ses_explicit_fork'], 'an explicit assignment wins over the inherited group');
 });
 
 test('a workspace with topics keeps its empty folders so they stay clickable', () => {
@@ -709,4 +743,48 @@ test('the row cache does not grow with sessions the host dropped', () => {
   const row = restored.groups.find((group) => group.workspaceId === WS_A).sections.flatMap((section) => section.rows).find((entry) => entry.id === 'ses_3');
   assert.ok(row, 'the row comes back');
   assert.equal(row.id, 'ses_3');
+});
+
+test('topicOfSession is the one derivation: explicit wins, stale falls to default, forks inherit', () => {
+  const byId = {
+    ses_parent: { id: 'ses_parent', parentId: undefined },
+    ses_fork: { id: 'ses_fork', parentId: 'ses_parent' },
+    ses_grand: { id: 'ses_grand', parentId: 'ses_fork' },
+    ses_sub: { id: 'ses_sub', parentId: 'ses_parent', origin: 'subagent' },
+  };
+  const assignments = { ses_parent: 'tp_1', ses_fork: undefined };
+  const known = new Set(['tp_default', 'tp_1']);
+  assert.equal(topicOfSession({ id: 'ses_parent', byId, assignments, topicIds: known }), 'tp_1');
+  assert.equal(topicOfSession({ id: 'ses_fork', byId, assignments, topicIds: known }), 'tp_1', 'a fork follows its source');
+  assert.equal(topicOfSession({ id: 'ses_grand', byId, assignments, topicIds: known }), 'tp_1', 'and a fork of a fork walks the chain');
+  assert.equal(topicOfSession({ id: 'ses_sub', byId, assignments, topicIds: known }), DEFAULT_TOPIC_ID, 'a subagent never inherits');
+  assert.equal(
+    topicOfSession({ id: 'ses_parent', byId, assignments: { ses_parent: 'tp_gone' }, topicIds: known }),
+    DEFAULT_TOPIC_ID,
+    'a stale assignment falls to the default group instead of a missing topic',
+  );
+  assert.equal(topicOfSession({ id: 'ses_unknown', byId, assignments, topicIds: known }), DEFAULT_TOPIC_ID);
+});
+
+test('the workspace option count includes cwd-matched stragglers', () => {
+  const items = [{ workspaceId: WS_A, path: 'D:/work/alpha', title: 'Alpha', sessionIds: [], createdAt: 1, updatedAt: 1 }];
+  const list = {
+    ids: ['ses_loose'],
+    byId: { ses_loose: { id: 'ses_loose', cwd: 'D:/work/alpha', updatedAt: 1 } },
+    current: 'ses_loose',
+    phase: 'ready',
+  };
+  const [option] = buildWorkspaceOptions({ items, list, archivedIds: [] });
+  assert.equal(option.visibleCount, 1, 'the dropdown counts the row the tree shows');
+});
+
+test('search matches the localized default group name', () => {
+  setLanguage('en');
+  try {
+    const built = buildTree({ ...fixture(), prefs: {}, query: 'default' });
+    assert.ok(built.groups.length > 0, 'the default group is searchable by its displayed label');
+    assert.ok(built.groups.flatMap(flatten).includes('ses_1'));
+  } finally {
+    setLanguage('zh');
+  }
 });

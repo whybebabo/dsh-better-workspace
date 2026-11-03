@@ -37,7 +37,11 @@ function nameProblem({ name, workspaceId, topicsFor, ignoreId }) {
   if (trimmed === '') return 'empty';
   if (CONTROL_CHARS.test(name)) return 'illegal';
   const taken = (topicsFor?.(workspaceId) ?? []).some(
-    (topic) => topic.id !== ignoreId && String(topic.name ?? '').trim().toLowerCase() === trimmed.toLowerCase(),
+    // Compare the *persisted* name: `name` is the localized label (`默认分组` renders as
+    // "Default"), while the host compares the stored string. Using the label rejected a valid
+    // "Default" in English and let the same request fail server-side in Chinese.
+    (topic) => topic.id !== ignoreId
+      && String(topic.storedName ?? topic.name ?? '').trim().toLowerCase() === trimmed.toLowerCase(),
   );
   return taken ? 'taken' : null;
 }

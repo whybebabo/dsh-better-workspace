@@ -68,8 +68,29 @@ export function createHostActions(ctx) {
     unpinSession(sessionId) {
       return call(uiWorkspace(), 'unpinSession', sessionId);
     },
+    /**
+     * Fork a session the way the stock sidebar action does.
+     *
+     * The host's own menu passes `allowMigration: false`: a cold session whose artifact still
+     * needs migration is refused ("open it first") instead of being forked from a historical
+     * log. Passing no options skipped that preflight. `onCreated` is left undefined; the panel
+     * gets the child id from the returned promise and files it itself.
+     */
     forkSession(sessionId) {
-      return call(uiWorkspace(), 'forkSession', sessionId);
+      return call(uiWorkspace(), 'forkSession', sessionId, undefined, { allowMigration: false });
+    },
+    /**
+     * Whether the current peer may run `action` on a session (the stock fork item hides itself
+     * when `session/fork` is denied). The answer is a `HostObservable<boolean>`; a host that does
+     * not expose `remoteAccess` (or a local owner without a snapshot) is treated as allowed, so
+     * the menu never disappears because a service is missing.
+     */
+    canAccessSession(sessionId, action) {
+      const access = service('remoteAccess');
+      if (typeof access?.source !== 'function') return true;
+      const source = access.source('session', sessionId, action);
+      if (!source || typeof source.getSnapshot !== 'function') return true;
+      return source.getSnapshot() !== false;
     },
     /**
      * Rename a session the way the host's own rename dialog does.

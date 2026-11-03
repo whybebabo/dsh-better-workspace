@@ -80,6 +80,32 @@ export class RowMotion extends React.Component {
         role="tree"
         aria-label={this.props.label}
         aria-multiselectable={this.props.multiselectable ? true : undefined}
+        onKeyDown={(event) => {
+          // Arrow navigation for the flat list of treeitems. Rows keep their own Enter/Space
+          // handling; this only moves focus, so a keyboard user can walk the tree without
+          // tabbing through every action button. A rename input keeps its own arrow keys.
+          if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+          const key = event.key;
+          if (key !== 'ArrowDown' && key !== 'ArrowUp' && key !== 'Home' && key !== 'End') return;
+          const target = event.target;
+          if (typeof target?.closest !== 'function') return;
+          if (target.closest('input, textarea, select, [contenteditable="true"]')) return;
+          const current = target.closest('[role="treeitem"]');
+          if (!current) return;
+          const items = [...event.currentTarget.querySelectorAll('[role="treeitem"]')]
+            .filter((node) => node.getBoundingClientRect().height > 0);
+          const index = items.indexOf(current);
+          if (index < 0) return;
+          const next = key === 'Home'
+            ? 0
+            : key === 'End'
+              ? items.length - 1
+              : key === 'ArrowDown'
+                ? Math.min(items.length - 1, index + 1)
+                : Math.max(0, index - 1);
+          event.preventDefault();
+          if (next !== index) items[next].focus();
+        }}
       >
         {this.props.children}
       </div>

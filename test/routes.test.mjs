@@ -307,3 +307,38 @@ test('a registry that cannot be read skips the membership guard instead of faili
     assert.equal(result.json.ok, true);
   });
 });
+
+test('a workspace registered through a symlink still proves ownership', async (t) => {
+  await withHome(async (home) => {
+    const { mkdir, symlink } = await import('node:fs/promises');
+    const project = join(home, 'project');
+    const other = join(home, 'other');
+    await mkdir(project);
+    await mkdir(other);
+    const link = join(home, 'link');
+    try {
+      await symlink(project, link, 'junction');
+    } catch {
+      t.skip('directory links are not available on this platform');
+      return;
+    }
+    const services = {
+      workspaceRegistry: {
+        list: () => [
+          { id: 'ws_link', path: link, sessionIds: [] },
+          { id: 'ws_other', path: other, sessionIds: [] },
+        ],
+      },
+      sessionPersistence: {
+        // The header carries the canonical spelling; the workspace was registered through a link.
+        list: async () => [{ header: { type: 'session', id: 'ses_real', cwd: project } }],
+      },
+    };
+    const { find } = await boot({ home, services });
+    const crossed = await call(find(`${API}/assign`), fakeRequest({
+      body: { workspaceId: 'ws_other', sessionIds: ['ses_real'], topicId: null, expectedRevision: 0 },
+    }));
+    assert.equal(crossed.status, 400, 'the canonical cwd proves the session belongs to the linked workspace');
+    assert.equal(crossed.json.code, 'cross-workspace');
+  });
+});

@@ -309,7 +309,10 @@ export function MenuItem({ children, onSelect, danger = false, disabled = false,
     <button
       type="button"
       className={cx('dts-menu__item', danger && 'is-danger', disabled && 'is-disabled', className)}
-      role="menuitem"
+      // The surface is a dialog-style popover (it also carries headers, separators and footers,
+      // and there is no roving focus), so these are plain buttons. `role="menuitem"` inside a
+      // `role="dialog"` is invalid ARIA and made screen readers announce a menu that does not
+      // respond to menu keys.
       disabled={disabled}
       onClick={(event) => {
         event.stopPropagation();

@@ -76,6 +76,9 @@ function writePrefs(prefs) {
 
 export function createPanelStore(options = {}) {
   const stateTimeoutMs = Number.isFinite(options.stateTimeoutMs) ? options.stateTimeoutMs : STATE_TIMEOUT_MS;
+  // Timeout for a write / adoption / delete request. `undefined` keeps the API layer's default;
+  // tests pass a small value. A timed-out write is not a failure: its outcome is unknown.
+  const requestTimeoutMs = Number.isFinite(options.requestTimeoutMs) ? options.requestTimeoutMs : undefined;
   const listeners = new Set();
   let state = {
     ready: false,
@@ -116,13 +119,51 @@ export function createPanelStore(options = {}) {
    * every write, so the panel re-downloaded a constant table on each keystroke-sized change.
    * One request per page, coalesced while it is in flight.
    */
-  let emojiRequest = null;
   /**
-   * The glyph table is fetched once per page. A host without the route (or a composition that
-   * answers an empty list) must not turn every revisioned `load()` into another 404: the local
-   * fallback in the dialogs is enough for the rest of the session.
+   * The glyph table is fetched once per page, but a failure is not necessarily permanent: a
+   * missing route (404 / an SPA fallback) stays one-shot, while a network error, timeout or 5xx
+   * must not downgrade the picker to the eight local fallbacks for the rest of the page. Three
+   * attempts bound a host that keeps failing; a recovered host loads the real table on the next
+   * `load()`.
    */
   let emojiAttempted = false;
+  let emojiFailures = 0;
+  let emojiRequest = null;
+  function loadEmojis() {
+    if (disposed || state.emojis.length > 0) return Promise.resolve(state.emojis);
+    if (emojiRequest) return emojiRequest;
+    if (emojiAttempted) return Promise.resolve([]);
+    emojiAttempted = true;
+    const startedIn = generation;
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    let timer = null;
+    if (controller) {
+      activeControllers.add(controller);
+      // A host that accepts the connection and never answers must not leave the request pending
+      // forever (it would keep `emojiRequest` set and the picker on the fallback list).
+      timer = setTimeout(() => controller.abort(), stateTimeoutMs);
+    }
+    emojiRequest = api.emojis(controller?.signal)
+      .then((result) => {
+        const list = Array.isArray(result?.emojis) ? result.emojis : [];
+        if (list.length > 0 && !disposed && startedIn === generation) patch({ emojis: list });
+        return list;
+      })
+      .catch((error) => {
+        const permanent = error instanceof ApiError && (error.status === 404 || error.code === 'bad-response');
+        if (!permanent && !disposed && emojiFailures < 2) {
+          emojiFailures += 1;
+          emojiAttempted = false;
+        }
+        return [];
+      })
+      .finally(() => {
+        if (timer !== null) clearTimeout(timer);
+        emojiRequest = null;
+        if (controller) activeControllers.delete(controller);
+      });
+    return emojiRequest;
+  }
   /** Monotonic guard for `/state` reads; see `load()`. */
   let loadSeq = 0;
   /**
@@ -164,28 +205,6 @@ export function createPanelStore(options = {}) {
       void load();
     }, delay);
   }
-  function loadEmojis() {
-    if (disposed || state.emojis.length > 0) return Promise.resolve(state.emojis);
-    if (emojiRequest) return emojiRequest;
-    if (emojiAttempted) return Promise.resolve([]);
-    emojiAttempted = true;
-    const startedIn = generation;
-    const controller = typeof AbortController === 'function' ? new AbortController() : null;
-    if (controller) activeControllers.add(controller);
-    emojiRequest = api.emojis(controller?.signal)
-      .then((result) => {
-        const list = Array.isArray(result?.emojis) ? result.emojis : [];
-        if (list.length > 0 && !disposed && startedIn === generation) patch({ emojis: list });
-        return list;
-      })
-      .catch(() => [])
-      .finally(() => {
-        emojiRequest = null;
-        if (controller) activeControllers.delete(controller);
-      });
-    return emojiRequest;
-  }
-
   async function load() {
     if (disposed) return false;
     // The glyph table is static and lives on its own route, so it is fetched once per page
@@ -345,7 +364,11 @@ export function createPanelStore(options = {}) {
     return enqueue(async () => {
       patch({ busy: 'saving' });
       try {
-        const outcome = await invoker(state.revision);
+        // Every write carries a timeout (see `api.request`). A timeout is *not* treated as a
+        // definite failure: the request may have landed, so the call rejects, the queue is
+        // released, and the banner asks the user to reload instead of silently claiming a
+        // result the panel cannot know.
+        const outcome = await invoker(state.revision, { timeoutMs: requestTimeoutMs });
         patch({ busy: null, revision: outcome.revision });
         await load();
         return outcome;
@@ -376,11 +399,11 @@ export function createPanelStore(options = {}) {
       || error?.status === 503;
   }
 
-  const createTopic = (input) => runMutation((revision) => api.createTopic({ ...input, expectedRevision: revision }));
-  const updateTopic = (input) => runMutation((revision) => api.updateTopic({ ...input, expectedRevision: revision }));
-  const reorderTopics = (input) => runMutation((revision) => api.reorderTopics({ ...input, expectedRevision: revision }));
-  const deleteTopic = (input) => runMutation((revision) => api.deleteTopic({ ...input, expectedRevision: revision }));
-  const assign = (input) => runMutation((revision) => api.assign({ ...input, expectedRevision: revision }));
+  const createTopic = (input) => runMutation((revision, options) => api.createTopic({ ...input, expectedRevision: revision }, options));
+  const updateTopic = (input) => runMutation((revision, options) => api.updateTopic({ ...input, expectedRevision: revision }, options));
+  const reorderTopics = (input) => runMutation((revision, options) => api.reorderTopics({ ...input, expectedRevision: revision }, options));
+  const deleteTopic = (input) => runMutation((revision, options) => api.deleteTopic({ ...input, expectedRevision: revision }, options));
+  const assign = (input) => runMutation((revision, options) => api.assign({ ...input, expectedRevision: revision }, options));
 
   /**
    * Asks the host to re-attach sessions whose `cwd` matches a workspace path but which the
@@ -396,7 +419,7 @@ export function createPanelStore(options = {}) {
    */
   async function adoptSessions() {
     try {
-      const result = await api.adoptSessions();
+      const result = await api.adoptSessions({ timeoutMs: requestTimeoutMs ?? 60_000 });
       const adopted = Array.isArray(result?.adopted) ? result.adopted : [];
       const moved = Array.isArray(result?.moved) ? result.moved : adopted;
       const failed = Array.isArray(result?.failed) ? result.failed : [];

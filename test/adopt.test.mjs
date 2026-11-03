@@ -234,3 +234,17 @@ test('a composition without the host services reports unavailable instead of thr
   const bare = await adoptOrphanSessions({ ctx: { get() { throw new Error('no inject'); } } });
   assert.equal(bare.available, false, 'a service read that throws is a missing service, not a crash');
 });
+
+test('one repair pass is capped and reports how many headers it did not examine', async () => {
+  await withDirs(async ({ alpha }) => {
+    const registry = fakeRegistry([{ id: 'ws_a', path: alpha, sessionIds: [] }]);
+    const headers = Array.from({ length: 205 }, (_, index) => ({ id: `ses_${index}`, cwd: alpha }));
+    const ctx = { get: (name) => ({ workspaceRegistry: registry, sessionPersistence: fakePersistence(headers) })[name] };
+    const result = await adoptOrphanSessions({ ctx });
+    assert.equal(result.available, true);
+    assert.equal(result.adopted.length, 200, 'at most 200 registry writes per pass');
+    assert.equal(result.moved.length, 200);
+    assert.equal(result.deferred, 5, 'the rest is reported, not silently dropped');
+    assert.equal(result.failed.length, 0);
+  });
+});
