@@ -20,7 +20,7 @@
 
 ## 工作方式
 
-- **叠加而非替换**：面板渲染在 `shell.overlay`，用结构选择器定位原生工作区区域，覆盖矩形与该区域自身盒子重合。被覆盖区域加上 `inert` + `aria-hidden`，官方弹窗出现时自动释放。
+- **叠加而非替换**：面板渲染在 `shell.overlay`，用结构选择器定位原生工作区区域，覆盖矩形与该区域**可见**的盒子重合（与各层祖先求交，不会溢出到侧栏底部的设置/账户按钮）。被覆盖区域加上 `inert` + `aria-hidden`，官方弹窗出现时自动释放。
 - **主题数据单独存放**：分组与归属关系写在 `<DSH_HOME>/dsh-better-workspace/topics.v1.json` 这个单文件 sidecar 里，可直接备份、可与宿主升级解耦；卸载插件后数据仍在。
 - **顺序分两种**：分组顺序写入 sidecar（跨窗口共享）；工作区与会话的拖拽顺序存在本地偏好 `localStorage`。
 - **全部走官方命令**：打开会话、归档、置顶、分叉、建工作区都调用宿主 `uiWorkspace` / `workspaces` 服务，重命名会话走宿主自己的 `sessions.using(...)`（0.2.1 的 `UiWorkspace` 没有这个方法，官方改名对话框也是这么做的）；插件不声明、不借用其它包的插槽。
@@ -256,7 +256,7 @@ Invoke-WebRequest 'http://127.0.0.1:3080/dsh-better-workspace/api/state' | Selec
 
 ## 覆盖策略与失效保护
 
-面板渲染在 `shell.overlay`，用结构选择器定位原生工作区区域（`[role="tree"]` 向上找到所属列，再取包含它的区域元素；`_regionArea` 类名后缀仅作提示），因此**不依赖 CSS module 哈希类名**。覆盖矩形取区域自身的盒子（与官方 `WorkspaceBrowser` 占位完全重合，含 section header），不再按整列铺满。被覆盖区域在面板可见时加上 `inert` + `aria-hidden`，官方弹窗出现在该区域时自动释放。
+面板渲染在 `shell.overlay`，用结构选择器定位原生工作区区域（`[role="tree"]` 向上找到所属列，再取包含它的区域元素；`_regionArea` 类名后缀仅作提示），因此**不依赖 CSS module 哈希类名**。覆盖矩形取区域自身的盒子，再与它每一层祖先的盒子求交，只覆盖真正可见的那一块：区域盒子会溢出侧栏自己的滚动视口（面板列表与工作区共用同一个滚动区，满高的工作区会把区域顶出视口约一个导航的高度），而面板画在 `shell.overlay` 里、不受那个滚动容器裁剪；直接按原始盒子铺满会连带盖住侧栏底部的设置/账户按钮并越过窗口边缘。被覆盖区域在面板可见时加上 `inert` + `aria-hidden`，官方弹窗出现在该区域时自动释放。
 
 客户端入口只声明 `inject: ['slots']`：cordis 对未声明服务的属性访问会抛 `cannot get property ... without inject`，这正是此前 `topic-e2e` profile 启动失败的直接原因（读 `ctx.shortcuts` 时抛错，整个 web boot 报 "1 entry did not activate"）。
 
@@ -288,7 +288,7 @@ DSH 不提供删除会话的宿主命令，插件自行实现，规则是"宁可
 npm install
 npm run build     # esbuild -> lib/client.js（window.__ModuleLoader__.load 壳，外部化 react/react-dom/宿主 primitives）
 npm run check     # 真正加载 lib/*.js 的模块图并核对产物注册 id（不是 node --check）
-npm test          # 299 项
+npm test          # 320 项
 ```
 
 `client/` 是源码，`lib/client.js` 是产物（已随包发布，勿手改）。测试里的 `react`/`react-dom`/`jsdom` 只是**开发依赖**：产物运行时 `require('react')` 用的是宿主已加载的实例（与 DSH 0.2.1 同为 React 18.3.1），不会打包第二份 React。

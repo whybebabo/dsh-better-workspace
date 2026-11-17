@@ -20,7 +20,7 @@ The plugin does not take over the rest of DSH: when the sidebar is collapsed to 
 
 ## How it works
 
-- **Overlay, not replacement** — the panel renders in `shell.overlay`, locates the native Workspace region through structural selectors, and covers exactly that region's own box. The covered region gets `inert` + `aria-hidden`, released automatically while an official dialog is open.
+- **Overlay, not replacement** — the panel renders in `shell.overlay`, locates the native Workspace region through structural selectors, and covers exactly the **visible** part of that region (the region box intersected with its ancestors, so it never spills over the sidebar's settings / account buttons). The covered region gets `inert` + `aria-hidden`, released automatically while an official dialog is open.
 - **Topic data lives on its own** — groups and assignments are stored in a single sidecar file, `<DSH_HOME>/dsh-better-workspace/topics.v1.json`, so you can back it up and upgrade the host independently. Data survives uninstalling the plugin.
 - **Two kinds of ordering** — group order is written to the sidecar (shared across windows); workspace and session drag order lives in local `localStorage` preferences.
 - **Official commands only** — opening sessions, archiving, pinning, forking and creating workspaces go through the host's `uiWorkspace` / `workspaces` services, and renaming a session goes through the host's own `sessions.using(...)` path (0.2.1's `UiWorkspace` has no `renameSession`; the stock rename dialog does the same). The plugin does not declare or borrow another package's slots.
@@ -256,7 +256,7 @@ Every write **must** carry `expectedRevision` (missing → `400 revision-require
 
 ## Fallback behavior
 
-The panel renders in `shell.overlay`, locating the native Workspace region structurally (`[role="tree"]` up to its column, then the region element containing it; the `_regionArea` class suffix is only a hint), so it does **not** depend on CSS-module hashed class names. The cover rectangle is the region's own box (matching the official `WorkspaceBrowser` placeholder exactly, section header included) rather than the full column. The covered region gets `inert` + `aria-hidden` while the panel is visible, released while an official dialog appears there.
+The panel renders in `shell.overlay`, locating the native Workspace region structurally (`[role="tree"]` up to its column, then the region element containing it; the `_regionArea` class suffix is only a hint), so it does **not** depend on CSS-module hashed class names. The cover rectangle is the region's own box intersected with every ancestor box — only the part that is actually on screen: the region box overflows the sidebar's own scroll viewport (the panel list and the workspace section share that viewport, and a full-height browser pushes the box past it by roughly the navigation's height), while the panel is painted in `shell.overlay`, outside that scroller. Covering the raw box also painted over the sidebar footer's settings / account buttons and past the window edge. The covered region gets `inert` + `aria-hidden` while the panel is visible, released while an official dialog appears there.
 
 The client entry declares only `inject: ['slots']`: cordis throws on property access to an undeclared service (`cannot get property ... without inject`), which was the direct cause of an earlier `topic-e2e` profile boot failure (reading `ctx.shortcuts` threw, and the whole web boot reported "1 entry did not activate").
 
@@ -288,7 +288,7 @@ Both switches are configuration only and need no rebuild. Deleting the sidecar d
 npm install
 npm run build     # esbuild -> lib/client.js (window.__ModuleLoader__.load shell; externalizes react/react-dom/host primitives)
 npm run check     # loads lib/*.js as a real module graph and checks the bundle's registration id (not node --check)
-npm test          # 299 tests
+npm test          # 320 tests
 ```
 
 `client/` is the source; `lib/client.js` is the artifact (shipped in the package, do not edit by hand). `react`/`react-dom`/`jsdom` in the test setup are **dev dependencies only**: at runtime `require('react')` resolves to the instance the host already loaded (React 18.3.1, same as DSH 0.2.1), so a second React is never bundled.

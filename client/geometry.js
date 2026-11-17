@@ -89,19 +89,61 @@ export function findRegionRoot(sidebarCol) {
   return { region: cursor, tree, header: cursor.querySelector(CLASS_HINTS.header) };
 }
 
+/** Intersection of two DOMRect-shaped boxes; zero-sized when they do not overlap. */
+function overlap(one, two) {
+  const left = Math.max(one.left, two.left);
+  const top = Math.max(one.top, two.top);
+  const right = Math.min(one.right, two.right);
+  const bottom = Math.min(one.bottom, two.bottom);
+  return {
+    left,
+    top,
+    right,
+    bottom,
+    width: Math.max(0, right - left),
+    height: Math.max(0, bottom - top),
+  };
+}
+
+/**
+ * The part of the region that is actually on screen.
+ *
+ * The workspace section sits inside the sidebar's own scroll viewport (the panel list — 插件 /
+ * 自动化任务 / … — shares that viewport, above it), and its box can extend well below what that
+ * viewport shows: a full-height browser overflows it by roughly the navigation's height. The
+ * region element still reports its complete, unclipped box, and the panel is painted in
+ * `shell.overlay`, outside that scroller — so covering the raw box also painted over the
+ * sidebar footer below it (the settings / account buttons) and past the window. Every ancestor
+ * box bounds what the shell can display, so the cover is their intersection: the footer is not
+ * part of the region and has to stay reachable.
+ */
+function visibleRect(layer, frame, region) {
+  const layerRect = layer.getBoundingClientRect();
+  let rect = overlap(region.getBoundingClientRect(), layerRect);
+  for (let node = region.parentElement; node; node = node.parentElement) {
+    const ancestorRect = node.getBoundingClientRect();
+    // `display: contents` wrappers have no box of their own; intersecting with their zero
+    // rect would collapse the cover entirely.
+    if (ancestorRect.width > 0 && ancestorRect.height > 0) rect = overlap(rect, ancestorRect);
+    if (node === frame || node === document.documentElement) break;
+  }
+  return rect;
+}
+
 // The panel covers the region itself (section header included), not the whole column: the
 // region already carries the sidebar's side padding, so its box is the exact seat the stock
-// browser occupied.
-function measure(layer, sidebarCol, region) {
+// browser occupied. Only the visible slice of that box is covered (see `visibleRect`).
+function measure(layer, frame, sidebarCol, region) {
   const layerRect = layer.getBoundingClientRect();
   const colRect = sidebarCol.getBoundingClientRect();
-  const regionRect = region.getBoundingClientRect();
+  const rawRect = region.getBoundingClientRect();
+  const rect = visibleRect(layer, frame, region);
   return {
-    left: Math.round(regionRect.left - layerRect.left),
-    top: Math.round(regionRect.top - layerRect.top),
-    width: Math.round(regionRect.width),
-    height: Math.round(regionRect.height),
-    regionTop: Math.round(regionRect.top - colRect.top),
+    left: Math.round(rect.left - layerRect.left),
+    top: Math.round(rect.top - layerRect.top),
+    width: Math.round(rect.width),
+    height: Math.round(rect.height),
+    regionTop: Math.round(rawRect.top - colRect.top),
   };
 }
 
@@ -150,7 +192,7 @@ export function observeWorkspaceRegion(onChange) {
       return { visible: false, rect: null, reason: 'no-region', regionEl: null, treeEl: null, sidebarCol, frameEl: frame, layerEl: layer };
     }
     const { region, tree } = found;
-    const rect = measure(layer, sidebarCol, region);
+    const rect = measure(layer, frame, sidebarCol, region);
     if (rect.width < MIN_REGION_WIDTH || rect.height < 64) {
       return { visible: false, rect: null, reason: 'too-small', regionEl: region, treeEl: tree, sidebarCol, frameEl: frame, layerEl: layer };
     }

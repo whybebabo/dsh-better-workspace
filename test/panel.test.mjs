@@ -122,8 +122,11 @@ function makeSource(value) {
   };
 }
 
+/** The fake class-name → rect table; a test can add the shell pieces it needs. */
+let layoutRects;
+
 function installFakeLayout() {
-  const rects = new Map([
+  layoutRects = new Map([
     ['BynINW_frame', { x: 0, y: 0, width: 1600, height: 900 }],
     ['BynINW_sidebarCol', { x: 0, y: 0, width: 280, height: 900 }],
     ['BynINW_overlayLayer', { x: 0, y: 0, width: 1600, height: 900 }],
@@ -138,8 +141,8 @@ function installFakeLayout() {
     const classes = (this.className || '').toString().split(/\s+/);
     let rect = { x: 0, y: 0, width: 0, height: 0 };
     for (const name of classes) {
-      if (rects.has(name)) {
-        rect = rects.get(name);
+      if (layoutRects.has(name)) {
+        rect = layoutRects.get(name);
         break;
       }
     }
@@ -482,6 +485,31 @@ test('the bundle mounts over the workspace region and inert the native list', as
     calls.some((call) => call.url.includes('/emojis?v=')),
     'the cached glyph table is versioned by the release, so a plugin upgrade cannot serve yesterday’s copy',
   );
+});
+
+test('the cover is clipped to the sidebar scroll viewport so the footer stays uncovered', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  assert.equal(find('.dts-overlay').style.height, '700px', 'the unclipped region is covered whole');
+
+  // The real shell puts the panel list and the workspace section inside one scroll viewport:
+  // that viewport's box is shorter than the region's own box (the region overflows it), and
+  // the sidebar footer sits directly below it. Painting the raw region box covered the footer.
+  const region = document.querySelector('[class*="_regionArea"]');
+  const viewport = document.createElement('div');
+  viewport.className = '_9lTDKa_scrollArea';
+  layoutRects.set('_9lTDKa_scrollArea', { x: 0, y: 120, width: 280, height: 730 });
+  await act(async () => {
+    region.parentElement.insertBefore(viewport, region);
+    viewport.append(region);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await tick(150);
+
+  const overlay = find('.dts-overlay');
+  assert.ok(overlay, 'the panel still covers the visible region');
+  assert.equal(overlay.style.top, '200px', 'the cover still starts at the region top');
+  assert.equal(overlay.style.height, '650px', 'it stops at the scroll viewport bottom (850px), not the footer (900px)');
 });
 
 test('a native dialog rendered inside the covered region hands the region back until it closes', async () => {
