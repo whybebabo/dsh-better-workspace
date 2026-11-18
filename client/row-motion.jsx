@@ -80,6 +80,11 @@ export class RowMotion extends React.Component {
         role="tree"
         aria-label={this.props.label}
         aria-multiselectable={this.props.multiselectable ? true : undefined}
+        // One Tab stop for the whole tree; the arrow handler then walks the rows. Every
+        // treeitem is tabIndex=-1 (see topic-tree.jsx), so 1,500 rows no longer mean 1,500 Tab
+        // presses before the next control. Moving focus from onFocus caused a jsdom/React
+        // focus loop, so the first Arrow/Home/End key performs the hand-off instead.
+        tabIndex={0}
         onKeyDown={(event) => {
           // Arrow navigation for the flat list of treeitems. Rows keep their own Enter/Space
           // handling; this only moves focus, so a keyboard user can walk the tree without
@@ -90,10 +95,17 @@ export class RowMotion extends React.Component {
           const target = event.target;
           if (typeof target?.closest !== 'function') return;
           if (target.closest('input, textarea, select, [contenteditable="true"]')) return;
-          const current = target.closest('[role="treeitem"]');
-          if (!current) return;
           const items = [...event.currentTarget.querySelectorAll('[role="treeitem"]')]
             .filter((node) => node.getBoundingClientRect().height > 0);
+          if (items.length === 0) return;
+          const current = target.closest('[role="treeitem"]');
+          if (!current) {
+            // Focus is still on the tree container: enter at the nearest end.
+            if (target !== event.currentTarget) return;
+            event.preventDefault();
+            (key === 'Home' || key === 'ArrowDown' ? items[0] : items[items.length - 1]).focus();
+            return;
+          }
           const index = items.indexOf(current);
           if (index < 0) return;
           const next = key === 'Home'

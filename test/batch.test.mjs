@@ -61,6 +61,18 @@ test('merging keeps a still-failing id in exactly one bucket', () => {
   assert.equal(merged.failed[0].error, 'again');
 });
 
+test('a retry moves an id between needsStop and failed instead of duplicating it', () => {
+  const stopped = { action: 'archive', ok: [], failed: [], needsStop: ['ses_b'], total: 1 };
+  const failed = { action: 'archive', ok: [], failed: [{ id: 'ses_b', error: 'disk', code: 'failed' }], needsStop: [], total: 1 };
+  const merged = mergeOutcomes(stopped, failed);
+  assert.deepEqual(merged.needsStop, []);
+  assert.deepEqual(merged.failed.map((entry) => entry.id), ['ses_b']);
+
+  const retried = mergeOutcomes(merged, stopped);
+  assert.deepEqual(retried.failed, []);
+  assert.deepEqual(retried.needsStop, ['ses_b']);
+});
+
 test('unarchive is dispatched through the official command and dedupes input', async () => {
   const seen = [];
   const actions = host({ unarchive: async (id) => seen.push(id) });

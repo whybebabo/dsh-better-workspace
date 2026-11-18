@@ -11,7 +11,8 @@
 # plus the /dsh-better-workspace/api routes; `dsh.client.platform` in package.json makes
 # the browser half (exports "./client") load in the web GUI and the Desktop shell.
 # Set `enabled: false` here (or in your profile's own patch layer) as the kill switch:
-# the host stops serving routes and the overlay panel hides, restoring the stock UI.
+# the host then answers only `/state` (so the panel can hand the native region back and hide)
+# and serves none of the mutation routes; the overlay releases the stock UI.
 - insert:
     - id: dsh-better-workspace
       name: "@whybebabo/dsh-better-workspace"

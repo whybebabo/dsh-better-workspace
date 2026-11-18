@@ -152,6 +152,42 @@ test('a subagent directory swapped before its cascade removal is not deleted', a
   assert.match(await readFile(join(childDir, 'session.v3.jsonl'), 'utf8'), /ses_important/);
 });
 
+test('a failed primary removal leaves its subagents untouched', async () => {
+  // Children are only removed after the primary artifact is proven gone. The old order deleted
+  // children first, so a failed primary left them gone while the result said "failed" and a
+  // retry had nothing left to act on.
+  const fx = await fixture();
+  const parentDir = await makeSession(fx, 'ses_parent_fail');
+  const childDir = await makeSession(fx, 'ses_child_keep', { origin: 'subagent', parentSession: 'ses_parent_fail' });
+
+  const { createRequire, syncBuiltinESMExports } = await import('node:module');
+  const require = createRequire(import.meta.url);
+  const fsp = require('node:fs/promises');
+  const realRename = fsp.rename;
+  fsp.rename = async (from, to) => {
+    if (String(to).includes('.trash-') && String(from).endsWith('ses_parent_fail')) {
+      throw Object.assign(new Error('EPERM: primary is busy'), { code: 'EPERM' });
+    }
+    return realRename(from, to);
+  };
+  syncBuiltinESMExports();
+  try {
+    const outcome = await executeDelete({
+      home: fx.home,
+      ctx: { get: (name) => (name === 'agents' ? { get: () => null } : null) },
+      sessionIds: ['ses_parent_fail'],
+      confirm: true,
+    });
+    assert.equal(outcome.items[0].status, 'failed');
+    assert.deepEqual(outcome.items[0].subagentsRemoved, []);
+    assert.equal(await exists(parentDir), true, 'the primary is untouched');
+    assert.equal(await exists(childDir), true, 'the child was never attempted');
+  } finally {
+    fsp.rename = realRename;
+    syncBuiltinESMExports();
+  }
+});
+
 test('a quarantine that cannot be created fails loudly instead of reporting a delete', async () => {
   // The `ENOENT` that `mkdir` failure produces used to be read as "the target is already gone",
   // so the removal returned success, the caller counted the child in `subagentsRemoved`, and its

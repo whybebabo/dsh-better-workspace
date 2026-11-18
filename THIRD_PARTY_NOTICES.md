@@ -27,9 +27,10 @@ Unicode emoji 字符与原有顺序,不使用其搜索标签或代码。该数�
 
 ## 运行时依赖(未打包,由宿主提供)
 
-客户端 bundle 外部化并在运行时 `require` 两个宿主模块:
+客户端 bundle 外部化并在运行时 `require` 三个宿主模块:
 
 - `react` —— 使用宿主已加载的实例(0.2.1 为 React 18.3.1),避免第二份 React;
+- `react-dom` —— 只使用 `createPortal`,让浮层/对话框渲染到覆盖层而不是被面板滚动区裁剪;
 - `@deepseek-ai/dsh-client-ui-primitives` —— 仅取用原生图标 `IconFolderOpenRegular`、
   `IconFolderCloseRegular`、`IconTriangleRightFillRegular`,使分组行的文件夹开合与折叠三角
   和官方列表完全一致。每个取值都带本地回退字形,导出被改名或删除时不会拖垮整个面板。
@@ -45,7 +46,7 @@ DeepSeek Harness 0.2.1-rc.2 随包分发的 `@deepseek-ai/*` 模块核对,这些
 ## 未采用的方案
 
 原计划移植 `dsh-session-manager@0.7.2`(MIT)的 `session-files.js` 与删除流程。实现过程中在
-0.2.1-rc.2 运行时上直接核对到了更可靠的落盘事实(`session.v3.jsonl[.zstd]` 头部含 `id`,
+0.2.1-rc.2 运行时上直接核对到了更可靠的落盘事实(`session.jsonl` / `session.vN.jsonl[.zstd]` 头部含 `id`,
 `archiveSession(id, {stopActivity})` 为官方命令),因此删除逻辑改为自行实现,
 最终**没有复制**该插件的任何代码;若后续引入其代码,需在此处补记其 MIT 版权声明。
 

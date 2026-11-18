@@ -167,7 +167,7 @@ export const SessionRow = React.memo(function SessionRow({
       style={{ '--dts-indent': selectMode ? '19.5px' : '41.5px' }}
       role="treeitem"
       aria-selected={selectMode ? selected : row.isCurrent}
-      tabIndex={0}
+      tabIndex={-1}
       // Read by `RowMotion`: a session row is the moving unit at the innermost level.
       data-dts-motion="session"
       data-dts-key={row.id}
@@ -281,6 +281,7 @@ export const SessionRow = React.memo(function SessionRow({
               label={t('session.rowMenu')}
               title={t('session.rowMenu')}
               className="dts-row__act"
+              tabIndex={-1}
               onClick={(event) => onMenu({ type: 'session', row, anchor: event.currentTarget })}
             >
               <Icon name="ellipsis" />
@@ -289,6 +290,7 @@ export const SessionRow = React.memo(function SessionRow({
               label={row.archived ? t('session.unarchive') : t('session.archive')}
               title={row.archived ? t('session.unarchive') : t('session.archive')}
               className="dts-row__act"
+              tabIndex={-1}
               onClick={(event) => {
                 event.stopPropagation();
                 onArchive?.(row);
@@ -301,6 +303,7 @@ export const SessionRow = React.memo(function SessionRow({
                 label={row.pinned ? t('session.unpin') : t('session.pin')}
                 title={row.pinned ? t('session.unpin') : t('session.pin')}
                 className="dts-row__act"
+                tabIndex={-1}
                 onClick={(event) => {
                   event.stopPropagation();
                   // Release focus: while the row has focus-within the marker would stay hidden.

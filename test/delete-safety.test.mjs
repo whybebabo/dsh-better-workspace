@@ -5,7 +5,7 @@ import { utimesSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import * as zlib from 'node:zlib';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { previewDelete, executeDelete } from '../lib/delete.js';
 import { isSafeSessionId, encodeSegment, removeVerifiedDir, resolveSessionsRoot, readSessionHeader } from '../lib/session-files.js';
 
@@ -31,6 +31,21 @@ async function makeSession(fx, id, extraHeader = {}, { lease = false, ageMs = 60
   const stamp = new Date(Date.now() - ageMs);
   await utimes(logPath, stamp, stamp);
   if (lease) await writeFile(join(target, 'session.v3.jsonl.lock'), 'holder', 'utf8');
+  return target;
+}
+
+/**
+ * A pre-migration generation-0 artifact: the host's naming rule has no `.v0` segment.
+ * See `sessionFormatLogFilename(0) === 'session.jsonl'`.
+ */
+async function makeV0Session(fx, id, { ageMs = 60_000 } = {}) {
+  const target = fx.sessionDir(id);
+  await mkdir(target, { recursive: true });
+  const header = { type: 'session', version: 0, id, createdAt: 1_700_000_000_000, cwd: 'C:/Work/demo' };
+  const logPath = join(target, 'session.jsonl');
+  await writeFile(logPath, `${JSON.stringify(header)}\n${JSON.stringify({ type: 'event', seq: 1 })}\n`, 'utf8');
+  const stamp = new Date(Date.now() - ageMs);
+  await utimes(logPath, stamp, stamp);
   return target;
 }
 
@@ -229,17 +244,19 @@ test('execute flushes the live store and clears host workspace, archive/pin and 
   const registry = {
     table,
     get: (key) => (key === 'ws_a' ? { detachSession: async (id) => { assert.equal(id, 'ses_one'); calls.workspace += 1; } } : undefined),
-    global: {
-      get: () => globalState,
-      set: async (next) => { globalState = next; calls.globalSet += 1; },
+    unarchiveSession: async (id) => {
+      calls.unarchive += 1;
+      globalState = { ...globalState, archivedSessionIds: globalState.archivedSessionIds.filter((entry) => entry !== id) };
     },
-    unarchiveSession: async () => { calls.unarchive += 1; },
-    unpinSession: async () => { calls.unpin += 1; },
+    unpinSession: async (id) => {
+      calls.unpin += 1;
+      globalState = { ...globalState, pinnedSessionIds: globalState.pinnedSessionIds.filter((entry) => entry !== id) };
+    },
   };
   const projection = { delete: async (id) => { assert.equal(id, 'ses_one'); calls.projection += 1; return true; } };
   const storage = {
     get: (name) => {
-      if (name === 'workspace') return { table: () => table, global: registry.global };
+      if (name === 'workspace') return { table: () => table };
       if (name === 'session_projcache') return { table: () => projection };
       return null;
     },
@@ -255,9 +272,83 @@ test('execute flushes the live store and clears host workspace, archive/pin and 
 
   const outcome = await executeDelete({ home: fx.home, ctx, sessionIds: ['ses_one'], confirm: true });
   assert.equal(outcome.items[0].status, 'deleted');
-  assert.deepEqual(calls, { flush: 1, detach: 1, workspace: 1, unarchive: 1, unpin: 1, projection: 1, globalSet: 1 });
+  assert.deepEqual(calls, { flush: 1, detach: 1, workspace: 1, unarchive: 1, unpin: 1, projection: 1, globalSet: 0 },
+    'the official per-id commands clean archive/pin; no global read-modify-write is made');
   assert.equal(globalState.archivedSessionIds.includes('ses_one'), false);
   assert.equal(globalState.pinnedSessionIds.includes('ses_one'), false);
+});
+
+test('a cleanup service that throws does not turn a completed delete into a failure', async () => {
+  const fx = await fixture();
+  await makeSession(fx, 'ses_cleanup_error');
+  const ctx = ctxServices({
+    sessions: { store: { get: () => null }, flush: async () => {} },
+    storageDomain: {
+      get() {
+        throw new Error('storage boom');
+      },
+    },
+  });
+
+  const outcome = await executeDelete({ home: fx.home, ctx, sessionIds: ['ses_cleanup_error'], confirm: true });
+  const item = outcome.items[0];
+  assert.equal(item.status, 'deleted', 'the artifact is gone, so the deletion itself succeeded');
+  assert.equal(item.cleanup?.failed, true, 'the host-record failure is reported separately');
+  assert.match(item.cleanup?.error ?? '', /storage boom/);
+  assert.equal(await exists(fx.sessionDir('ses_cleanup_error')), false);
+});
+
+test('a session-store detach failure keeps the artifact and reports a failure', async () => {
+  const fx = await fixture();
+  await makeSession(fx, 'ses_detach_error');
+  const ctx = ctxServices({
+    sessions: {
+      store: {
+        get: () => ({
+          session: {},
+          detach() {
+            throw new Error('detach boom');
+          },
+        }),
+      },
+      flush: async () => {},
+    },
+  });
+
+  const outcome = await executeDelete({ home: fx.home, ctx, sessionIds: ['ses_detach_error'], confirm: true });
+  const item = outcome.items[0];
+  assert.equal(item.status, 'failed');
+  assert.equal(item.code, 'detach-failed');
+  assert.match(item.notes.join('; '), /detach boom/);
+  assert.equal(await exists(fx.sessionDir('ses_detach_error')), true, 'the live store entry still owns this path');
+});
+
+test('a child detach failure leaves that child and marks the parent partial', async () => {
+  const fx = await fixture();
+  await makeSession(fx, 'ses_parent_detach');
+  await makeSession(fx, 'ses_child_detach', { origin: 'subagent', parentSession: 'ses_parent_detach' });
+  const ctx = ctxServices({
+    sessions: {
+      store: {
+        get: (id) => ({
+          session: {},
+          detach() {
+            if (id === 'ses_child_detach') throw new Error('child detach boom');
+          },
+        }),
+      },
+      flush: async () => {},
+    },
+  });
+
+  const outcome = await executeDelete({ home: fx.home, ctx, sessionIds: ['ses_parent_detach'], confirm: true });
+  const item = outcome.items[0];
+  assert.equal(item.status, 'partial');
+  assert.equal(item.code, 'subagents-failed');
+  assert.deepEqual(item.subagentsFailed, ['ses_child_detach']);
+  assert.deepEqual(item.subagentsRemoved, []);
+  assert.equal(await exists(fx.sessionDir('ses_parent_detach')), false);
+  assert.equal(await exists(fx.sessionDir('ses_child_detach')), true, 'the child whose store entry survived is preserved');
 });
 
 test('a running session is cancelled first, and never deleted while it stays running', async () => {
@@ -324,8 +415,11 @@ test('a log written after analysis makes the session a lease blocker', async () 
   assert.equal(await exists(target), true);
 });
 
-test('compressed artifacts larger than the old header window still verify and delete', async () => {
-  if (typeof zlib.zstdCompressSync !== 'function' || typeof zlib.createZstdDecompress !== 'function') return;
+test('compressed artifacts larger than the old header window still verify and delete', async (t) => {
+  if (typeof zlib.zstdCompressSync !== 'function' || typeof zlib.createZstdDecompress !== 'function') {
+    t.skip('this Node build has no zstd stream API');
+    return;
+  }
   const fx = await fixture();
   const target = await makeCompressedSession(fx, 'ses_zstd');
   const header = await readSessionHeader(target);
@@ -340,7 +434,23 @@ test('compressed artifacts larger than the old header window still verify and de
   assert.equal(await exists(target), false);
 });
 
-test('path safety: links are refused and removal cannot escape the sessions root', async () => {
+test('a generation-0 session.jsonl artifact is visible and deletable', async () => {
+  const fx = await fixture();
+  const target = await makeV0Session(fx, 'ses_v0');
+  const header = await readSessionHeader(target);
+  assert.equal(header.header.id, 'ses_v0');
+  assert.equal(header.log.version, 0);
+
+  const preview = await previewDelete({ home: fx.home, ctx: ctxWith(), sessionIds: ['ses_v0'] });
+  assert.equal(preview.items[0].exists, true);
+  assert.deepEqual(preview.items[0].blockers, []);
+
+  const outcome = await executeDelete({ home: fx.home, ctx: ctxWith(), sessionIds: ['ses_v0'], confirm: true });
+  assert.equal(outcome.items[0].status, 'deleted');
+  assert.equal(await exists(target), false);
+});
+
+test('path safety: links are refused and removal cannot escape the sessions root', async (t) => {
   const fx = await fixture();
   await makeSession(fx, 'ses_ok');
   const resolvedRoot = await resolveSessionsRoot(fx.home);
@@ -362,7 +472,10 @@ test('path safety: links are refused and removal cannot escape the sessions root
   const victim = fx.sessionDir('ses_link');
   await mkdir(join(fx.root, fx.project), { recursive: true });
   const linkable = await symlink(real, victim, 'junction').then(() => true, () => false);
-  if (!linkable) return; // Windows without privileges/dev mode: link refusal stays untested here.
+  if (!linkable) {
+    t.skip('this host cannot create a directory junction');
+    return;
+  }
   const preview = await previewDelete({ home: fx.home, ctx: ctxWith(), sessionIds: ['ses_link'] });
   assert.equal(preview.items[0].exists, false, 'a linked directory never counts as a located session');
   assert.equal(preview.items[0].blockers[0].code, 'not-verified');
@@ -371,11 +484,10 @@ test('path safety: links are refused and removal cannot escape the sessions root
   assert.equal((await readFile(join(real, 'precious.txt'), 'utf8')), 'do not delete');
 });
 
-test('removal cannot be redirected by swapping a parent component for a link', async () => {
-  // The check-then-rm shape is only safe if nothing can be re-pointed between the check and
-  // the unlink. removeVerifiedDir renames into a quarantine first, so the object it removes
-  // is the one it verified. This drives the race directly: a `lstat`/`realpath` hook swaps the
-  // parent directory for a junction the moment verification has passed.
+test('removal cannot be redirected by swapping a parent component for a link', async (t) => {
+  // Deterministic version of the check→rename race: when the quarantine rename is about to
+  // run, replace the project directory with a junction. The quarantine then receives the
+  // linked target, and the post-rename header check must restore it instead of deleting it.
   const fx = await fixture();
   await makeSession(fx, 'ses_victim');
   const resolvedRoot = await resolveSessionsRoot(fx.home);
@@ -386,32 +498,43 @@ test('removal cannot be redirected by swapping a parent component for a link', a
   await writeFile(join(outside, 'ses_victim', 'precious.txt'), 'do not delete', 'utf8');
 
   const projectPath = join(fx.root, fx.project);
-  const linked = await symlink(outside, `${projectPath}.swap`, 'junction').then(() => true, () => false);
-  if (!linked) return; // link creation unavailable on this host
+  const swapPath = `${projectPath}.swap`;
+  const linked = await symlink(outside, swapPath, 'junction').then(() => true, () => false);
+  if (!linked) {
+    t.skip('this host cannot create a directory junction');
+    return;
+  }
 
-  const target = join(projectPath, 'ses_victim');
-  // Swap the project layer for the junction *after* the safety checks have run: the guards
-  // use lstat/realpath, so the first post-check call to either triggers the swap.
+  const { createRequire, syncBuiltinESMExports } = await import('node:module');
+  const require = createRequire(import.meta.url);
+  const fsp = require('node:fs/promises');
+  const realRename = fsp.rename;
   let swapped = false;
-  const swap = async () => {
-    if (swapped) return;
-    swapped = true;
-    await rm(projectPath, { recursive: true, force: true }).catch(() => {});
-    await rename(`${projectPath}.swap`, projectPath).catch(() => {});
+  fsp.rename = async (from, to) => {
+    if (!swapped && String(to).includes('.trash-')) {
+      swapped = true;
+      await rm(projectPath, { recursive: true, force: true });
+      await realRename(swapPath, projectPath);
+    }
+    return realRename(from, to);
   };
-  // Give the swap a chance mid-flight without depending on internal hook points: start the
-  // removal, then re-point the parent as soon as it yields to the filesystem.
-  const pending = removeVerifiedDir({ rootResolved: resolvedRoot.resolved, dir: target }).then(
-    () => 'removed',
-    (error) => error.code ?? 'error',
-  );
-  await swap();
-  const outcome = await pending;
-
-  assert.equal(await readFile(join(outside, 'ses_victim', 'precious.txt'), 'utf8'), 'do not delete', `the linked target is untouched (outcome: ${outcome})`);
+  syncBuiltinESMExports();
+  try {
+    const outcome = await removeVerifiedDir({
+      rootResolved: resolvedRoot.resolved,
+      dir: join(projectPath, 'ses_victim'),
+      expectedSessionId: 'ses_victim',
+    }).then(() => 'removed', (error) => error.code ?? 'error');
+    assert.equal(swapped, true, 'the swap happened at the quarantine rename');
+    assert.notEqual(outcome, 'removed', 'the swapped-in directory must not be deleted');
+    assert.equal(await readFile(join(outside, 'ses_victim', 'precious.txt'), 'utf8'), 'do not delete');
+  } finally {
+    fsp.rename = realRename;
+    syncBuiltinESMExports();
+  }
 });
 
-test('a check-then-remove implementation is rejected by the same fixture', async () => {
+test('a pre-swapped parent is rejected before any removal', async (t) => {
   // A tripwire for the guard itself: if removeVerifiedDir ever degrades to `rm` after a
   // passing check, deleting through an already-swapped parent must be refused. Written as a
   // separate case so a regression in the quarantine path fails loudly instead of silently.
@@ -426,7 +549,10 @@ test('a check-then-remove implementation is rejected by the same fixture', async
 
   const projectPath = join(fx.root, fx.project);
   const linked = await symlink(outside, `${projectPath}.swap`, 'junction').then(() => true, () => false);
-  if (!linked) return;
+  if (!linked) {
+    t.skip('this host cannot create a directory junction');
+    return;
+  }
   await rm(projectPath, { recursive: true, force: true });
   await rename(`${projectPath}.swap`, projectPath);
 
@@ -437,46 +563,69 @@ test('a check-then-remove implementation is rejected by the same fixture', async
   assert.equal(await readFile(join(outside, 'ses_victim', 'precious.txt'), 'utf8'), 'do not delete');
 });
 
-test('removal goes through a quarantine directory inside the root', async () => {
-  // The rename-into-quarantine step is what closes the check/remove window: the object that
-  // gets deleted is the one that was moved, not a path re-resolved after the checks. A
-  // check-then-rm variant passes every functional test (the race cannot be scheduled
-  // deterministically), so pin the mechanism itself.
+test('removal stages through a quarantine outside the sessions root', async () => {
+  // The quarantine must never live below `sessions`: DSH lists every directory there and
+  // rejects an artifact whose path disagrees with its header, so a leftover `.trash-*` would
+  // break the host's whole session list. Pin the destination deterministically instead of
+  // racing a file watcher against a recursive rm.
   const fx = await fixture();
   await makeSession(fx, 'ses_direct');
   const resolvedRoot = await resolveSessionsRoot(fx.home);
   assert.ok(resolvedRoot);
 
-  const observed = [];
-  const { watch } = await import('node:fs');
-  const watcher = watch(resolvedRoot.resolved, { persistent: true }, (_event, name) => {
-    if (name) observed.push(String(name));
-  });
+  const { createRequire, syncBuiltinESMExports } = await import('node:module');
+  const require = createRequire(import.meta.url);
+  const fsp = require('node:fs/promises');
+  const realRename = fsp.rename;
+  const destinations = [];
+  fsp.rename = async (from, to) => {
+    destinations.push(String(to));
+    return realRename(from, to);
+  };
+  syncBuiltinESMExports();
   try {
-    await new Promise((resolve) => setTimeout(resolve, 50));
     await removeVerifiedDir({ rootResolved: resolvedRoot.resolved, dir: fx.sessionDir('ses_direct') });
-    await new Promise((resolve) => setTimeout(resolve, 80));
   } finally {
-    // A failed assertion above must not leave a persistent watcher behind: it keeps the test
-    // process alive and makes the whole runner hang instead of reporting the failure.
-    watcher.close();
+    fsp.rename = realRename;
+    syncBuiltinESMExports();
   }
 
-  assert.ok(
-    observed.some((name) => name.startsWith('.trash-')),
-    `removal must stage through .trash-* inside the root (saw: ${observed.join(', ') || 'nothing'})`,
-  );
+  const moved = destinations.find((path) => path.includes('.trash-'));
+  assert.ok(moved, `removal must rename through a quarantine (saw: ${destinations.join(', ') || 'nothing'})`);
+  assert.equal(moved.startsWith(resolvedRoot.resolved + sep), false, 'quarantine is outside the sessions root');
+  assert.match(moved, /dsh-better-workspace[\\/]trash[\\/]\.trash-/);
   assert.equal(await exists(fx.sessionDir('ses_direct')), false);
   assert.equal(await exists(join(resolvedRoot.resolved, fx.project, 'ses_direct')), false);
 });
 
-test('a symlinked sessions root is refused outright', async () => {
+test('a settled session is not blocked by a leftover POSIX session.lock', async () => {
+  // POSIX keeps `session.lock` forever after the first write; treating the filename as a live
+  // writer would make every settled session undeletable. The quiet-window mtime, not the lock
+  // file, is the signal.
+  const fx = await fixture();
+  const target = await makeSession(fx, 'ses_with_lock', {}, { lease: true });
+  const settled = await previewDelete({ home: fx.home, ctx: ctxWith(), sessionIds: ['ses_with_lock'] });
+  assert.equal(settled.items[0].blockers.some((blocker) => blocker.code === 'locked'), false);
+  const outcome = await executeDelete({ home: fx.home, ctx: ctxWith(), sessionIds: ['ses_with_lock'], confirm: true });
+  assert.equal(outcome.items[0].status, 'deleted');
+  assert.equal(await exists(target), false);
+
+  const fresh = await makeSession(fx, 'ses_fresh_lock', {}, { lease: true, ageMs: 0 });
+  const blocked = await previewDelete({ home: fx.home, ctx: ctxWith(), sessionIds: ['ses_fresh_lock'] });
+  assert.equal(blocked.items[0].blockers.some((blocker) => blocker.code === 'locked'), true);
+  assert.equal(await exists(fresh), true);
+});
+
+test('a symlinked sessions root is refused outright', async (t) => {
   const fx = await fixture();
   const outside = join(fx.dir, 'real-sessions');
   await mkdir(outside, { recursive: true });
   await mkdir(join(fx.home), { recursive: true });
   const created = await symlink(outside, join(fx.home, 'sessions'), 'junction').then(() => true, () => false);
-  if (!created) return;
+  if (!created) {
+    t.skip('this host cannot create a directory junction');
+    return;
+  }
   assert.equal(await resolveSessionsRoot(fx.home), null);
   const preview = await previewDelete({ home: fx.home, ctx: ctxWith(), sessionIds: ['ses_any'] });
   assert.equal(preview.rootAvailable, false);

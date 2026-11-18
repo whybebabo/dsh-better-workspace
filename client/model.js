@@ -49,6 +49,24 @@ export function selectableIds(section, { revealed = false } = {}) {
   const limit = revealed ? all.length : Math.min(all.length, REVEAL_LIMIT);
   return { visible: all.slice(0, limit), hidden: all.slice(limit) };
 }
+
+/**
+ * Drops selection entries a section no longer renders after a reveal is folded away.
+ *
+ * Selecting a 60+ row bucket while it is expanded is legitimate, but collapsing the reveal
+ * must not leave ids selected that the section header can no longer deselect. Ids from other
+ * sections are untouched.
+ *
+ * @param {object} section - a built section
+ * @param {Iterable<string>} selection - current selected ids
+ * @param {{revealed?: boolean}} [options] - reveal state after the toggle
+ * @returns {string[]} the pruned selection
+ */
+export function pruneSelectionForSection(section, selection, { revealed = false } = {}) {
+  const allowed = new Set(selectableIds(section, { revealed }).visible);
+  const owned = new Set((section?.rows ?? []).filter((row) => !row.blank).map((row) => row.id));
+  return [...selection].filter((id) => !owned.has(id) || allowed.has(id));
+}
 /** Reserved id of the per-workspace system group; mirrors `lib/store.js`. */
 export const DEFAULT_TOPIC_ID = 'tp_default';
 /**
@@ -111,15 +129,20 @@ export function basename(path) {
  * one session under both.
  */
 function isWindowsPath(value) {
-  return /^[A-Za-z]:[\\/]/.test(value) || String(value ?? '').includes('\\');
+  const text = String(value ?? '');
+  // Only a drive-letter absolute path or a UNC path is Windows. A backslash alone is legal in a
+  // POSIX filename, and folding such a path lower-case made two distinct directories collide.
+  return /^[A-Za-z]:[\\/]/.test(text) || /^\\\\/.test(text);
 }
 
 /** One normalized spelling used both by `samePath` and by the per-build path index. */
 function pathKey(value) {
   const text = String(value ?? '');
-  return isWindowsPath(text)
-    ? text.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()
-    : text.replace(/\/+$/, '');
+  if (isWindowsPath(text)) return text.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+  const trimmed = text.replace(/\/+$/, '');
+  // The root is a real path; collapsing it to '' made `samePath('/', '/')` false and sent a
+  // session created at the filesystem root to 未分组.
+  return trimmed === '' && text !== '' ? '/' : trimmed;
 }
 
 export function samePath(left, right) {
@@ -470,8 +493,19 @@ export function workspaceSessionIds({ workspace, byId, pathIndex = null }) {
 /**
  * The ids of the virtual 未分组 bucket: no workspace accounts for them and no `cwd` matches a
  * registered workspace path. Same derivation as the tree, exported for the drag baseline.
+ *
+ * By default archived sessions are excluded because they are not live rows. `includeArchived`
+ * is for the virtual archived bucket: the host's archive set is global, so an archived session
+ * with no workspace must still have a place to be shown and unarchived.
+ *
+ * @param {object} input
+ * @param {Array} input.workspaces - workspace records
+ * @param {Record<string, object>} input.byId - session rows
+ * @param {Set<string>|null} [input.archived] - global archived ids
+ * @param {boolean} [input.includeArchived] - include archived strays as well
+ * @returns {string[]} ids in recency order
  */
-export function ungroupedSessionIds({ workspaces, byId, archived = null }) {
+export function ungroupedSessionIds({ workspaces, byId, archived = null, includeArchived = false }) {
   const accounted = new Set();
   for (const workspace of workspaces ?? []) for (const id of workspace.sessionIds ?? []) accounted.add(id);
   const paths = new Set((workspaces ?? []).map((workspace) => pathKey(workspace.path)).filter(Boolean));
@@ -480,7 +514,7 @@ export function ungroupedSessionIds({ workspaces, byId, archived = null }) {
       && session.origin !== 'subagent'
       && !accounted.has(session.id)
       && !paths.has(pathKey(session.cwd))
-      && !archived?.has?.(session.id))
+      && (includeArchived || !archived?.has?.(session.id)))
     .sort((left, right) => relativeKey(left.updatedAt) - relativeKey(right.updatedAt))
     .map((session) => session.id);
 }
@@ -744,65 +778,96 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
 
   // The native browser trails a virtual 未分组 workspace for sessions no workspace
   // accounts for. It stays out of filters (those are workspace-scoped) and out of the
-  // workspace order; it is only a home for live rows that would otherwise disappear.
-  // Archived sessions always belong to their workspace's archived bucket: sessions with no
-  // workspace at all stay out instead of surfacing under 未分组.
+  // workspace order. Live strays hang directly off the group header; archived strays need
+  // their own bucket here too — the host archive set is global, and without this bucket an
+  // archived session with no workspace disappears from the panel with no way to unarchive it.
   if (!workspaceFilter && !topicFilter) {
     // Same derivation the panel's drag handler uses for this bucket (`ungroupedSessionIds`).
+    const idOrder = prefs?.sessionOrder?.[UNGROUPED_WORKSPACE_ID];
     const orderedStrays = orderBy(
       ungroupedSessionIds({ workspaces, byId, archived }),
-      prefs?.sessionOrder?.[UNGROUPED_WORKSPACE_ID],
+      idOrder,
       (id) => id,
     );
+    const archivedStrays = showArchived
+      ? orderBy(
+        ungroupedSessionIds({ workspaces, byId, archived, includeArchived: true })
+          .filter((id) => archived?.has?.(id)),
+        idOrder,
+        (id) => id,
+      )
+      : [];
     const defaultName = t('topic.default');
     const rows = [];
-    for (const id of orderedStrays) {
-      if (truncated) break;
-      const session = byId[id];
-      if (!session) continue;
-      if (session.origin === 'subagent') continue;
-      if (session.blank && id !== current) continue;
-      const row = makeRow(session, {
-        current,
-        archived,
-        pinned,
-        statuses,
-        now: minuteNow,
-        workspaceId: UNGROUPED_WORKSPACE_ID,
-        workspaceTitle: t('group.ungrouped'),
-        topicId: DEFAULT_TOPIC_ID,
-        topicName: defaultName,
-        topicEmoji: '',
-      });
-      if (search) {
-        const haystack = `${row.title} ${row.workspaceTitle} ${defaultName}`.toLowerCase();
-        if (!haystack.includes(search)) continue;
-        if (matched >= SEARCH_RESULT_LIMIT) {
-          truncated = true;
-          break;
+    const archivedRows = [];
+    const collect = (ids, archivedSection) => {
+      for (const id of ids) {
+        if (truncated) break;
+        const session = byId[id];
+        if (!session) continue;
+        if (session.origin === 'subagent') continue;
+        if (session.blank && id !== current) continue;
+        const row = makeRow(session, {
+          current,
+          archived,
+          pinned,
+          statuses,
+          now: minuteNow,
+          workspaceId: UNGROUPED_WORKSPACE_ID,
+          workspaceTitle: t('group.ungrouped'),
+          topicId: DEFAULT_TOPIC_ID,
+          topicName: defaultName,
+          topicEmoji: '',
+        });
+        if (search) {
+          const haystack = `${row.title} ${row.workspaceTitle} ${defaultName}`.toLowerCase();
+          if (!haystack.includes(search)) continue;
+          if (matched >= SEARCH_RESULT_LIMIT) {
+            truncated = true;
+            break;
+          }
+          matched += 1;
         }
-        matched += 1;
+        (archivedSection ? archivedRows : rows).push(row);
       }
-      rows.push(row);
-    }
-    if (rows.length > 0) {
-      sortRows(rows);
-      const status = aggregateStatus(rows);
-      const sections = [stabilize(sectionCache, `${UNGROUPED_WORKSPACE_ID}:${DEFAULT_TOPIC_ID}`, {
-        kind: 'topic',
-        id: DEFAULT_TOPIC_ID,
-        name: defaultName,
-        emoji: '',
-        system: true,
-        // 未分组 is a bucket, not a workspace that groups anything: its rows hang directly
-        // off the workspace header instead of a "default group" row.
-        bare: true,
-        rows,
-        status: status.state,
-        statusKind: status.kind,
-        collapsed: false,
-        total: rows.length,
-      }, SECTION_SCALARS, 'rows')];
+    };
+    collect(orderedStrays, false);
+    collect(archivedStrays, true);
+    if (rows.length > 0) sortRows(rows);
+    if (archivedRows.length > 0) sortRows(archivedRows);
+    if (rows.length > 0 || archivedRows.length > 0) {
+      const sections = [];
+      if (rows.length > 0) {
+        const status = aggregateStatus(rows);
+        sections.push(stabilize(sectionCache, `${UNGROUPED_WORKSPACE_ID}:${DEFAULT_TOPIC_ID}`, {
+          kind: 'topic',
+          id: DEFAULT_TOPIC_ID,
+          name: defaultName,
+          emoji: '',
+          system: true,
+          // 未分组 is a bucket, not a workspace that groups anything: its rows hang directly
+          // off the workspace header instead of a "default group" row.
+          bare: true,
+          rows,
+          status: status.state,
+          statusKind: status.kind,
+          collapsed: false,
+          total: rows.length,
+        }, SECTION_SCALARS, 'rows'));
+      }
+      if (archivedRows.length > 0) {
+        sections.push(stabilize(sectionCache, `${UNGROUPED_WORKSPACE_ID}:archived`, {
+          kind: 'archived',
+          id: '__archived__',
+          name: null,
+          emoji: '',
+          rows: archivedRows,
+          status: null,
+          statusKind: null,
+          collapsed: search ? false : collapsedWorkspaces.has(`${UNGROUPED_WORKSPACE_ID}:archived`),
+          total: archivedRows.length,
+        }, SECTION_SCALARS, 'rows'));
+      }
       const workspaceStatus = aggregateMembers(orderedStrays, {
         byId,
         archived,
@@ -817,8 +882,8 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
         status: workspaceStatus.state,
         statusKind: workspaceStatus.kind,
         liveCount: rows.length,
-        archivedCount: 0,
-        topicCount: 1,
+        archivedCount: archivedRows.length,
+        topicCount: rows.length > 0 ? 1 : 0,
         collapsed: search ? false : collapsedWorkspaces.has(UNGROUPED_WORKSPACE_ID),
         isSelectedWorkspaceFilter: false,
         virtual: true,

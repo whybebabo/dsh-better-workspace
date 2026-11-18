@@ -111,6 +111,52 @@ test('a hung write times out, clears busy and releases the serialized queue', as
   store.dispose();
 });
 
+test('a write timeout re-reads the revision before the next queued write', async () => {
+  let hostRevision = 1;
+  const expectedRevisions = [];
+  global.fetch = (url, options = {}) => {
+    if (String(url).includes('/emojis')) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, result: { emojis: [] } }) });
+    }
+    if ((options.method ?? 'GET') === 'GET') {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, result: { enabled: true, deleteAvailable: true, revision: hostRevision, workspaces: {} } }),
+      });
+    }
+    const body = JSON.parse(options.body);
+    expectedRevisions.push(body.expectedRevision);
+    if (expectedRevisions.length === 1) {
+      // The host applies the write but the response is lost; the first request times out.
+      hostRevision = 2;
+      return new Promise((resolve, reject) => {
+        const signal = options.signal;
+        const abort = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        if (signal?.aborted) abort();
+        else signal?.addEventListener('abort', abort, { once: true });
+      });
+    }
+    if (body.expectedRevision !== hostRevision) {
+      return Promise.resolve({ ok: false, status: 409, json: async () => ({ ok: false, code: 'revision-conflict', currentRevision: hostRevision, error: 'conflict' }) });
+    }
+    hostRevision += 1;
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, result: { revision: hostRevision } }) });
+  };
+  const { createPanelStore } = await import('../client/store.js');
+  const store = createPanelStore({ requestTimeoutMs: 25 });
+  store.subscribe(() => {});
+  await store.load();
+  await assert.rejects(
+    store.assign({ workspaceId: 'ws_a', sessionIds: ['ses_a'], topicId: 'tp_default' }),
+    (error) => error?.code === 'timeout',
+  );
+  await store.assign({ workspaceId: 'ws_a', sessionIds: ['ses_b'], topicId: 'tp_default' });
+  assert.deepEqual(expectedRevisions, [1, 2], 'the second write uses the revision the timeout re-read produced');
+  assert.equal(store.getState().revision, 3);
+  store.dispose();
+});
+
 test('a store error code is localized before it reaches the UI', async () => {
   global.fetch = async () => ({
     ok: false,

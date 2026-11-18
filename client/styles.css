@@ -957,14 +957,22 @@ html[data-platform='darwin'] [data-dts-covered] {
   flex-direction: column;
   max-height: 60vh;
   padding: 4px;
-  border-radius: var(--dsw-radius-md, 12px);
-  background: var(--dsw-specific-menu, rgba(248, 249, 250, 0.92));
-  -webkit-backdrop-filter: blur(24px) saturate(1.6);
-  backdrop-filter: blur(24px) saturate(1.6);
-  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.08));
-  box-shadow: 0 8px 24px rgba(15, 17, 21, 0.14);
+  border-radius: var(--dsw-radius-lg, 12px);
+  background: var(--dsw-menu-surface-fill, var(--dsw-specific-menu, rgba(248, 249, 250, 0.92)));
+  -webkit-backdrop-filter: var(--dsw-menu-backdrop-filter, blur(24px) saturate(1.6));
+  backdrop-filter: var(--dsw-menu-backdrop-filter, blur(24px) saturate(1.6));
+  border: 0;
+  box-shadow: var(--dsw-elevation-prominent, 0 8px 24px rgba(15, 17, 21, 0.14), 0 0 0 0.5px rgba(15, 17, 21, 0.06));
   overflow: hidden;
-  font-size: 14px;
+  font-size: 13px;
+}
+
+/* Native context menus are max-content (min 144, max 360) and anchor their left edge on the
+   trigger, so the stock row menu opens into the conversation instead of the narrow sidebar. */
+.dts-pop--auto {
+  width: max-content;
+  min-width: min(144px, calc(100vw - 24px));
+  max-width: min(360px, calc(100vw - 24px));
 }
 
 .dts-pop__head,
@@ -994,26 +1002,35 @@ html[data-platform='darwin'] [data-dts-covered] {
   display: flex;
   align-items: center;
   flex: 0 0 auto;
-  gap: 8px;
+  gap: 6px;
   width: 100%;
   min-height: 34px;
-  padding: 0 8px;
+  padding: 6px 8px;
   border: 0;
-  border-radius: var(--dsw-radius-sm, 8px);
+  border-radius: var(--dsw-radius-md, 8px);
   background: transparent;
   color: var(--dsw-alias-label-primary, #0f1115);
   font: inherit;
-  font-size: 14px;
+  font-size: 13px;
+  line-height: 20px;
   text-align: left;
   cursor: pointer;
 }
 
-.dts-menu__item:hover:not(:disabled) {
+.dts-menu__item:hover:not(:disabled),
+.dts-menu__item:focus-visible:not(:disabled) {
   background: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06));
+  outline: none;
 }
 
 .dts-menu__item.is-danger {
   color: var(--dsw-alias-state-error-primary, #ec1313);
+}
+
+@media (hover: hover) {
+  .dts-menu__item.is-danger:hover:not(:disabled) {
+    background: var(--dsw-alias-interactive-bg-hover-danger, var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06)));
+  }
 }
 
 .dts-menu__item:disabled {
@@ -1033,7 +1050,8 @@ html[data-platform='darwin'] [data-dts-covered] {
 
 .dts-menu__hint {
   color: var(--dsw-alias-label-caption, #adb2b8);
-  font-size: 12px;
+  font-size: 11px;
+  line-height: 16px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -1042,9 +1060,15 @@ html[data-platform='darwin'] [data-dts-covered] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  flex: none;
+  width: 14px;
+  height: 14px;
   color: var(--dsw-alias-menu-icon, #353638);
+}
+
+.dts-menu__icon svg {
+  width: 14px;
+  height: 14px;
 }
 
 .dts-menu__item.is-danger .dts-menu__icon {
@@ -1053,9 +1077,9 @@ html[data-platform='darwin'] [data-dts-covered] {
 
 .dts-menu__sep {
   flex: 0 0 auto;
-  height: 1px;
-  margin: 4px 6px;
-  background: var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.06));
+  height: 0.5px;
+  margin: 3px 8px;
+  background: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.08));
 }
 
 .dts-menu__item--workspace {

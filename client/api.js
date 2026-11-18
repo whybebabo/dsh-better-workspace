@@ -33,6 +33,7 @@ const CODE_TEXT = {
   'cross-workspace': 'session.crossWorkspace',
   'delete-disabled': 'delete.disabled',
   'revision-required': 'error.revisionRequired',
+  'revision-conflict': 'state.conflict',
   'confirm-required': 'delete.confirmRequired',
   'bad-emoji': 'error.badRequest',
   'bad-topic-id': 'error.badRequest',

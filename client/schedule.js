@@ -46,14 +46,43 @@ function service(ctx, name) {
   }
 }
 
-/** Group active catalog records by their originating session; inactive rows never mark. */
+/**
+ * The Session a catalog entry belongs to.
+ *
+ * DSH 0.2.2 moved the delivery destination into `record.target`:
+ *   - `{ kind: 'session', sessionId }`
+ *   - `{ kind: 'new_once', sessionId }` (reserved before the first delivery)
+ *   - `{ kind: 'new' }` (the first delivered Session is in `lastDelivery`)
+ * The 0.2.1 catalogs exposed a top-level `sessionId`; keeping it as a fallback lets the panel
+ * work on both shapes instead of silently dropping every task (which is what happened when
+ * only the old field was read).
+ *
+ * @param {object} record - one `remote.schedule.catalog()` entry
+ * @returns {string|null} the Session id, or null for a `new` rule with no delivery yet
+ */
+export function targetSessionId(record) {
+  const target = record?.target;
+  if (target && typeof target === 'object') {
+    if (target.kind === 'new') {
+      const delivered = record?.lastDelivery?.targetSessionId;
+      return typeof delivered === 'string' && delivered !== '' ? delivered : null;
+    }
+    if (typeof target.sessionId === 'string' && target.sessionId !== '') return target.sessionId;
+  }
+  const legacy = record?.sessionId;
+  return typeof legacy === 'string' && legacy !== '' ? legacy : null;
+}
+
+/** Group active catalog records by their target session; inactive rows never mark. */
 export function indexSchedules(records) {
   const bySession = new Map();
   for (const record of Array.isArray(records) ? records : []) {
-    if (record?.status !== 'active' || !record.sessionId) continue;
-    const list = bySession.get(record.sessionId);
+    if (record?.status !== 'active') continue;
+    const sessionId = targetSessionId(record);
+    if (!sessionId) continue;
+    const list = bySession.get(sessionId);
     if (list) list.push(record);
-    else bySession.set(record.sessionId, [record]);
+    else bySession.set(sessionId, [record]);
   }
   for (const list of bySession.values()) list.sort(byTarget);
   return bySession;
@@ -310,6 +339,17 @@ function offsetLabel(zone) {
   }
 }
 
+/**
+ * An `rrule` catalog entry carries its zone inside the DTSTART line, not as a top-level
+ * `timeZone` field (unlike daily/weekly/cron). Read the explicit TZID first, then fall back to
+ * the stored field so both older and current hosts render the right offset.
+ */
+function rruleZone(record) {
+  if (typeof record?.timeZone === 'string' && record.timeZone !== '') return record.timeZone;
+  const match = /TZID=([^:;]+)/i.exec(String(record?.rrule ?? ''));
+  return match?.[1] || undefined;
+}
+
 /** `UTC+08:00 · 中国标准时间` — the offset plus the ICU zone name, like the host. */
 function zoneLabel(zone) {
   const offset = offsetLabel(zone);
@@ -342,6 +382,10 @@ export function formatFrequency(record) {
       });
     case 'cron':
       return t('schedule.frequency.cron', { expression: record.expression, timeZone: zoneLabel(record.timeZone) });
+    case 'rrule':
+      // Current hosts expose a custom recurrence as `rrule`; the raw rule is a multi-line
+      // DTSTART/RRULE document, so the row uses the host's "custom rule" wording instead.
+      return t('schedule.frequency.rrule', { timeZone: zoneLabel(rruleZone(record)) });
     case 'every': {
       const seconds = Number(record.everySeconds);
       if (!Number.isFinite(seconds) || seconds <= 0) return '';

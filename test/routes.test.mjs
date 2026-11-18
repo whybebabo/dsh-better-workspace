@@ -7,23 +7,37 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, utimes, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import plugin from '../lib/index.js';
+import { createTopicStore } from '../lib/store.js';
+import { encodeSegment } from '../lib/session-files.js';
 
 const API = '/dsh-better-workspace/api';
 
-/** Boots the plugin against a captured `webServer.register` and an adopted-services stub. */
+/** Boots the plugin against captured webServer and connection carriers, plus adopted services. */
 async function boot({ home, services = {}, config } = {}) {
   const routes = [];
+  const connectionRoutes = [];
   const ctx = {
     inject(names, enter) {
-      if (!names.includes('webServer')) return;
-      enter({
-        get: () => ({ register: (route) => { routes.push(route); return () => {}; } }),
-        effect: () => {},
-      });
+      if (names.includes('webServer')) {
+        enter({
+          get: () => ({ register: (route) => { routes.push(route); return () => {}; } }),
+          effect: () => {},
+        });
+      }
+      if (names.includes('connection')) {
+        enter({
+          get: () => ({
+            fetch: {
+              register: (route) => { connectionRoutes.push(route); return () => {}; },
+            },
+          }),
+          effect: () => {},
+        });
+      }
     },
     get(name) {
       if (name in services) return services[name];
@@ -33,7 +47,7 @@ async function boot({ home, services = {}, config } = {}) {
   };
   plugin(ctx, config ?? { enabled: true, storageHome: home });
   const find = (path) => routes.find((route) => route.path === path);
-  return { routes, find };
+  return { routes, connectionRoutes, find };
 }
 
 /** Minimal req/res pair; the WebRoute contract is `handle(req, res)`. */
@@ -83,13 +97,78 @@ async function withHome(fn) {
 
 test('every route is registered on both carriers', async () => {
   await withHome(async (home) => {
-    const { routes } = await boot({ home });
-    const paths = routes.map((route) => route.path).sort();
-    assert.ok(paths.includes(`${API}/state`));
-    assert.ok(paths.includes(`${API}/emojis`), 'the static glyph table has its own route');
-    assert.ok(paths.includes(`${API}/sessions/adopt`), 'the membership-repair route is registered');
-    assert.ok(paths.includes(`${API}/delete/preview`));
-    assert.ok(paths.every((path) => path.startsWith(`${API}/`)), 'all routes share the plugin prefix');
+    const { routes, connectionRoutes } = await boot({ home });
+    const expected = [
+      `${API}/state`,
+      `${API}/emojis`,
+      `${API}/topics/create`,
+      `${API}/topics/update`,
+      `${API}/topics/delete`,
+      `${API}/topics/reorder`,
+      `${API}/assign`,
+      `${API}/sessions/adopt`,
+      `${API}/delete/preview`,
+      `${API}/delete/execute`,
+    ].sort();
+    assert.deepEqual(routes.map((route) => route.path).sort(), expected, 'webServer exposes the complete route table');
+    assert.deepEqual(
+      connectionRoutes.map((route) => route.path).sort(),
+      expected.map((path) => `/api${path}`).sort(),
+      'the Desktop carrier mirrors every route under /api',
+    );
+
+    const stateRoute = connectionRoutes.find((route) => route.path === `/api${API}/state`);
+    const response = await stateRoute.fetch(new Request(`http://localhost/api${API}/state`));
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.result.storage, join(home, 'dsh-better-workspace', 'topics.v1.json'));
+  });
+});
+
+test('enableDelete:false answers 403 on both delete routes and hides the command', async () => {
+  await withHome(async (home) => {
+    const { find } = await boot({ home, config: { enabled: true, storageHome: home, enableDelete: false } });
+    for (const path of [`${API}/delete/preview`, `${API}/delete/execute`]) {
+      const result = await call(find(path), fakeRequest({ body: { sessionIds: ['ses_x'], confirm: true } }));
+      assert.equal(result.status, 403, `${path} is disabled`);
+      assert.equal(result.json.code, 'delete-disabled');
+    }
+    const state = await call(find(`${API}/state`), fakeRequest({ method: 'GET' }));
+    assert.equal(state.status, 200);
+    assert.equal(state.json.result.deleteAvailable, false);
+  });
+});
+
+test('a delete whose host-record cleanup throws still forgets the sidecar assignment', async () => {
+  await withHome(async (home) => {
+    const sessionId = 'ses_cleanup_route';
+    const dir = join(home, 'sessions', '--C-Work-demo--', encodeSegment(sessionId));
+    await mkdir(dir, { recursive: true });
+    const log = join(dir, 'session.v3.jsonl');
+    await writeFile(log, `${JSON.stringify({ type: 'session', version: 3, id: sessionId, cwd: 'C:/Work/demo' })}\n`, 'utf8');
+    const old = new Date(Date.now() - 60_000);
+    await utimes(log, old, old);
+    const sidecar = createTopicStore({ configuredHome: home });
+    await sidecar.assign({ workspaceId: 'ws_a', sessionIds: [sessionId], topicId: null, expectedRevision: 0 });
+
+    const { find } = await boot({
+      home,
+      services: {
+        storageDomain: {
+          get() {
+            throw new Error('storage boom');
+          },
+        },
+      },
+    });
+    const executed = await call(find(`${API}/delete/execute`), fakeRequest({ body: { sessionIds: [sessionId], confirm: true } }));
+    assert.equal(executed.status, 200);
+    assert.equal(executed.json.result.items[0].status, 'deleted');
+    assert.equal(executed.json.result.items[0].cleanup?.failed, true);
+
+    const state = await call(find(`${API}/state`), fakeRequest({ method: 'GET', body: undefined }));
+    assert.equal(state.json.result.workspaces.ws_a?.assignments?.[sessionId], undefined, 'the stale topic assignment was forgotten');
   });
 });
 
@@ -108,6 +187,41 @@ test('the write routes refuse an opaque Origin', async () => {
     const result = await call(find(`${API}/sessions/adopt`), fakeRequest({ origin: 'null' }));
     assert.equal(result.status, 403);
     assert.equal(result.json.code, 'origin');
+  });
+});
+
+test('the 64 KiB body cap rejects one byte over but accepts the boundary on both carriers', async () => {
+  await withHome(async (home) => {
+    const { find, connectionRoutes } = await boot({ home });
+    const bodyOfSize = (bytes) => {
+      const base = { workspaceId: 'ws_cap', name: 'A', expectedRevision: 1, pad: '' };
+      const overhead = Buffer.byteLength(JSON.stringify(base), 'utf8');
+      return { ...base, pad: 'x'.repeat(bytes - overhead) };
+    };
+
+    const exact = bodyOfSize(64 * 1024);
+    assert.equal(Buffer.byteLength(JSON.stringify(exact), 'utf8'), 64 * 1024);
+    const exactWeb = await call(find(`${API}/topics/create`), fakeRequest({ body: exact }));
+    assert.notEqual(exactWeb.status, 413, 'exactly 64 KiB is inside the cap');
+    const exactRoute = connectionRoutes.find((route) => route.path === `/api${API}/topics/create`);
+    const exactResponse = await exactRoute.fetch(new Request(`http://localhost/api${API}/topics/create`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(exact),
+    }));
+    assert.notEqual(exactResponse.status, 413);
+
+    const over = bodyOfSize(64 * 1024 + 1);
+    const overWeb = await call(find(`${API}/topics/create`), fakeRequest({ body: over }));
+    assert.equal(overWeb.status, 413);
+    assert.equal(overWeb.json.code, 'body-too-large');
+    const overResponse = await exactRoute.fetch(new Request(`http://localhost/api${API}/topics/create`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(over),
+    }));
+    assert.equal(overResponse.status, 413);
+    assert.equal((await overResponse.json()).code, 'body-too-large');
   });
 });
 

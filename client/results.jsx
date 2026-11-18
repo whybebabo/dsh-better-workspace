@@ -9,8 +9,33 @@
 import * as React from 'react';
 import { cx, Dialog, Button, Checkbox, Icon } from './widgets.jsx';
 import { api, ApiError } from './api.js';
+import { mergeDeleteOutcomes } from './delete-results.js';
 import { formatBytes } from './time.js';
 import { t } from './i18n.js';
+
+/**
+ * Host delete diagnostics are stable codes; the message text is host-localized (currently
+ * Chinese). Translate the codes the panel knows, and keep the host text only as a fallback for
+ * a code a newer host introduced.
+ */
+const DELETE_CODE_TEXT = {
+  'bad-id': 'delete.code.badId',
+  'root-unavailable': 'delete.code.rootUnavailable',
+  running: 'delete.code.running',
+  'not-verified': 'delete.code.notVerified',
+  subagent: 'delete.code.subagent',
+  'orphan-subagent': 'delete.code.orphanSubagent',
+  locked: 'delete.code.locked',
+  'stop-failed': 'delete.code.stopFailed',
+  'detach-failed': 'delete.code.detachFailed',
+  'delete-incomplete': 'delete.code.deleteIncomplete',
+  'subagents-failed': 'delete.code.subagentsFailed',
+};
+
+function deleteDetail(code, fallback) {
+  const key = DELETE_CODE_TEXT[code];
+  return key ? t(key) : fallback;
+}
 
 function ItemList({ entries, emptyText }) {
   if (entries.length === 0) return <div className="dts-result__empty">{emptyText}</div>;
@@ -41,10 +66,15 @@ export function BatchResultDialog({ outcome, busy, progress, onClose, onRetryFai
   const failed = (outcome?.failed ?? []).map((entry) => ({ ...describeEntry(entry, titles), detail: entry.error, tone: 'bad' }));
   const stopped = (outcome?.needsStop ?? []).map((entry) => ({ ...describeEntry(entry, titles), detail: t('delete.runningNote'), tone: 'warn' }));
   const ok = (outcome?.ok ?? []).map((id) => ({ id, label: titles[id] ?? id, detail: t('result.ok', { n: 1 }), tone: 'good' }));
+  // Closing while a retry is running would hide the only per-item report; the request keeps
+  // going and can even reopen the dialog through `finishBatch` when it fails again.
+  const close = () => {
+    if (!busy) onClose();
+  };
   return (
     <Dialog
       title={t('result.title')}
-      onClose={onClose}
+      onClose={close}
       width={440}
       footer={
         <>
@@ -59,7 +89,7 @@ export function BatchResultDialog({ outcome, busy, progress, onClose, onRetryFai
             </Button>
           ) : null}
           <span className="dts-spacer" />
-          <Button variant="ghost" onClick={onClose}>
+          <Button variant="ghost" disabled={busy} onClick={close}>
             {t('action.done')}
           </Button>
         </>
@@ -118,9 +148,10 @@ export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
     setError(null);
     try {
       const result = await api.deleteExecute({ sessionIds: subset, confirm: true }, { timeoutMs: 120_000 });
-      setOutcome(result);
+      const merged = mergeDeleteOutcomes(outcome, result);
+      setOutcome(merged);
       setPhase('result');
-      onDone(result);
+      onDone(merged);
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : String(caught));
     } finally {
@@ -137,7 +168,7 @@ export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
       tone: item.status === 'deleted' ? 'good' : item.status === 'skipped' ? 'warn' : 'bad',
       detail: item.status === 'deleted'
         ? `${t('result.ok', { n: 1 })}${item.subagentsRemoved?.length ? ` · ${t('delete.subagentCount', { n: item.subagentsRemoved.length })}` : ''}`
-        : item.error,
+        : deleteDetail(item.code, item.error),
     }));
     // A `failed` item is retried by id; a `partial` parent is already gone, so the only thing
     // left to act on is the children that survived it (`subagentsFailed`). Without those ids the
@@ -223,7 +254,7 @@ export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
                   id: item.sessionId,
                   label: label(item.sessionId),
                   tone: 'warn',
-                  detail: item.blockers.map((blocker) => blocker.message).join('; '),
+                  detail: item.blockers.map((blocker) => deleteDetail(blocker.code, blocker.message)).join('; '),
                 }))}
               />
             </>

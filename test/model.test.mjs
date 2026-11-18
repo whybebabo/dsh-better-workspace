@@ -293,7 +293,11 @@ test('sessions no workspace accounts for trail in a virtual 未分组 group', ()
   assert.deepEqual(flatten(searched.groups.at(-1)), ['ses_stray'], 'search can find stray sessions');
 
   const archivedOnly = buildTree({ ...loose, archivedIds: ['ses_stray'], prefs: { showArchived: true }, query: '' });
-  assert.equal(archivedOnly.groups.some((group) => group.virtual), false, 'archived strays never create a 未分组 group');
+  const archivedVirtual = archivedOnly.groups.at(-1);
+  assert.equal(archivedVirtual.workspaceId, UNGROUPED_WORKSPACE_ID);
+  assert.deepEqual(sectionIds(archivedVirtual), ['archived:'], 'an archived stray gets its own 未分组 bucket');
+  assert.deepEqual(flatten(archivedVirtual), ['ses_stray']);
+  assert.equal(archivedVirtual.archivedCount, 1);
 
   const byIdWithArchive = {
     ...byId,
@@ -308,8 +312,8 @@ test('sessions no workspace accounts for trail in a virtual 未分组 group', ()
     query: '',
   });
   const mixedVirtual = mixed.groups.at(-1);
-  assert.deepEqual(flatten(mixedVirtual), ['ses_stray'], 'archived strays stay out of the virtual group');
-  assert.equal(mixedVirtual.archivedCount, 0, '未分组 never carries an archived bucket');
+  assert.deepEqual(flatten(mixedVirtual), ['ses_stray', 'ses_arch_stray'], 'live and archived strays coexist');
+  assert.equal(mixedVirtual.archivedCount, 1, '未分组 carries its archived bucket');
 });
 
 test('the virtual ungrouped workspace keeps its overview status under search', () => {
@@ -596,6 +600,9 @@ test('POSIX paths stay case-sensitive, because they name different directories',
   assert.equal(samePath('/tmp/Alpha', '/tmp/alpha'), false);
   assert.equal(samePath('/tmp/alpha/', '/tmp/alpha'), true, 'a trailing slash is still the same directory');
   assert.equal(samePath('/tmp/a\\b', '/tmp/a/b'), false, 'a backslash is a legal filename character on POSIX');
+  assert.equal(samePath('/tmp/a\\b', '/tmp/A\\B'), false, 'a backslash alone must not turn a POSIX path into a folded Windows one');
+  assert.equal(samePath('/', '/'), true, 'the filesystem root is a real path');
+  assert.equal(samePath('///', '/'), true, 'redundant root separators normalize to the same root');
 });
 
 test('a session in a case-only-different POSIX workspace renders exactly once', () => {
@@ -732,7 +739,11 @@ test('a status flip rebuilds the row it touches and the sections above it', () =
 
 test('the row cache does not grow with sessions the host dropped', () => {
   const input = { ...fixture(), prefs: {}, query: '', now: 1_700_000_000_000 };
-  buildTree(input);
+  const rowOf = (built, id) => built.groups
+    .flatMap((group) => group.sections.flatMap((section) => section.rows))
+    .find((entry) => entry.id === id);
+  const first = rowOf(buildTree(input), 'ses_3');
+  assert.ok(first);
   const items = input.items.map((item) => ({ ...item, sessionIds: item.sessionIds.filter((id) => id !== 'ses_3') }));
   const byId = { ...input.list.byId };
   delete byId.ses_3;
@@ -740,9 +751,9 @@ test('the row cache does not grow with sessions the host dropped', () => {
   assert.equal(shrunk.groups.some((group) => group.sections.some((section) => section.rows.some((row) => row.id === 'ses_3'))), false);
   // Build it back: the re-added row must be rebuilt rather than resurrect an evicted cache entry.
   const restored = buildTree(input);
-  const row = restored.groups.find((group) => group.workspaceId === WS_A).sections.flatMap((section) => section.rows).find((entry) => entry.id === 'ses_3');
+  const row = rowOf(restored, 'ses_3');
   assert.ok(row, 'the row comes back');
-  assert.equal(row.id, 'ses_3');
+  assert.notEqual(row, first, 'the dropped row was evicted from the cache, not resurrected');
 });
 
 test('topicOfSession is the one derivation: explicit wins, stale falls to default, forks inherit', () => {

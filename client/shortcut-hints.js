@@ -9,7 +9,7 @@ const MAC = typeof navigator !== 'undefined' && /mac/i.test(`${navigator.platfor
 
 const HINTS = MAC
   ? { rename: '⌘⌥G', fork: '⌘⇧F', archive: '⌘⌥A' }
-  : { rename: 'Ctrl+Alt+G', fork: 'Ctrl+Shift+F', archive: 'Ctrl+Alt+A' };
+  : { rename: 'Ctrl + Alt + G', fork: 'Ctrl + Shift + F', archive: 'Ctrl + Alt + A' };
 
 export function shortcutHint(action) {
   return HINTS[action] ?? '';

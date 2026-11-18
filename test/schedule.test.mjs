@@ -6,11 +6,11 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatDistance, formatFrequency, formatTarget, indexSchedules, scheduleHover, createScheduleStore } from '../client/schedule.js';
+import { formatDistance, formatFrequency, formatTarget, indexSchedules, scheduleHover, createScheduleStore, targetSessionId } from '../client/schedule.js';
 
 const daily = {
   id: 'sch_daily',
-  sessionId: 'ses_1',
+  target: { kind: 'session', sessionId: 'ses_1' },
   status: 'active',
   kind: 'daily',
   title: '每天早上发送问候',
@@ -65,13 +65,44 @@ test('the absolute stamp follows the language: Chinese omits the year', () => {
 test('only active tasks mark a row, and only for their own session', () => {
   const bySession = indexSchedules([
     daily,
-    { ...daily, id: 'sch_other', sessionId: 'ses_2' },
+    { ...daily, id: 'sch_other', target: { kind: 'session', sessionId: 'ses_2' } },
     { ...daily, id: 'sch_old', status: 'inactive' },
-    { ...daily, id: 'sch_archived', status: 'inactive', sessionId: 'ses_2' },
+    { ...daily, id: 'sch_archived', status: 'inactive', target: { kind: 'session', sessionId: 'ses_2' } },
   ]);
   assert.deepEqual(bySession.get('ses_1').map((record) => record.id), ['sch_daily']);
   assert.deepEqual(bySession.get('ses_2').map((record) => record.id), ['sch_other']);
   assert.equal(bySession.get('ses_3'), undefined);
+});
+
+test('the 0.2.2 target shape is read, including new_once/new and a legacy fallback', () => {
+  const entry = (id, target, extra = {}) => ({ ...daily, id, target, ...extra });
+  assert.equal(targetSessionId(daily), 'ses_1', 'session target');
+  assert.equal(targetSessionId(entry('once', { kind: 'new_once', sessionId: 'ses_reserved' })), 'ses_reserved');
+  assert.equal(targetSessionId(entry('new', { kind: 'new' }, { lastDelivery: { targetSessionId: 'ses_delivered' } })), 'ses_delivered');
+  assert.equal(targetSessionId(entry('fresh', { kind: 'new' })), null, 'a new target without a delivery marks no row');
+  assert.equal(targetSessionId({ ...daily, target: undefined, sessionId: 'ses_legacy' }), 'ses_legacy', '0.2.1 catalog');
+  const bySession = indexSchedules([
+    daily,
+    entry('once', { kind: 'new_once', sessionId: 'ses_reserved' }),
+    entry('new', { kind: 'new' }, { lastDelivery: { targetSessionId: 'ses_delivered' } }),
+    entry('fresh', { kind: 'new' }),
+  ]);
+  assert.deepEqual([...bySession.keys()].sort(), ['ses_1', 'ses_delivered', 'ses_reserved']);
+});
+
+test('a custom rrule uses the host custom-rule wording instead of a blank frequency', () => {
+  const text = formatFrequency({
+    id: 'sch_rrule',
+    target: { kind: 'session', sessionId: 'ses_1' },
+    status: 'active',
+    kind: 'rrule',
+    title: '自定义提醒',
+    prompt: '提醒',
+    scheduledAt: '2026-11-17T01:00:00.000Z',
+    rrule: 'DTSTART;TZID=Asia/Shanghai:20261101T090000\nRRULE:FREQ=DAILY',
+  });
+  assert.ok(text.startsWith('自定义规则（UTC+08:00'), text);
+  assert.ok(text.endsWith('）'), 'the zone stays in the host parentheses');
 });
 
 test('the hover block shows overdue tasks first, caps at two and counts the rest', () => {

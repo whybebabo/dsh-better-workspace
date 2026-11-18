@@ -8,6 +8,7 @@
  * switching language in settings re-renders the panel without a reload.
  */
 const zh = {
+  'panel.label': '分组',
   'section.workspaces': '工作区',
   'group.ungrouped': '未分组',
   'workspace.all': '全部工作区',
@@ -124,6 +125,7 @@ const zh = {
   'schedule.frequency.daily': '每天 {time}（{timeZone}）',
   'schedule.frequency.weekly': '每周{weekdays} {time}（{timeZone}）',
   'schedule.frequency.cron': 'Cron {expression}（{timeZone}）',
+  'schedule.frequency.rrule': '自定义规则（{timeZone}）',
   'schedule.weekday.join': '、',
   'schedule.weekday.1': '一',
   'schedule.weekday.2': '二',
@@ -167,6 +169,7 @@ const zh = {
   'batch.unarchiveDisabled': '选中项包含未归档会话',
   'batch.moveDisabled': '已归档会话不能移动分组',
   'batch.ungroupedMoveDisabled': '未分组会话没有工作区，不能移动到分组',
+  'batch.mixedWorkspaces': '所选会话来自多个工作区，不能一次移动分组',
   'batch.runningTitle': '{n} 个会话正在运行',
   'batch.runningBody': '归档正在运行的会话会先停止它的工作。',
   'batch.stopAndArchive': '停止并归档',
@@ -187,6 +190,17 @@ const zh = {
   'delete.recheck': '重新检查',
   'delete.disabled': '插件配置已禁用永久删除。',
   'delete.confirmRequired': '删除会话需要明确确认。',
+  'delete.code.badId': '会话标识不合法。',
+  'delete.code.rootUnavailable': '未找到 sessions 目录。',
+  'delete.code.running': '会话正在运行。',
+  'delete.code.notVerified': '未能通过 artifact header 确认该会话,已拒绝删除。',
+  'delete.code.subagent': '这是子智能体会话,请删除其主会话(会级联清理)。',
+  'delete.code.orphanSubagent': '父会话已不存在,将作为孤儿单独删除。',
+  'delete.code.locked': '会话文件刚刚被写入,请稍后重试。',
+  'delete.code.stopFailed': '无法停止运行中的会话,数据已保留。',
+  'delete.code.detachFailed': '无法从 session store 分离会话,数据已保留。',
+  'delete.code.deleteIncomplete': '删除未完成,数据可能仍在隔离区。',
+  'delete.code.subagentsFailed': '部分子会话未能删除。',
 
   'result.title': '批量操作结果',
   'result.ok': '成功 {n}',
@@ -231,6 +245,7 @@ const zh = {
 };
 
 const en = {
+  'panel.label': 'Topics',
   'section.workspaces': 'Workspaces',
   'group.ungrouped': 'Ungrouped',
   'workspace.all': 'All workspaces',
@@ -347,6 +362,7 @@ const en = {
   'schedule.frequency.daily': 'Daily at {time} ({timeZone})',
   'schedule.frequency.weekly': 'Weekly on {weekdays} at {time} ({timeZone})',
   'schedule.frequency.cron': 'Cron {expression} ({timeZone})',
+  'schedule.frequency.rrule': 'Custom rule ({timeZone})',
   'schedule.weekday.join': ', ',
   'schedule.weekday.1': 'Mon',
   'schedule.weekday.2': 'Tue',
@@ -390,6 +406,7 @@ const en = {
   'batch.unarchiveDisabled': 'Selection includes sessions that are not archived',
   'batch.moveDisabled': 'Archived sessions cannot be moved between groups',
   'batch.ungroupedMoveDisabled': 'Ungrouped sessions have no workspace and cannot be moved to a topic',
+  'batch.mixedWorkspaces': 'The selected sessions come from more than one workspace and cannot be moved together',
   'batch.runningTitle': '{n} sessions are running',
   'batch.runningBody': 'Archiving a running session stops its work first.',
   'batch.stopAndArchive': 'Stop and archive',
@@ -410,6 +427,17 @@ const en = {
   'delete.recheck': 'Check again',
   'delete.disabled': 'Permanent deletion is disabled in this plugin configuration.',
   'delete.confirmRequired': 'Deleting sessions requires explicit confirmation.',
+  'delete.code.badId': 'The session id is invalid.',
+  'delete.code.rootUnavailable': 'The sessions directory was not found.',
+  'delete.code.running': 'The session is running.',
+  'delete.code.notVerified': 'The session artifact could not be verified, so it was not deleted.',
+  'delete.code.subagent': 'This is a subagent session; delete its parent session to remove it with the cascade.',
+  'delete.code.orphanSubagent': 'Its parent is gone, so this orphan is deleted on its own.',
+  'delete.code.locked': 'The session file was written moments ago; try again shortly.',
+  'delete.code.stopFailed': 'The running session could not be stopped, so its data was kept.',
+  'delete.code.detachFailed': 'The session could not be detached from the host store, so its data was kept.',
+  'delete.code.deleteIncomplete': 'Deletion did not finish; data may remain in quarantine.',
+  'delete.code.subagentsFailed': 'Some subagent sessions could not be deleted.',
 
   'result.title': 'Bulk action results',
   'result.ok': '{n} done',

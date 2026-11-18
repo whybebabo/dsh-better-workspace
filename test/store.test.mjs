@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, writeFile, utimes, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, writeFile, utimes, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTopicStore, StoreError, validateSessionIds, normalizeTopicName, normalizeTopicEmoji, pickTopicEmoji, TOPIC_EMOJIS, DEFAULT_TOPIC_ID } from '../lib/store.js';
@@ -343,6 +343,71 @@ test('a lock left by a dead process is reclaimed, and only its owner can release
   assert.equal(await readFile(store.lockFile, 'utf8').then(() => true, () => false), false, 'and it is released after use');
 });
 
+test('a stale lock is reclaimed on a filesystem without hard links', async () => {
+  const { home } = await freshStore();
+  const { mkdir, writeFile, utimes } = await import('node:fs/promises');
+  const { createRequire, syncBuiltinESMExports } = await import('node:module');
+  const store = createTopicStore({ home, staleLockMs: 30, lockWaitMs: 1_000 });
+  await mkdir(store.dir, { recursive: true });
+  await writeFile(store.lockFile, '999999-deadbeef', 'utf8');
+  const old = new Date(Date.now() - 60_000);
+  await utimes(store.lockFile, old, old);
+
+  const require = createRequire(import.meta.url);
+  const fsp = require('node:fs/promises');
+  const realLink = fsp.link;
+  // SMB/FUSE mounts can reject link(2); the rename fallback must still reclaim the dead lock.
+  fsp.link = async () => {
+    const error = new Error('hard links are not supported here');
+    error.code = 'EPERM';
+    throw error;
+  };
+  syncBuiltinESMExports();
+  try {
+    const written = await store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 });
+    assert.equal(written.revision, 1, 'the fallback must remove the dead lock instead of looping');
+    assert.equal(await readFile(store.lockFile, 'utf8').then(() => true, () => false), false, 'and release its own lock');
+  } finally {
+    fsp.link = realLink;
+    syncBuiltinESMExports();
+  }
+});
+
+test('the lock is published with its complete token, never as a visible zero-byte file', async (t) => {
+  const { store } = await freshStore();
+  const { createRequire, syncBuiltinESMExports } = await import('node:module');
+  const require = createRequire(import.meta.url);
+  const fsp = require('node:fs/promises');
+  const realLink = fsp.link;
+  let published = null;
+  let unsupported = false;
+  // Observe the hard-link source just before the lock path is published. The old open-then-
+  // write path never called link here and would leave `published` null.
+  fsp.link = async (from, to) => {
+    if (String(to) === store.lockFile) published = await readFile(from, 'utf8');
+    try {
+      return await realLink(from, to);
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP', 'EXDEV', 'EMLINK'].includes(error?.code)) {
+        unsupported = true;
+      }
+      throw error;
+    }
+  };
+  syncBuiltinESMExports();
+  try {
+    await store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 });
+  } finally {
+    fsp.link = realLink;
+    syncBuiltinESMExports();
+  }
+  if (unsupported) {
+    t.skip('this filesystem does not support hard links; the synchronous fallback is covered elsewhere');
+    return;
+  }
+  assert.match(published ?? '', /^\d+-[0-9a-f]+$/, 'the lock path is linked only after the token is complete');
+});
+
 test('release never deletes a lock that changed hands while we held it', async () => {
   const { home } = await freshStore();
   const store = createTopicStore({ home });
@@ -432,9 +497,11 @@ test('a recovery write never overwrites the backup with the corrupt primary', as
 
   const backup = JSON.parse(await readFile(`${store.file}.bak`, 'utf8'));
   assert.ok(backup.workspaces.ws_a, 'the backup is still a valid document');
-  await assert.rejects(
-    () => readFile(`${store.file}.corrupt-`, 'utf8').then(() => { throw new Error('no'); }),
-    () => true,
+  const names = await readdir(store.dir);
+  const primaryName = store.bakFile.slice(store.dir.length + 1).replace(/\.bak$/, '');
+  assert.ok(
+    names.some((name) => name.startsWith(`${primaryName}.corrupt-`)),
+    `the corrupt primary is quarantined (saw: ${names.join(', ')})`,
   );
 });
 

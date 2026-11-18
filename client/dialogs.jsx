@@ -138,8 +138,11 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, topic
   const [selected, setSelected] = React.useState(() => new Set());
   const [error, setError] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
+  // State updates flush after the event; a second Enter/click in the same tick would still
+  // observe `busy === false`. The ref is the synchronous submit gate.
+  const busyRef = React.useRef(false);
   const close = () => {
-    if (!busy) onClose();
+    if (!busyRef.current) onClose();
   };
   const rows = chosen ? (rowsFor?.(chosen) ?? []) : [];
   // The sidecar caps one write at BATCH_LIMIT session ids; enforce the same cap here so the
@@ -161,6 +164,7 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, topic
   };
 
   const submit = async () => {
+    if (busyRef.current) return;
     const trimmed = name.trim();
     if (!chosen) {
       setError(t('topic.pickWorkspace'));
@@ -174,11 +178,13 @@ export function CreateTopicDialog({ workspaces = [], workspaceId, rowsFor, topic
       setError(t('batch.limit'));
       return;
     }
+    busyRef.current = true;
     setBusy(true);
     try {
       await onSubmit({ workspaceId: chosen, name: trimmed, emoji, sessionIds: [...selected] });
       onClose();
     } catch (caught) {
+      busyRef.current = false;
       setBusy(false);
       setError(caught?.code === 'topic-name-taken' ? t('topic.nameTaken') : caught?.message ?? String(caught));
     }
@@ -272,20 +278,27 @@ export function EditTopicDialog({ topic, workspaceId, topicsFor, emojis, onSubmi
   const [emoji, setEmoji] = React.useState(topic.emoji ?? '');
   const [error, setError] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
+  const busyRef = React.useRef(false);
+  const close = () => {
+    if (!busyRef.current) onClose();
+  };
   const dirty = name.trim() !== topic.name || emoji !== topic.emoji;
   const problem = nameProblem({ name, workspaceId, topicsFor, ignoreId: topic.id });
   const problemLabel = problemText(problem);
 
   const submit = async () => {
+    if (busyRef.current) return;
     if (problem) {
       setError(problemLabel);
       return;
     }
+    busyRef.current = true;
     setBusy(true);
     try {
       await onSubmit({ name: name.trim(), emoji });
       onClose();
     } catch (caught) {
+      busyRef.current = false;
       setBusy(false);
       setError(caught?.code === 'topic-name-taken' ? t('topic.nameTaken') : caught?.message ?? String(caught));
     }
@@ -294,7 +307,7 @@ export function EditTopicDialog({ topic, workspaceId, topicsFor, emojis, onSubmi
   return (
     <Dialog
       title={t('topic.rename')}
-      onClose={onClose}
+      onClose={close}
       width={380}
       footer={
         <>
@@ -304,7 +317,7 @@ export function EditTopicDialog({ topic, workspaceId, topicsFor, emojis, onSubmi
             </Button>
           ) : null}
           <span className="dts-spacer" />
-          <Button onClick={onClose}>{t('action.cancel')}</Button>
+          <Button onClick={close}>{t('action.cancel')}</Button>
           <Button variant="primary" disabled={busy || !dirty || Boolean(problem)} onClick={submit}>
             {t('action.save')}
           </Button>
@@ -328,8 +341,24 @@ export function EditTopicDialog({ topic, workspaceId, topicsFor, emojis, onSubmi
 export function DeleteTopicDialog({ topic, count, onConfirm, onClose }) {
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(null);
+  const busyRef = React.useRef(false);
   const close = () => {
-    if (!busy) onClose();
+    if (!busyRef.current) onClose();
+  };
+  const confirm = async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      await onConfirm();
+      onClose();
+    } catch (caught) {
+      setError(caught?.message ?? String(caught));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
   };
   return (
     <Dialog
@@ -342,18 +371,7 @@ export function DeleteTopicDialog({ topic, count, onConfirm, onClose }) {
           <Button
             variant="danger"
             disabled={busy}
-            onClick={async () => {
-              setBusy(true);
-              setError(null);
-              try {
-                await onConfirm();
-                onClose();
-              } catch (caught) {
-                setError(caught?.message ?? String(caught));
-              } finally {
-                setBusy(false);
-              }
-            }}
+            onClick={confirm}
           >
             {t('action.delete')}
           </Button>
@@ -371,19 +389,22 @@ export function RenameWorkspaceDialog({ workspace, workspaces = [], onSubmit, on
   const [title, setTitle] = React.useState(workspace.title ?? '');
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(null);
+  const busyRef = React.useRef(false);
   const trimmed = title.trim();
   const duplicate = trimmed !== '' && workspaces.some((entry) => entry.workspaceId !== workspace.workspaceId && entry.title === trimmed);
-  const blocked = busy || !trimmed || trimmed === workspace.title || duplicate;
+  const blocked = !trimmed || trimmed === workspace.title || duplicate;
   const close = () => {
-    if (!busy) onClose();
+    if (!busyRef.current) onClose();
   };
   const commit = async () => {
-    if (blocked) return;
+    if (busyRef.current || blocked) return;
+    busyRef.current = true;
     setBusy(true);
     try {
       await onSubmit(trimmed);
       onClose();
     } catch (caught) {
+      busyRef.current = false;
       setBusy(false);
       setError(caught?.message ?? String(caught));
     }
@@ -396,7 +417,7 @@ export function RenameWorkspaceDialog({ workspace, workspaces = [], onSubmit, on
       footer={
         <>
           <Button onClick={close}>{t('action.cancel')}</Button>
-          <Button variant="primary" disabled={blocked} onClick={commit}>
+          <Button variant="primary" disabled={busy || blocked} onClick={commit}>
             {t('action.rename')}
           </Button>
         </>
@@ -424,8 +445,23 @@ export function RenameWorkspaceDialog({ workspace, workspaces = [], onSubmit, on
 export function DeleteWorkspaceDialog({ workspace, onConfirm, onClose }) {
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(null);
+  const busyRef = React.useRef(false);
   const close = () => {
-    if (!busy) onClose();
+    if (!busyRef.current) onClose();
+  };
+  const confirm = async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      await onConfirm();
+      onClose();
+    } catch (caught) {
+      busyRef.current = false;
+      setBusy(false);
+      setError(caught?.message ?? String(caught));
+    }
   };
   return (
     <Dialog
@@ -439,17 +475,7 @@ export function DeleteWorkspaceDialog({ workspace, onConfirm, onClose }) {
           <Button
             variant="danger"
             disabled={busy}
-            onClick={async () => {
-              setBusy(true);
-              setError(null);
-              try {
-                await onConfirm();
-                onClose();
-              } catch (caught) {
-                setBusy(false);
-                setError(caught?.message ?? String(caught));
-              }
-            }}
+            onClick={confirm}
           >
             {busy ? t('workspace.deleting') : t('workspace.deleteTitle')}
           </Button>
@@ -466,20 +492,24 @@ export function RenameSessionDialog({ row, onSubmit, onClose }) {
   const [title, setTitle] = React.useState(row.title ?? '');
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(null);
+  const busyRef = React.useRef(false);
   const trimmed = title.trim();
   const close = () => {
-    if (!busy) onClose();
+    if (!busyRef.current) onClose();
   };
   const commit = async () => {
+    if (busyRef.current) return;
     if (!trimmed || trimmed === row.title) {
       close();
       return;
     }
+    busyRef.current = true;
     setBusy(true);
     try {
       await onSubmit(trimmed);
       onClose();
     } catch (caught) {
+      busyRef.current = false;
       setBusy(false);
       setError(caught?.message ?? String(caught));
     }
@@ -514,19 +544,50 @@ export function MoveToTopicDialog({ count, ids = [], workspaceId = null, topics,
   const [emoji, setEmoji] = React.useState(() => nextUnusedEmoji(emojis, topics));
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(null);
+  const busyRef = React.useRef(false);
   // Same rules (and the same source) as the create dialog: the new name has to be unique in
   // this workspace. `topics` is the precomputed list for callers that already have it.
   const problem = nameProblem({ name, workspaceId, topicsFor: topicsFor ?? (() => topics), ignoreId: null });
   const problemLabel = problemText(problem);
+  const close = () => {
+    if (!busyRef.current) onClose();
+  };
+  const backToTopics = () => {
+    if (!busyRef.current) setCreating(false);
+  };
 
   const run = async (topicId) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
     try {
       await onMove(topicId);
       onClose();
     } catch (caught) {
+      busyRef.current = false;
       setBusy(false);
       setError(caught?.message ?? String(caught));
+    }
+  };
+
+  const create = async () => {
+    if (busyRef.current) return;
+    if (problem) {
+      setError(problemLabel);
+      return;
+    }
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      // Create the group with the sessions in the same write. The old create-then-assign
+      // pair could leave an empty group behind when the second request failed, and the retry
+      // then hit a duplicate name.
+      await onCreate({ name: name.trim(), emoji, sessionIds: ids });
+      onClose();
+    } catch (caught) {
+      busyRef.current = false;
+      setBusy(false);
+      setError(caught?.code === 'topic-name-taken' ? t('topic.nameTaken') : caught?.message ?? String(caught));
     }
   };
 
@@ -534,31 +595,15 @@ export function MoveToTopicDialog({ count, ids = [], workspaceId = null, topics,
     return (
       <Dialog
         title={t('topic.moveHere', { n: count })}
-        onClose={() => setCreating(false)}
+        onClose={backToTopics}
         width={380}
         footer={
           <>
-            <Button onClick={() => setCreating(false)}>{t('action.cancel')}</Button>
+            <Button onClick={backToTopics} disabled={busy}>{t('action.cancel')}</Button>
             <Button
               variant="primary"
               disabled={busy || Boolean(problem)}
-              onClick={async () => {
-                if (problem) {
-                  setError(problemLabel);
-                  return;
-                }
-                setBusy(true);
-                try {
-                  // Create the group with the sessions in the same write. The old
-                  // create-then-assign pair could leave an empty group behind when the second
-                  // request failed, and the retry then hit a duplicate name.
-                  await onCreate({ name: name.trim(), emoji, sessionIds: ids });
-                  onClose();
-                } catch (caught) {
-                  setBusy(false);
-                  setError(caught?.code === 'topic-name-taken' ? t('topic.nameTaken') : caught?.message ?? String(caught));
-                }
-              }}
+              onClick={create}
             >
               {t('action.create')}
             </Button>
@@ -579,12 +624,12 @@ export function MoveToTopicDialog({ count, ids = [], workspaceId = null, topics,
   return (
     <Dialog
       title={t('picker.topic', { n: count })}
-      onClose={onClose}
+      onClose={close}
       width={380}
       footer={
         <>
-          <Button onClick={onClose}>{t('action.cancel')}</Button>
-          <Button onClick={() => setCreating(true)}>{t('topic.moveHere')}</Button>
+          <Button onClick={close}>{t('action.cancel')}</Button>
+          <Button onClick={() => setCreating(true)} disabled={busy}>{t('topic.moveHere')}</Button>
         </>
       }
     >

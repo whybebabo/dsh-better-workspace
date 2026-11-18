@@ -14,6 +14,7 @@ import { readFile, access } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { runInNewContext } from 'node:vm';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
@@ -61,14 +62,32 @@ try {
 /**
  * The client bundle registers itself under the package name; a stale build or a renamed
  * package makes the loader report "loaded without registering" and the whole Web boot fails.
+ * Execute the real loader shell in a throwaway context: a plain `bundle.includes(name)` also
+ * matches the file's header comment (and the style id), so it cannot tell a registration id
+ * drift from a healthy bundle.
  */
 try {
   const bundle = await readFile(join(root, 'lib/client.js'), 'utf8');
-  if (!bundle.includes(JSON.stringify(pkg.name))) {
-    problems.push(`lib/client.js: does not register ${pkg.name} (run npm run build)`);
+  let definition = null;
+  runInNewContext(bundle, {
+    window: {
+      __ModuleLoader__: {
+        load(value) { definition = value; },
+      },
+    },
+  }, { timeout: 5_000 });
+  if (!definition) {
+    problems.push('lib/client.js: never called window.__ModuleLoader__.load (run npm run build)');
+  } else {
+    if (definition.id !== pkg.name) {
+      problems.push(`lib/client.js: registers ${JSON.stringify(definition.id)}, expected ${JSON.stringify(pkg.name)} (run npm run build)`);
+    }
+    if (typeof definition.factory !== 'function') {
+      problems.push('lib/client.js: registration has no factory function');
+    }
   }
 } catch (error) {
-  problems.push(`lib/client.js: missing or unreadable — ${error?.message ?? error}`);
+  problems.push(`lib/client.js: missing, unreadable or not loadable — ${error?.message ?? error}`);
 }
 
 if (problems.length > 0) {

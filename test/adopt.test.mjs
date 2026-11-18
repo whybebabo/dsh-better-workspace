@@ -196,11 +196,14 @@ test('a registry without a raw table skips the repair instead of guessing', asyn
   });
 });
 
-test('a workspace registered through a symlinked spelling still matches its sessions', async () => {
+test('a workspace registered through a symlinked spelling still matches its sessions', async (t) => {
   await withDirs(async ({ root, alpha }) => {
     const alias = join(root, 'alpha-alias');
     const linked = await symlink(alpha, alias, 'dir').then(() => true, () => false);
-    if (!linked) return; // Windows without privileges/dev mode
+    if (!linked) {
+      t.skip('this host cannot create a directory symlink');
+      return;
+    }
     // The record keeps the user's spelling; the artifact header carries the canonical path.
     const registry = fakeRegistry([{ id: 'ws_a', path: alias, sessionIds: [] }]);
     const ctx = { get: (name) => ({ workspaceRegistry: registry, sessionPersistence: fakePersistence([

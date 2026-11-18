@@ -138,14 +138,17 @@ export function Header({
   const setPrefsRef = React.useRef(onSetPrefs);
   setPrefsRef.current = onSetPrefs;
   React.useEffect(() => {
-    setSearchDraft(prefs.search ?? '');
-  }, [prefs.search]);
+    // Closing search clears the draft as well as the committed query. Without this, a timer
+    // armed just before the close still writes the old text into `prefs.search`; reopening
+    // search then restores a query the user had already dismissed.
+    setSearchDraft(prefs.searchOpen ? (prefs.search ?? '') : '');
+  }, [prefs.search, prefs.searchOpen]);
   React.useEffect(() => {
     const committed = prefs.search ?? '';
-    if (searchDraft === committed) return undefined;
+    if (!prefs.searchOpen || searchDraft === committed) return undefined;
     const timer = setTimeout(() => setPrefsRef.current({ search: searchDraft }), 180);
     return () => clearTimeout(timer);
-  }, [searchDraft, prefs.search]);
+  }, [searchDraft, prefs.search, prefs.searchOpen]);
   const total = options.reduce((sum, option) => sum + (option.visibleCount ?? 0), 0);
   const filtered = Boolean(prefs.workspaceFilter) || Boolean(prefs.topicFilter);
 

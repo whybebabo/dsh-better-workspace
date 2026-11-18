@@ -14,7 +14,7 @@
 import { createHostActions } from './actions.js';
 import { OverlayPanel } from './overlay.jsx';
 import { createScheduleStore } from './schedule.js';
-import { setLanguage } from './i18n.js';
+import { setLanguage, t } from './i18n.js';
 import css from './styles.css';
 
 export const inject = ['slots'];
@@ -105,7 +105,7 @@ function boot(ctx) {
       name: 'shell.overlay',
       id: 'topic-sidebar-panel',
       order: 40,
-      label: () => '分组',
+      label: () => t('panel.label'),
       inject: () => ({ actions, schedules }),
     },
     OverlayPanel,

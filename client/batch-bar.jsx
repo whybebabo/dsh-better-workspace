@@ -9,18 +9,18 @@ import { cx, Icon, IconButton } from './widgets.jsx';
 import { t } from './i18n.js';
 import { BATCH_LIMIT } from './batch.js';
 
-export function BatchBar({ count, busy, progress, hasArchived, hasUnarchived, hasUngrouped = false, onArchive, onUnarchive, onMove, onDelete, onExit, deleteAvailable }) {
+export function BatchBar({ count, busy, progress, hasArchived, hasUnarchived, hasUngrouped = false, hasMixedWorkspaces = false, onArchive, onUnarchive, onMove, onDelete, onExit, deleteAvailable }) {
   const overLimit = count > BATCH_LIMIT;
   // Mixed selections would half-apply an archive run, so the conflicting action greys out.
   const archiveDisabled = count === 0 || busy || overLimit || hasArchived;
   const unarchiveDisabled = count === 0 || busy || overLimit || hasUnarchived;
-  const moveDisabled = count === 0 || busy || overLimit || hasArchived || hasUngrouped;
+  const moveDisabled = count === 0 || busy || overLimit || hasArchived || hasUngrouped || hasMixedWorkspaces;
   const deleteDisabled = count === 0 || busy || overLimit;
   const limitTitle = overLimit ? t('batch.limit') : null;
   const archiveTitle = limitTitle ?? (hasArchived ? t('batch.archiveDisabled') : t('batch.archive'));
   const unarchiveTitle = limitTitle ?? (hasUnarchived ? t('batch.unarchiveDisabled') : t('batch.unarchive'));
   const moveTitle = limitTitle
-    ?? (hasArchived ? t('batch.moveDisabled') : hasUngrouped ? t('batch.ungroupedMoveDisabled') : t('batch.move'));
+    ?? (hasArchived ? t('batch.moveDisabled') : hasUngrouped ? t('batch.ungroupedMoveDisabled') : hasMixedWorkspaces ? t('batch.mixedWorkspaces') : t('batch.move'));
   const deleteTitle = limitTitle ?? t('batch.delete');
   const hint = progress
     ? { tone: 'is-progress', text: progress }
@@ -32,7 +32,9 @@ export function BatchBar({ count, busy, progress, hasArchived, hasUnarchived, ha
           ? { tone: null, text: t('batch.moveDisabled') }
           : hasUngrouped
             ? { tone: null, text: t('batch.ungroupedMoveDisabled') }
-            : null;
+            : hasMixedWorkspaces
+              ? { tone: null, text: t('batch.mixedWorkspaces') }
+              : null;
 
   return (
     <div className="dts-header dts-selectbar" role="toolbar" aria-label={t('action.select')}>

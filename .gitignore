@@ -21,3 +21,6 @@ review/
 
 # local scratch (probes, mutation harness); never published
 .tmp/
+
+# local npm publish credentials (never commit)
+.npmrc

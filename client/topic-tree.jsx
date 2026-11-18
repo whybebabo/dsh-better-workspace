@@ -12,6 +12,7 @@ import { SessionRow } from './session-row.jsx';
 import { beginDrag, currentDrag, endDrag, evaluateDrop, readDragPayload, writeDragPayload } from './dnd.js';
 import { RowMotion } from './row-motion.jsx';
 import { pendingStatusLabel, REVEAL_LIMIT, selectableIds } from './model.js';
+import { isComposing } from './keyboard.js';
 import { t } from './i18n.js';
 
 export { REVEAL_LIMIT };
@@ -76,7 +77,7 @@ function Collapse({ open, children, delay = 0, focusing = false }) {
       aria-hidden={open ? undefined : 'true'}
       inert={open ? undefined : ''}
     >
-      <div className="dts-collapse__inner">{retained ? children : null}</div>
+      <div className="dts-collapse__inner" role="group">{retained ? children : null}</div>
     </div>
   );
 }
@@ -109,7 +110,7 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, groupHidden 
       role="treeitem"
       aria-expanded={!group.collapsed}
       aria-label={statusLabel ? `${group.title} · ${statusLabel} · ${t('workspace.count', { n: visibleCount })}` : undefined}
-      tabIndex={0}
+      tabIndex={-1}
       draggable={!selectMode && !virtual}
       onClick={onToggleCollapse}
       onDragStart={(event) => {
@@ -180,6 +181,7 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, groupHidden 
             <IconButton
               label={t('action.menu')}
               title={t('action.menu')}
+              tabIndex={-1}
               onClick={(event) => onMenu({ type: 'workspace', group, anchor: event.currentTarget })}
             >
               <Icon name="ellipsis" />
@@ -187,6 +189,7 @@ function GroupHeader({ group, selectMode, selectionCount, groupIds, groupHidden 
             <IconButton
               label={t('workspace.newSessionAria', { name: group.title })}
               title={t('workspace.newSession')}
+              tabIndex={-1}
               onClick={() => onNewSession?.(group.workspaceId)}
             >
               <Icon name="newChat" />
@@ -254,7 +257,7 @@ function SectionHeader({ section, group, selectMode, selectedIds, onToggleCollap
       data-dts-workspace={group.workspaceId}
       data-dts-topic={section.kind === 'topic' ? section.id : undefined}
       style={{ '--dts-indent': selectMode ? '8px' : '10px' }}
-      tabIndex={0}
+      tabIndex={-1}
       draggable={draggable}
       onClick={onToggleCollapse}
       onDoubleClick={(event) => {
@@ -361,6 +364,10 @@ function SectionHeader({ section, group, selectMode, selectedIds, onToggleCollap
           onBlur={commit}
           onKeyDown={(event) => {
             event.stopPropagation();
+            // Enter/Escape belong to the IME while a composition is active: Enter commits the
+            // candidate, Escape cancels it. Acting on either would rename to a half-composed
+            // string or discard the edit the user is still typing.
+            if (isComposing(event)) return;
             if (event.key === 'Enter') {
               event.preventDefault();
               commit();
@@ -388,6 +395,7 @@ function SectionHeader({ section, group, selectMode, selectedIds, onToggleCollap
               <IconButton
                 label={t('topic.filter')}
                 title={t('topic.filter')}
+                tabIndex={-1}
                 onClick={(event) => {
                   event.stopPropagation();
                   onFilter(section.id, group.workspaceId);
@@ -400,6 +408,7 @@ function SectionHeader({ section, group, selectMode, selectedIds, onToggleCollap
               <IconButton
                 label={t('action.menu')}
                 title={t('action.menu')}
+                tabIndex={-1}
                 onClick={(event) => {
                   event.stopPropagation();
                   onMenu({ type: 'topic', section, group, anchor: event.currentTarget });
@@ -412,6 +421,7 @@ function SectionHeader({ section, group, selectMode, selectedIds, onToggleCollap
               <IconButton
                 label={t('topic.newSessionAria', { name: label })}
                 title={t('topic.newSession')}
+                tabIndex={-1}
                 onClick={() => onNewSession?.()}
               >
                 <Icon name="newChat" />

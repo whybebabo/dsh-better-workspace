@@ -8,6 +8,7 @@
  */
 import * as React from 'react';
 import * as primitives from '@deepseek-ai/dsh-client-ui-primitives';
+import { isComposing } from './keyboard.js';
 import { getLanguage, subscribeLanguage, t } from './i18n.js';
 
 /**
@@ -109,7 +110,9 @@ export function useEscape(active, onEscape) {
   React.useEffect(() => {
     if (!active) return undefined;
     const handler = (event) => {
-      if (event.key === 'Escape') {
+      // Escape also cancels an IME candidate list; closing the surface on that keystroke loses
+      // the text the user is still composing.
+      if (event.key === 'Escape' && !isComposing(event)) {
         event.stopPropagation();
         onEscape();
       }
@@ -132,7 +135,7 @@ export function useOutsidePointer(active, refs, onDismiss) {
   }, [active, onDismiss, ...refs]);
 }
 
-export function IconButton({ label, onClick, children, active = false, disabled = false, className, title }) {
+export function IconButton({ label, onClick, children, active = false, disabled = false, className, title, tabIndex = 0 }) {
   return (
     <button
       type="button"
@@ -140,6 +143,7 @@ export function IconButton({ label, onClick, children, active = false, disabled 
       aria-label={label}
       title={title ?? label}
       disabled={disabled}
+      tabIndex={tabIndex}
       onClick={(event) => {
         event.stopPropagation();
         if (!disabled) onClick?.(event);
@@ -176,7 +180,7 @@ export function Button({ children, onClick, variant = 'default', disabled = fals
   );
 }
 
-export function Checkbox({ checked, indeterminate = false, onChange, label, disabled = false, id }) {
+export function Checkbox({ checked, indeterminate = false, onChange, label, disabled = false, id, tabIndex = 0 }) {
   const ref = React.useRef(null);
   React.useEffect(() => {
     if (ref.current) ref.current.indeterminate = indeterminate && !checked;
@@ -194,6 +198,7 @@ export function Checkbox({ checked, indeterminate = false, onChange, label, disa
         checked={checked}
         disabled={disabled}
         aria-label={id ? undefined : label}
+        tabIndex={tabIndex}
         onChange={(event) => onChange?.(event.target.checked)}
         onKeyDown={(event) => {
           if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
@@ -218,7 +223,9 @@ export function TextInput({ value, onChange, placeholder, autoFocus = false, onE
       onBlur={onBlur}
       onChange={(event) => onChange?.(event.target.value)}
       onKeyDown={(event) => {
-        if (event.key === 'Enter' && onEnter) {
+        // Enter is also the IME's "commit candidate" key. Let the composition finish before a
+        // dialog treats it as a form submit.
+        if (event.key === 'Enter' && onEnter && !isComposing(event)) {
           event.preventDefault();
           onEnter();
         }
@@ -271,22 +278,47 @@ export function StateMark({ state, className }) {
  * resized trigger stays aligned) and the trigger can be excluded from the outside-pointer
  * test. Without that exclusion a toggling trigger closes the popover on pointerdown and
  * reopens it on the following click, making the menu appear impossible to dismiss.
+ *
+ * Some triggers disappear from layout while their menu is open: the session row's action strip
+ * is `display:none` without hover/focus-within, and focusing the first menu item moves focus out
+ * of the row. A later render then measures a 0×0 box and the menu jumped to the viewport origin.
+ * `fallbackRect` is the box captured when the menu opened; it is used only when the live trigger
+ * has no box, so a visible trigger still tracks scroll/resize as before.
  */
-export function Popover({ anchor, anchorEl, onClose, children, align = 'left', width = 220, className }) {
+export function Popover({ anchor, anchorEl, fallbackRect = null, onClose, children, align = 'left', width = 220, className, label = t('action.menu') }) {
   const ref = React.useRef(null);
   const trigger = anchorEl ?? (typeof anchor?.nodeType === 'number' ? anchor : null);
   const triggerRef = React.useRef(trigger);
   triggerRef.current = trigger;
   useOutsidePointer(true, [ref, triggerRef], onClose);
   useEscape(true, onClose);
-  const rect = anchor && typeof anchor.nodeType === 'number'
+  // A popover is rendered after the tree in DOM order. Without moving focus, Tab has to walk
+  // through every row (and every row action) before reaching the first item. Focus the first
+  // control once; do not restore on unmount — an outside click should keep focus where the user
+  // clicked, not pull it back to the trigger.
+  React.useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const first = node.querySelector('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])');
+    first?.focus?.({ preventScroll: true });
+  }, []);
+  const liveRect = anchor && typeof anchor.nodeType === 'number'
     ? anchor.getBoundingClientRect()
     : anchor;
-  if (!rect) return null;
-  const anchorRect = rect;
+  const anchorRect = liveRect && liveRect.width > 0 && liveRect.height > 0
+    ? liveRect
+    : (fallbackRect ?? liveRect);
+  if (!anchorRect) return null;
   const viewportWidth = typeof window === 'undefined' ? 1280 : window.innerWidth;
   const viewportHeight = typeof window === 'undefined' ? 800 : window.innerHeight;
-  const left = align === 'right' ? Math.max(8, Math.min(anchorRect.right - width, viewportWidth - width - 8)) : Math.max(8, Math.min(anchorRect.left, viewportWidth - width - 8));
+  const fixedWidth = Number.isFinite(width) ? width : null;
+  const left = fixedWidth === null
+    // Native menus are max-content and anchor their left edge on the trigger. Keep at least
+    // the native 144px minimum on screen; the stylesheet caps the surface at 360px.
+    ? Math.max(8, Math.min(anchorRect.left, viewportWidth - 24 - 144))
+    : align === 'right'
+      ? Math.max(8, Math.min(anchorRect.right - fixedWidth, viewportWidth - fixedWidth - 8))
+      : Math.max(8, Math.min(anchorRect.left, viewportWidth - fixedWidth - 8));
   const spaceBelow = viewportHeight - anchorRect.bottom;
   const openUp = spaceBelow < 220 && anchorRect.top > spaceBelow;
   const top = openUp ? undefined : anchorRect.bottom + 4;
@@ -294,10 +326,11 @@ export function Popover({ anchor, anchorEl, onClose, children, align = 'left', w
   return (
     <div
       ref={ref}
-      className={cx('dts-pop', className)}
-      style={{ position: 'fixed', left, width, top, bottom, maxHeight: Math.max(160, (openUp ? anchorRect.top : spaceBelow) - 12) }}
+      className={cx('dts-pop', fixedWidth === null && 'dts-pop--auto', className)}
+      style={{ position: 'fixed', left, width: fixedWidth ?? undefined, top, bottom, maxHeight: Math.max(160, (openUp ? anchorRect.top : spaceBelow) - 12) }}
       role="dialog"
       aria-modal="false"
+      aria-label={label}
     >
       {children}
     </div>

@@ -106,6 +106,28 @@ function overlap(one, two) {
 }
 
 /**
+ * The sidebar's own scroll viewport.
+ *
+ * The workspace section is deliberately content-sized inside it: the host's `.root` is
+ * `flex: none; max-height: 100cqh`, so the section ends where its rows end and the rest of the
+ * viewport stays empty when everything is collapsed. The host marks the viewport with
+ * `[data-sidebar-scrollport]`; older builds still declare `overflow-y: auto|scroll`, which is
+ * enough to identify it without a hashed class name.
+ */
+function findScrollViewport(region, frame) {
+  for (let node = region.parentElement; node && node !== frame; node = node.parentElement) {
+    const hinted = typeof node.hasAttribute === 'function' && node.hasAttribute('data-sidebar-scrollport');
+    if (!hinted && typeof getComputedStyle !== 'function') continue;
+    const style = hinted ? null : getComputedStyle(node);
+    if (hinted || /(auto|scroll)/.test(String(style?.overflowY ?? ''))) {
+      const rect = node.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) return node;
+    }
+  }
+  return null;
+}
+
+/**
  * The part of the region that is actually on screen.
  *
  * The workspace section sits inside the sidebar's own scroll viewport (the panel list — 插件 /
@@ -114,8 +136,16 @@ function overlap(one, two) {
  * region element still reports its complete, unclipped box, and the panel is painted in
  * `shell.overlay`, outside that scroller — so covering the raw box also painted over the
  * sidebar footer below it (the settings / account buttons) and past the window. Every ancestor
- * box bounds what the shell can display, so the cover is their intersection: the footer is not
- * part of the region and has to stay reachable.
+ * box bounds what the shell can display, so the cover starts as their intersection: the footer
+ * is not part of the region and has to stay reachable.
+ *
+ * A short native section is the opposite failure. With every group collapsed the section is
+ * only a few rows tall, while the panel's own tree still needs the whole seat; using the
+ * section's content box as the cover height clipped the panel to that arbitrary height and left
+ * the rest of the sidebar blank below it. Once the scroll viewport is known, the cover therefore
+ * extends from the section's top down to the viewport's bottom (and no farther than the
+ * clipping ancestors above it). Without a viewport the current intersection is the whole answer,
+ * which keeps a composition that has no host scroller covering exactly the section it owns.
  */
 function visibleRect(layer, frame, region) {
   const layerRect = layer.getBoundingClientRect();
@@ -127,12 +157,51 @@ function visibleRect(layer, frame, region) {
     if (ancestorRect.width > 0 && ancestorRect.height > 0) rect = overlap(rect, ancestorRect);
     if (node === frame || node === document.documentElement) break;
   }
-  return rect;
+
+  const viewport = findScrollViewport(region, frame);
+  if (!viewport) return rect;
+  let bottom = Math.min(viewport.getBoundingClientRect().bottom, layerRect.bottom);
+  // Ancestors at or above the viewport are the ones that can clip it (the frame's own box, a
+  // platform shell); the content-sized wrappers between the section and the viewport are not.
+  for (let node = viewport.parentElement; node; node = node.parentElement) {
+    const ancestorRect = node.getBoundingClientRect();
+    if (ancestorRect.width > 0 && ancestorRect.height > 0) bottom = Math.min(bottom, ancestorRect.bottom);
+    if (node === frame || node === document.documentElement) break;
+  }
+  if (bottom <= rect.top) return rect;
+  return { ...rect, bottom, height: bottom - rect.top };
+}
+
+/**
+ * The native workspace browser's current expansion state.
+ *
+ * The host renders one `[role="treeitem"]` header per group with
+ * `data-row-key="workspace:<workspaceId>"` and `aria-expanded`, so the state is readable without
+ * touching the host's private view store. An empty key is the trailing 未分组 bucket. `null`
+ * means the native list has no workspace rows yet (still loading, or a composition in flat
+ * list mode): callers must not treat that as "everything collapsed" and wipe their own state.
+ *
+ * @param {Element|null} regionEl - the covered native workspace region
+ * @returns {Map<string, boolean>|null} native key ('' for 未分组) → expanded
+ */
+export function readNativeWorkspaceExpansion(regionEl) {
+  if (!regionEl || typeof regionEl.querySelectorAll !== 'function') return null;
+  const rows = [...regionEl.querySelectorAll('[data-row-key^="workspace:"]')];
+  if (rows.length === 0) return null;
+  const expansion = new Map();
+  for (const row of rows) {
+    const key = String(row.getAttribute('data-row-key') ?? '').slice('workspace:'.length);
+    const state = row.getAttribute('aria-expanded');
+    if (state !== 'true' && state !== 'false') continue;
+    expansion.set(key, state === 'true');
+  }
+  return expansion.size > 0 ? expansion : null;
 }
 
 // The panel covers the region itself (section header included), not the whole column: the
-// region already carries the sidebar's side padding, so its box is the exact seat the stock
-// browser occupied. Only the visible slice of that box is covered (see `visibleRect`).
+// region already carries the sidebar's side padding, so its box is the exact horizontal seat
+// the stock browser occupied. Vertically the cover fills the scroll viewport below that seat;
+// `visibleRect` explains why the content-sized section box cannot cap it.
 function measure(layer, frame, sidebarCol, region) {
   const layerRect = layer.getBoundingClientRect();
   const colRect = sidebarCol.getBoundingClientRect();
@@ -193,7 +262,10 @@ export function observeWorkspaceRegion(onChange) {
     }
     const { region, tree } = found;
     const rect = measure(layer, frame, sidebarCol, region);
-    if (rect.width < MIN_REGION_WIDTH || rect.height < 64) {
+    // The cover now extends to the scroll viewport, so its height is no longer the native
+    // section's height. Keep the original sliver guard on the section itself: a 30px stub is
+    // not a usable workspace seat even when the viewport below it is tall.
+    if (rect.width < MIN_REGION_WIDTH || rect.height < 64 || region.getBoundingClientRect().height < 64) {
       return { visible: false, rect: null, reason: 'too-small', regionEl: region, treeEl: tree, sidebarCol, frameEl: frame, layerEl: layer };
     }
     return { visible: true, rect, reason: 'ok', regionEl: region, treeEl: tree, sidebarCol, frameEl: frame, layerEl: layer };

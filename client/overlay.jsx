@@ -9,8 +9,8 @@
 import * as React from 'react';
 import { createPortal } from 'react-dom';
 import { observeComposerSlot, resolveComposerWorkspace } from './composer.js';
-import { observeWorkspaceRegion, setRegionCovered, setRegionInert, watchRegionModals } from './geometry.js';
-import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, mainSessionId, moveWithin, orderByManual, pendingStatusLabel, promoteSessionOrder, samePath, selectableIds, topicLabel, topicOfSession, ungroupedSessionIds, UNGROUPED_WORKSPACE_ID, workspaceSessionIds } from './model.js';
+import { observeWorkspaceRegion, readNativeWorkspaceExpansion, setRegionCovered, setRegionInert, watchRegionModals } from './geometry.js';
+import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, mainSessionId, moveWithin, orderByManual, pendingStatusLabel, promoteSessionOrder, pruneSelectionForSection, samePath, selectableIds, topicLabel, topicOfSession, ungroupedSessionIds, UNGROUPED_WORKSPACE_ID, workspaceSessionIds } from './model.js';
 import { createPanelStore } from './store.js';
 import { beginReorder, currentDrag, endDrag, readDragPayload, reorderVerdict, sessionReorderVerdict, writeReorderPayload } from './dnd.js';
 import { runSessionAction, mergeOutcomes, BATCH_LIMIT } from './batch.js';
@@ -104,6 +104,21 @@ const TREE_HANDLER_KEYS = [
   'onFilterTopic', 'onNewSession', 'onNewSessionInTopic', 'onDropSessions', 'onRenameTopic', 'onDropOnRow', 'onToggleReveal',
 ];
 
+/**
+ * A plain snapshot of a trigger's viewport box.
+ *
+ * Menus used to keep only the trigger element and re-measure it on every render. The row action
+ * strip is `display:none` unless its row is hovered or focus-within — and opening a menu moves
+ * focus into the popover — so moving the pointer away collapsed the trigger to 0×0 and any later
+ * render pinned the open menu to the viewport origin. The box is captured while the trigger is
+ * still in its clicked state; `Popover` falls back to it only when the live box is gone.
+ */
+function anchorSnapshot(anchor) {
+  if (!anchor || typeof anchor.nodeType !== 'number' || typeof anchor.getBoundingClientRect !== 'function') return null;
+  const rect = anchor.getBoundingClientRect();
+  return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height };
+}
+
 function useStableDispatch(keys) {
   const latest = React.useRef(null);
   const frozen = React.useRef(null);
@@ -128,6 +143,14 @@ export function OverlayPanel({ actions, schedules }) {
   const [state, setState] = React.useState(() => store.getState());
   const [geom, setGeom] = React.useState({ visible: false, rect: null, reason: 'init', regionEl: null });
   const [menu, setMenu] = React.useState(null);
+  /**
+   * A context menu suppresses the row hover card, exactly as the stock browser does. The card
+   * would otherwise sit above the menu (`z-index` 1500 vs 1200) after the pointer left the row.
+   */
+  const menuOpenRef = React.useRef(false);
+  /** Synchronous gate: row actions can fire twice before React disables the busy toolbar. */
+  const batchRunningRef = React.useRef(false);
+  menuOpenRef.current = Boolean(menu);
   const [dialog, setDialog] = React.useState(null);
   const [outcome, setOutcome] = React.useState(null);
   const [progress, setProgress] = React.useState(null);
@@ -138,6 +161,7 @@ export function OverlayPanel({ actions, schedules }) {
   const [tipTop, setTipTop] = React.useState(null);
   /** Opening a card clears the last measurement so the first paint cannot inherit it. */
   const openHint = React.useCallback((next) => {
+    if (menuOpenRef.current) return;
     setTipTop(null);
     setHint(next);
   }, []);
@@ -352,6 +376,75 @@ export function OverlayPanel({ actions, schedules }) {
     };
   }, []);
 
+  /**
+   * Adopts the native sidebar's expansion state once per activation.
+   *
+   * The panel keeps its own collapse preferences, so enabling it used to restore whatever it
+   * looked like the last time it ran — even when the user had just collapsed every group in the
+   * stock list. That made the visible result depend on which UI was used before the toggle. On
+   * activation, read the still-mounted native rows and adopt their workspace-level expansion;
+   * topic-collapse preferences stay untouched because the stock list has no folders. After that
+   * the plugin's own chevrons own the state. Disabling the host row clears `hostEnabled`, which
+   * re-arms this for the next enable; a rail collapse does not (same mount, unchanged native
+   * state).
+   *
+   * Host rows can appear a frame or two after `/state` (the workspace list is a separate
+   * snapshot), so wait for the first workspace row with a bounded observer instead of treating
+   * "not painted yet" as "all collapsed".
+   */
+  const nativeExpansionSync = React.useRef({ synced: false });
+  React.useEffect(() => {
+    if (state.hostEnabled === false) {
+      nativeExpansionSync.current.synced = false;
+      return undefined;
+    }
+    if (nativeExpansionSync.current.synced) return undefined;
+    if (!geom.visible || !state.ready || !state.reachable || !geom.regionEl) return undefined;
+    // Wait for the workspace snapshot itself, not only `/state`: an incomplete first publish
+    // would otherwise adopt the rows that happen to be painted and stop observing too early.
+    if (workspaceSnapshot?.phase !== 'ready') return undefined;
+
+    let observer = null;
+    let timer = null;
+    let stopped = false;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      observer?.disconnect();
+      observer = null;
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    };
+    const adopt = () => {
+      const expansion = readNativeWorkspaceExpansion(geom.regionEl);
+      if (!expansion) return false;
+      const prefs = store.getState().prefs;
+      const before = prefs.collapsedWorkspaces ?? [];
+      const collapsed = new Set(before);
+      for (const [key, expanded] of expansion) {
+        // The native trailing bucket has an empty key; the panel's virtual workspace id is a
+        // reserved value that cannot collide with a real Workspace id.
+        const workspaceId = key === '' ? UNGROUPED_WORKSPACE_ID : key;
+        if (expanded) collapsed.delete(workspaceId);
+        else collapsed.add(workspaceId);
+      }
+      const next = [...collapsed];
+      const same = next.length === before.length && next.every((entry) => before.includes(entry));
+      if (!same) store.setPrefs({ collapsedWorkspaces: next });
+      nativeExpansionSync.current.synced = true;
+      stop();
+      return true;
+    };
+    if (adopt()) return undefined;
+    if (typeof MutationObserver === 'function') {
+      observer = new MutationObserver(adopt);
+      observer.observe(geom.regionEl, { childList: true, subtree: true });
+    }
+    // A flat-list host never renders workspace headers; stop waiting instead of observing forever.
+    timer = setTimeout(stop, 3000);
+    return stop;
+  }, [state.hostEnabled, state.ready, state.reachable, geom.visible, geom.regionEl, workspaceSnapshot?.phase, store]);
+
   // Keep the covered native region out of the tab order while the panel is up, and hand the
   // region back whenever a native dialog opens inside it. The same toggle marks the region as
   // covered for the stylesheet, which hides it on macOS desktop (the cover there is clear).
@@ -425,6 +518,17 @@ export function OverlayPanel({ actions, schedules }) {
   );
   /** Ids of the selected rows that still exist in the tree — what a batch may be sent. */
   const liveSelection = React.useMemo(() => selectedRows.map((row) => row.id), [selectedRows]);
+  /**
+   * Move-to-topic is workspace-scoped. A selection spanning two real workspaces used to move
+   * only the majority workspace and leave the rest selected under a dialog that claimed to
+   * process the whole count; disable the action instead of silently dropping rows.
+   */
+  const hasMixedWorkspaces = React.useMemo(
+    () => new Set(selectedRows
+      .map((row) => row.workspaceId)
+      .filter((id) => id && id !== UNGROUPED_WORKSPACE_ID)).size > 1,
+    [selectedRows],
+  );
   /**
    * A hover card belongs to a row that may disappear while the pointer never leaves it:
    * archiving, a search/filter that hides it, or the sidebar collapsing to the rail (the tree
@@ -601,19 +705,25 @@ export function OverlayPanel({ actions, schedules }) {
       ? (store.topicsOf(filteredWorkspace.workspaceId) ?? []).find((entry) => entry.id === prefs.topicFilter) ?? null
       : null;
     for (const id of blanks) {
-      auto.seen.add(id);
       // The virtual default group is where unfiled sessions already live; filing into it
       // would only materialize the sidecar document for no visible change.
-      if (!filteredTopic || filteredTopic.system) continue;
+      if (!filteredTopic || filteredTopic.system) {
+        auto.seen.add(id);
+        continue;
+      }
       // A blank can arrive before the Workspace record accounts for it; `cwd` is the same
-      // fallback the tree uses, and an unmatched id simply waits for the next snapshot.
+      // fallback the tree uses. An id that cannot be placed yet must stay fresh: marking it
+      // seen here dropped the auto-file permanently when the next snapshot supplied the
+      // workspace/cwd.
       const workspace = options.find((option) => option.sessionIds.includes(id))
         ?? options.find((option) => samePath(option.path, byId[id]?.cwd));
+      if (!workspace) continue;
+      auto.seen.add(id);
       // The filter names one workspace: a blank started somewhere else must not be written
       // into the filtered topic. That would be a cross-workspace assignment — exactly what
       // the drag guard refuses — and it would make the row vanish from the view it was started
       // in. Such a blank simply stays unfiled.
-      if (!workspace || workspace.workspaceId !== filteredWorkspace.workspaceId) continue;
+      if (workspace.workspaceId !== filteredWorkspace.workspaceId) continue;
       auto.busy.add(id);
       store
         .assign({ workspaceId: workspace.workspaceId, sessionIds: [id], topicId: filteredTopic.id })
@@ -798,6 +908,19 @@ export function OverlayPanel({ actions, schedules }) {
     flushPromotion();
   }, [flushPromotion]);
 
+  /**
+   * One exit for every drop path. The source row's `dragend` is the usual cleanup, but it is
+   * not delivered when that row was unmounted mid-drag (another window archived it, a filter
+   * removed it). A row-level drop stops propagation before the document backstop, so commit the
+   * cleanup here instead of leaving the tree folded and the promotion gate paused forever.
+   */
+  const finishDrag = React.useCallback(() => {
+    endDrag();
+    setDropHint(null);
+    setDragging(null);
+    releasePromotion();
+  }, [releasePromotion]);
+
   React.useEffect(() => () => {
     const gate = promotionGate.current;
     if (gate.timer !== null) clearTimeout(gate.timer);
@@ -829,19 +952,14 @@ export function OverlayPanel({ actions, schedules }) {
    */
   React.useEffect(() => {
     if (!dragging) return undefined;
-    const stop = () => {
-      endDrag();
-      setDropHint(null);
-      setDragging(null);
-      releasePromotion();
-    };
+    const stop = () => finishDrag();
     document.addEventListener('dragend', stop);
     document.addEventListener('drop', stop);
     return () => {
       document.removeEventListener('dragend', stop);
       document.removeEventListener('drop', stop);
     };
-  }, [dragging, releasePromotion]);
+  }, [dragging, finishDrag]);
 
   /** The composer seat owns the chip; a popover must not outlive the seat it is anchored to. */
   React.useEffect(() => {
@@ -870,7 +988,23 @@ export function OverlayPanel({ actions, schedules }) {
   /** Stable handlers need stable leaves too: these read the store, never the render closure. */
   const toggleWorkspaceCollapse = (key) => store.toggleInList('collapsedWorkspaces', key);
   const toggleTopicCollapse = (key) => store.toggleInList('collapsedTopics', key);
-  const toggleReveal = (key) => store.toggleInList('revealedBuckets', key);
+  const toggleReveal = (key) => {
+    const current = store.getState();
+    const wasRevealed = (current.prefs.revealedBuckets ?? []).includes(key);
+    store.toggleInList('revealedBuckets', key);
+    // Folding a revealed bucket back to REVEAL_LIMIT must also fold the selection: the header
+    // checkbox can only deselect rows it renders, so retaining the overflow ids would leave
+    // invisible rows in a batch archive/delete with no visible way to clear them.
+    if (wasRevealed) {
+      for (const group of tree.groups) {
+        const section = group.sections.find((candidate) => sectionKey(group, candidate) === key);
+        if (!section) continue;
+        const next = pruneSelectionForSection(section, current.selection, { revealed: false });
+        if (next.length !== current.selection.length) store.setSelection(next);
+        break;
+      }
+    }
+  };
   const closeHint = () => setHint(null);
   /**
    * Adds/removes a whole bucket. Reading the selection from the store instead of the render
@@ -976,12 +1110,10 @@ export function OverlayPanel({ actions, schedules }) {
     onDrop: (event, level, target, forcedPosition) => {
       const drag = currentDrag();
       const verdict = reorderVerdict(drag, { level, ...target });
-      setDropHint(null);
-      setDragging(null);
+      finishDrag();
       if (!verdict.ok) return;
       event.preventDefault();
       event.stopPropagation();
-      endDrag();
       const position = forcedPosition ?? positionOf(event);
       if (level === 'workspace') {
         // Translate the drop against what is on screen. `workspaceOrder` is a permutation of the
@@ -999,13 +1131,8 @@ export function OverlayPanel({ actions, schedules }) {
         .reorderTopics({ workspaceId: drag.workspaceId, topicIds: moveWithin(ids, drag.id, target.id, position) })
         .catch((error) => flash(error?.message ?? String(error), 'bad'));
     },
-    onEnd: () => {
-      endDrag();
-      setDropHint(null);
-      setDragging(null);
-      releasePromotion();
-    },
-  }), [dropHint, dragging, store, holdPromotion, releasePromotion]);
+    onEnd: finishDrag,
+  }), [dropHint, dragging, store, holdPromotion, finishDrag]);
 
   /**
    * Collapsed sidebar (the rail). The host keeps its own 新建会话 / 添加工作区 / 搜索会话
@@ -1102,10 +1229,6 @@ export function OverlayPanel({ actions, schedules }) {
     }, 90);
     return () => clearTimeout(timer);
   }, [geom.visible, railSearchPending]);
-
-  // An unusable sidecar owns nothing to paint, including the composer chip: it has no topics
-  // to offer and its writes cannot land.
-  if (!state.ready || !state.reachable) return null;
 
   // The landing highlight's clock lives in one place: the CSS animation reads this variable,
   // so the class-removal timer and the fade can never drift apart.
@@ -1204,12 +1327,17 @@ export function OverlayPanel({ actions, schedules }) {
   };
 
   const runBatch = async (action, ids, options2) => {
+    if (batchRunningRef.current) return;
     const targets = [...new Set(ids)];
     if (targets.length === 0) return;
     if (targets.length > BATCH_LIMIT) {
       flash(t('batch.limit'), 'bad');
       return;
     }
+    // Row actions are not covered by the toolbar's `busy` prop. Without this ref, a double
+    // click starts two runs; the second one captures the old `outcome` and can clear the
+    // first run's failure report when it finishes.
+    batchRunningRef.current = true;
     try {
       const next = await runSessionAction({
         action,
@@ -1218,11 +1346,12 @@ export function OverlayPanel({ actions, schedules }) {
         options: options2,
         onProgress: (p) => setProgress(t('batch.progress', { done: p.done, total: p.total })),
       });
-      setProgress(null);
       finishBatch(next);
     } catch (error) {
-      setProgress(null);
       flash(error?.message ?? String(error), 'bad');
+    } finally {
+      setProgress(null);
+      batchRunningRef.current = false;
     }
   };
 
@@ -1233,12 +1362,10 @@ export function OverlayPanel({ actions, schedules }) {
     const drag = currentDrag();
     const dropped = readDragPayload(event.dataTransfer);
     const position = positionOf(event);
-    setDropHint(null);
+    finishDrag();
     if (!drag || drag.kind === 'reorder' || dropped.length === 0) {
-      endDrag();
       return;
     }
-    endDrag();
     if (drag.workspaceId !== row.workspaceId) {
       flash(t('session.crossWorkspace'), 'bad');
       return;
@@ -1272,6 +1399,7 @@ export function OverlayPanel({ actions, schedules }) {
 
   /** A drop files the dragged session(s) into the target topic (the default group included). */
   const dropSessions = ({ ids, workspaceId, topicId }) => {
+    finishDrag();
     if (!ids?.length || !workspaceId || workspaceId === UNGROUPED_WORKSPACE_ID) return;
     const topic = (store.topicsOf(workspaceId) ?? []).find((entry) => entry.id === topicId);
     store
@@ -1287,14 +1415,25 @@ export function OverlayPanel({ actions, schedules }) {
   };
 
   /** Rejected drops surface as a toast instead of a popover (they carry no anchor). */
-  const handleMenu = (next) => {
-    if (next?.type === 'drop-rejected') {
-      flash(next.reason === 'cross-workspace' ? t('session.crossWorkspace') : t('session.dragHint'), 'bad');
+  const handleMenu = (incoming) => {
+    if (incoming?.type === 'drop-rejected') {
+      flash(incoming.reason === 'cross-workspace' ? t('session.crossWorkspace') : t('session.dragHint'), 'bad');
       return;
+    }
+    // Capture the clicked box before any menu focus or hover change can hide the trigger. The
+    // element itself is still kept for the outside-pointer test and for the toggle-close path.
+    const next = incoming?.anchor && !incoming.anchorRect
+      ? { ...incoming, anchorRect: anchorSnapshot(incoming.anchor) }
+      : incoming;
+    if (next) {
+      // Set the gate before the state update so a hover timer that fires in the same tick cannot
+      // put the card back over the menu.
+      menuOpenRef.current = true;
+      setHint(null);
     }
     setMenu((current) => {
       if (!current || !next) return next;
-      // Every menu keeps its trigger element (not a snapshot rect), so clicking the same
+      // Every menu keeps its trigger element (not only a snapshot rect), so clicking the same
       // trigger can toggle the menu closed. The Popover excludes that element from the
       // outside-pointer test, which is what lets this click arrive instead of being closed
       // and immediately reopened on pointerdown.
@@ -1961,7 +2100,7 @@ export function OverlayPanel({ actions, schedules }) {
         />
       ) : null}
 
-      {toast ? <div className={cx('dts-toast', `is-${toast.tone}`)}>{toast.message}</div> : null}
+      {toast ? <div className={cx('dts-toast', `is-${toast.tone}`)} role="status" aria-live={toast.tone === 'bad' ? 'assertive' : 'polite'}>{toast.message}</div> : null}
     </>
   );
 
@@ -1970,6 +2109,13 @@ export function OverlayPanel({ actions, schedules }) {
    * That seat lives in the host composer, so it must outlive a collision with the rail; the
    * tree, menus and hover cards all belong to the covered region and stay unmounted.
    */
+  // An unusable sidecar hides the tree and the composer chip (it has no topics to offer and
+  // its writes cannot land), but never the floating surfaces: a delete already carried out is
+  // irreversible, and its per-item report must survive a `/state` timeout or a host restart.
+  if (!state.ready || !state.reachable) {
+    return <>{floatingSurfaces}</>;
+  }
+
   if (!geom.visible) {
     return (
       <>
@@ -2028,10 +2174,15 @@ export function OverlayPanel({ actions, schedules }) {
             hasArchived={selectedRows.some((row) => row.archived)}
             hasUnarchived={selectedRows.some((row) => !row.archived)}
             hasUngrouped={selectedRows.some((row) => row.workspaceId === UNGROUPED_WORKSPACE_ID)}
+            hasMixedWorkspaces={hasMixedWorkspaces}
             deleteAvailable={state.deleteAvailable}
             onArchive={() => runBatch('archive', liveSelection)}
             onUnarchive={() => runBatch('unarchive', liveSelection)}
             onMove={() => {
+              if (hasMixedWorkspaces) {
+                flash(t('batch.mixedWorkspaces'), 'bad');
+                return;
+              }
               const workspaceId = workspaceOfIds();
               const movable = selectedRows.filter((row) => row.workspaceId === workspaceId);
               if (!workspaceId || workspaceId === UNGROUPED_WORKSPACE_ID || movable.length === 0) {
@@ -2118,7 +2269,7 @@ export function OverlayPanel({ actions, schedules }) {
       </div>
 
       {menu && menuItems ? (
-        <Popover anchor={menu.anchor} onClose={() => setMenu(null)} width={menu.type === 'header' ? 220 : 240} align="right" className="dts-pop--menu">
+        <Popover anchor={menu.anchor} fallbackRect={menu.anchorRect} onClose={() => setMenu(null)} width={null} className="dts-pop--menu">
           {menuItems}
         </Popover>
       ) : null}

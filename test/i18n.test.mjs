@@ -12,6 +12,15 @@ test('every key exists in both dictionaries', () => {
   assert.ok(zhKeys.length > 60);
 });
 
+test('no dictionary entry is empty or whitespace-only', () => {
+  for (const language of ['zh', 'en']) {
+    for (const [key, value] of Object.entries(locale[language])) {
+      assert.equal(typeof value, 'string', `${language}.${key} must be a string`);
+      assert.notEqual(value.trim(), '', `${language}.${key} must carry copy`);
+    }
+  }
+});
+
 test('parameterised keys use the same placeholders in both languages', () => {
   for (const [key, value] of Object.entries(locale.zh)) {
     const zhVars = [...String(value).matchAll(/\{(\w+)\}/g)].map((match) => match[1]).sort();

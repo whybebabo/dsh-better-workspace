@@ -42,7 +42,6 @@ let sessionSource;
 let sessionStatusSource;
 let workspaceSource;
 let disposers;
-let slotCalls;
 /** Per-test override for `archiveSession`, so the "needs a stop" path can be exercised. */
 let archiveImpl;
 let startSessionImpl;
@@ -389,7 +388,6 @@ beforeEach(async () => {
   calls = [];
   responseOverrides = {};
   disposers = [];
-  slotCalls = [];
   archiveImpl = null;
   pinImpl = null;
   remoteAccessImpl = null;
@@ -452,7 +450,7 @@ beforeEach(async () => {
     const body = options.body ? JSON.parse(options.body) : null;
     calls.push({ url: String(url), method: options.method ?? 'GET', body });
     const handler = responseOverrides[String(url).replace(/^\/api/, '')] ?? DEFAULT_RESPONSES[String(url)] ?? (() => ({ ok: true, result: {} }));
-    const payload = handler(body);
+    const payload = await handler(body);
     return { ok: payload.ok !== false, status: payload.status ?? 200, json: async () => payload };
   };
 });
@@ -487,6 +485,30 @@ test('the bundle mounts over the workspace region and inert the native list', as
   );
 });
 
+test('the tree is one tab stop and its popovers are named and focused', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const tree = container.querySelector('.dts-tree[role="tree"]');
+  assert.equal(tree.getAttribute('tabindex'), '0', 'the tree itself is the single tab stop');
+  assert.ok(
+    [...tree.querySelectorAll('[role="treeitem"]')].every((node) => node.getAttribute('tabindex') === '-1'),
+    'rows are reached with the arrow keys, not one Tab per row',
+  );
+  assert.ok(tree.querySelector('[role="treeitem"]'), 'the tree has rows');
+  // The hand-off itself (`first.focus()` from the keydown handler) is exercised in a browser;
+  // jsdom's native focus implementation allocates without bound on this tree fixture, so the
+  // integration test pins the tab-stop contract instead.
+
+  const row = find('.dts-row--session', '会话 1');
+  await act(async () => {
+    row.querySelector('.dts-row__act').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const menu = document.querySelector('.dts-pop--menu');
+  assert.equal(menu.getAttribute('aria-label'), '更多操作', 'the popover has an accessible name');
+  assert.ok(menu.querySelector('.dts-menu__item') === document.activeElement, 'focus moves into the menu');
+});
+
 test('the cover is clipped to the sidebar scroll viewport so the footer stays uncovered', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   await mount();
@@ -510,6 +532,34 @@ test('the cover is clipped to the sidebar scroll viewport so the footer stays un
   assert.ok(overlay, 'the panel still covers the visible region');
   assert.equal(overlay.style.top, '200px', 'the cover still starts at the region top');
   assert.equal(overlay.style.height, '650px', 'it stops at the scroll viewport bottom (850px), not the footer (900px)');
+});
+
+test('the cover fills the sidebar viewport when the native section is shorter than it', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  // Native `.root:not(.rail)` is content-sized (`flex: none; max-height: 100cqh`). With every
+  // native group collapsed the workspace region is much shorter than the sidebar viewport. The
+  // panel's own tree is not content-sized — it must still get the whole available seat, or the
+  // collapsed height of the stock list becomes an arbitrary cap that leaves usable space blank.
+  layoutRects.set('_2H3hWW_regionArea', { x: 0, y: 200, width: 272, height: 260 });
+  const region = document.querySelector('[class*="_regionArea"]');
+  const viewport = document.createElement('div');
+  viewport.className = '_9lTDKa_scrollArea';
+  // The shell marks the one scroll viewport; the panel must extend to its bottom, not to the
+  // content-sized section inside it.
+  viewport.setAttribute('data-sidebar-scrollport', '');
+  layoutRects.set('_9lTDKa_scrollArea', { x: 0, y: 120, width: 280, height: 730 });
+  await act(async () => {
+    region.parentElement.insertBefore(viewport, region);
+    viewport.append(region);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await tick(150);
+
+  const overlay = find('.dts-overlay');
+  assert.ok(overlay, 'the panel still covers the region');
+  assert.equal(overlay.style.top, '200px', 'it still starts at the workspace header');
+  assert.equal(overlay.style.height, '650px', 'it fills the viewport down to the footer, not the short native section');
 });
 
 test('a native dialog rendered inside the covered region hands the region back until it closes', async () => {
@@ -557,7 +607,7 @@ test('scheduled sessions keep the stock clock mark and hover task block', async 
   responseOverrides[`${API}/state`] = stateResult;
   scheduleCatalog = [{
     id: 'sch_one',
-    sessionId: 'ses_0',
+    target: { kind: 'session', sessionId: 'ses_0' },
     status: 'active',
     kind: 'daily',
     title: '每天早上发送问候',
@@ -594,7 +644,7 @@ test('a running session keeps its status dot and the hover block still lists the
   sessionStatusSource.set(new Map([['ses_0', { running: true }]]));
   scheduleCatalog = [{
     id: 'sch_one',
-    sessionId: 'ses_0',
+    target: { kind: 'session', sessionId: 'ses_0' },
     status: 'active',
     kind: 'every',
     title: '构建巡检',
@@ -670,7 +720,7 @@ test('a foreign drop payload writes nothing', async () => {
   const topicRow = find('.dts-row--topic', '设计');
   await act(async () => {
     const drop = new window.Event('drop', { bubbles: true, cancelable: true });
-    drop.dataTransfer = makeDataTransfer(null, 'C:\\Users\\someone\\Desktop');
+    drop.dataTransfer = makeDataTransfer(null, '["ses_attacker"]');
     topicRow.dispatchEvent(drop);
   });
   assert.equal(calls.some((call) => call.url.endsWith('/assign')), false, 'no assignment was sent for a non-session drop');
@@ -747,6 +797,30 @@ test('long buckets render progressively and expand on demand', async () => {
     button.dispatchEvent(new window.Event('click', { bubbles: true }));
   });
   assert.equal(container.querySelectorAll('.dts-row--session').length, 70);
+});
+
+test('collapsing a revealed bucket also folds its hidden selection', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  const many = makeSessions(70);
+  sessionSource.set(many);
+  workspaceSource.set({ ...workspaceSource.getSnapshot(), items: [{ workspaceId: WORKSPACE, path: 'D:/work/one', title: 'One', sessionIds: many.ids, createdAt: 1, updatedAt: 1 }] });
+  await mount();
+  const headerButton = [...container.querySelectorAll('.dts-header .dts-iconbtn')].find((node) => node.getAttribute('title') === '批量选择');
+  await act(async () => headerButton.dispatchEvent(new window.Event('click', { bubbles: true })));
+  await tick();
+  const reveal = find('.dts-reveal');
+  await act(async () => reveal.dispatchEvent(new window.Event('click', { bubbles: true })));
+  const section = [...container.querySelectorAll('.dts-section--topic')].find((node) => node.textContent.includes('默认分组'));
+  const selectAll = section.querySelector('.dts-row__check input');
+  await act(async () => selectAll.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true, view: window })));
+  await tick();
+  assert.match(container.querySelector('.dts-selectbar__count').textContent, /69/);
+  await act(async () => find('.dts-reveal').dispatchEvent(new window.Event('click', { bubbles: true })));
+  await tick();
+  assert.match(container.querySelector('.dts-selectbar__count').textContent, /60/);
+  await act(async () => section.querySelector('.dts-row__check input').dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true, view: window })));
+  await tick();
+  assert.match(container.querySelector('.dts-selectbar__count').textContent, /0/);
 });
 
 test('a session started from a topic is filed into it', async () => {
@@ -1107,6 +1181,43 @@ test('a pending topic does not claim a blank created in another workspace', asyn
   const assign = calls.find((call) => call.url.endsWith('/assign'));
   assert.ok(assign, 'the blank from the clicked workspace is still claimed');
   assert.deepEqual(assign.body.sessionIds, ['ses_own']);
+  assert.equal(assign.body.topicId, TOPIC);
+});
+
+test('a blank that is not yet placed waits for a later snapshot instead of being forgotten', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
+  await mount();
+  await act(async () => {
+    find('.dts-row--topic', '设计').dispatchEvent(new window.Event('contextmenu', { bubbles: true, cancelable: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')]
+      .find((node) => node.textContent.includes('只看此分组'))
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+
+  const before = sessionSource.getSnapshot();
+  const late = { id: 'ses_late', displayTitle: '', updatedAt: Date.now(), blank: true, retainedBy: { mainView: 1 } };
+  await act(async () => {
+    sessionSource.set({ ...before, ids: [...before.ids, 'ses_late'], byId: { ...before.byId, ses_late: late }, current: 'ses_late' });
+  });
+  await tick();
+  assert.equal(calls.some((call) => call.url.endsWith('/assign')), false, 'no workspace or cwd yet, so the panel must wait');
+
+  await act(async () => {
+    const current = sessionSource.getSnapshot();
+    sessionSource.set({
+      ...current,
+      byId: { ...current.byId, ses_late: { ...late, cwd: 'D:/work/one' } },
+    });
+  });
+  await tick();
+  const assign = calls.find((call) => call.url.endsWith('/assign'));
+  assert.ok(assign, 'the next snapshot with cwd lets the blank be filed');
+  assert.deepEqual(assign.body.sessionIds, ['ses_late']);
   assert.equal(assign.body.topicId, TOPIC);
 });
 
@@ -2051,6 +2162,39 @@ test('batch move is disabled when the selection includes an ungrouped session', 
   assert.equal(buttonByLabel('移动到分组').disabled, false, 'the remaining workspace-only selection can move');
 });
 
+test('batch move is disabled when the selection spans two workspaces', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  const base = sessionSource.getSnapshot();
+  sessionSource.set({
+    ...base,
+    ids: [...base.ids, 'ses_two'],
+    byId: { ...base.byId, ses_two: { id: 'ses_two', displayTitle: 'Two 会话', cwd: 'D:/work/two', updatedAt: Date.now() } },
+  });
+  const snapshot = workspaceSource.getSnapshot();
+  workspaceSource.set({
+    ...snapshot,
+    items: [...snapshot.items, { workspaceId: 'ws_two', path: 'D:/work/two', title: 'Two', sessionIds: ['ses_two'], createdAt: 2, updatedAt: 2 }],
+  });
+  await mount();
+  const headerButton = (title) => [...container.querySelectorAll('.dts-header .dts-iconbtn')].find((node) => node.getAttribute('title') === title);
+  await act(async () => headerButton('批量选择').dispatchEvent(new window.Event('click', { bubbles: true })));
+  await tick();
+  const toggle = (title) => find('.dts-row--session', title)
+    .querySelector('.dts-check input')
+    .dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+  await act(async () => {
+    toggle('会话 1');
+    toggle('Two 会话');
+  });
+  await tick();
+  const buttonByLabel = (label) => [...container.querySelectorAll('.dts-selectbar .dts-iconbtn')].find((node) => node.getAttribute('aria-label') === label);
+  assert.equal(buttonByLabel('移动到分组').disabled, true, 'a cross-workspace selection cannot be moved as one batch');
+  assert.equal(buttonByLabel('移动到分组').title, '所选会话来自多个工作区，不能一次移动分组');
+  await act(async () => toggle('Two 会话'));
+  await tick();
+  assert.equal(buttonByLabel('移动到分组').disabled, false, 'one workspace remains movable');
+});
+
 test('exiting selection mode clears the selection', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   await mount();
@@ -2121,6 +2265,40 @@ test('a name that is taken or illegal is refused in the field', async () => {
   await tick();
   assert.equal(hint(), null, 'a usable name clears the hint');
   assert.equal(createButton().disabled, false);
+});
+
+test('Enter cannot submit the same create dialog twice while the first request is in flight', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  let release;
+  responseOverrides[`${API}/topics/create`] = () => new Promise((resolve) => { release = resolve; });
+  await mount();
+  await openTopicCreateDialog();
+  const input = document.querySelector('.dts-dialog .dts-input');
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+  await act(async () => {
+    setter.call(input, '只创建一次');
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+  await tick();
+  const creates = () => calls.filter((call) => call.url.endsWith('/topics/create'));
+  await act(async () => {
+    for (let index = 0; index < 2; index += 1) {
+      input.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    }
+  });
+  await tick();
+  assert.equal(creates().length, 1, 'the synchronous busy gate drops the second Enter');
+  await act(async () => {
+    release({
+      ok: true,
+      result: {
+        revision: 5,
+        result: { topic: { id: 'tp_once', name: '只创建一次', emoji: '', order: 1, createdAt: 1 } },
+      },
+    });
+  });
+  await tick();
+  assert.equal(document.querySelector('.dts-dialog'), null, 'the successful request closes the dialog');
 });
 
 test('dragging a workspace row reorders the workspaces', async () => {
@@ -2578,7 +2756,7 @@ test('sessions inside 未分组 reorder against its own full set, not an empty b
   assert.deepEqual(titles, ['游离 B', '游离 A'], 'the rendered rows follow the saved order');
 });
 
-test('archived orphans stay out of the virtual 未分组 group', async () => {
+test('archived orphans get their own bucket under the virtual 未分组 group', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   const base = sessionSource.getSnapshot();
   sessionSource.set({
@@ -2592,8 +2770,9 @@ test('archived orphans stay out of the virtual 未分组 group', async () => {
   workspaceSource.set({ ...workspaceSource.getSnapshot(), archivedSessionIds: ['ses_orphan'] });
   window.localStorage.setItem('dsh-better-workspace:prefs:v1', JSON.stringify({ showArchived: true }));
   await mount();
-  assert.equal(find('.dts-row--group', '未分组'), undefined, 'archived orphans do not create a virtual workspace');
-  assert.equal(find('.dts-row--session', '归档孤儿'), undefined, 'the orphan is not smuggled into any tree');
+  assert.ok(find('.dts-row--group', '未分组'), 'an archived orphan still needs a home');
+  assert.ok(find('.dts-row--topic', '已归档'), 'it renders in an archived bucket');
+  assert.ok(find('.dts-row--session', '归档孤儿'), 'so it can be selected and unarchived');
 });
 
 test('dragging a workspace can drop just above the virtual 未分组 group', async () => {
@@ -3028,6 +3207,85 @@ test('a blocked delete offers a recheck instead of forcing a reopen', async () =
   assert.equal(previews, 2, 'the preview is re-read');
 });
 
+test('delete blockers are translated instead of leaking the host Chinese copy', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/delete/preview`] = () => ({
+    ok: true,
+    result: {
+      items: [{ sessionId: 'ses_1', blockers: [{ code: 'locked', severity: 'hard', message: '会话文件刚刚被写入,请稍后重试' }] }],
+      rootAvailable: true,
+      hardBlocked: true,
+      running: 0,
+      subagents: 0,
+      bytes: 0,
+    },
+  });
+  await mount();
+  document.documentElement.lang = 'en-US';
+  await tick(60);
+  const row = find('.dts-row--session', '会话 1');
+  await act(async () => {
+    row.querySelector('.dts-row__act').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')]
+      .find((node) => node.textContent.trim() === 'Delete forever')
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const dialog = document.querySelector('.dts-dialog');
+  assert.ok(dialog.textContent.includes('The session file was written moments ago'), dialog.textContent);
+  assert.ok(!dialog.textContent.includes('刚刚被写入'), 'the host text is not shown for a known code');
+});
+
+test('enabling the panel adopts the native workspace expansion once', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  const base = sessionSource.getSnapshot();
+  sessionSource.set({
+    ...base,
+    ids: [...base.ids, 'ses_stray'],
+    byId: {
+      ...base.byId,
+      ses_stray: { id: 'ses_stray', displayTitle: '游离会话', cwd: 'D:/elsewhere', updatedAt: 1_700_000_004_000, blank: false },
+    },
+  });
+  // The plugin's stored state is the opposite of the native list: the real workspace was
+  // expanded while 未分组 was collapsed.
+  const collapsedTopic = `${WORKSPACE}:${TOPIC}`;
+  window.localStorage.setItem('dsh-better-workspace:prefs:v1', JSON.stringify({
+    collapsedWorkspaces: ['__ungrouped__'],
+    collapsedTopics: [collapsedTopic],
+  }));
+  const nativeList = document.querySelector('[role="tree"]');
+  const nativeWorkspace = document.createElement('div');
+  nativeWorkspace.setAttribute('data-row-key', `workspace:${WORKSPACE}`);
+  nativeWorkspace.setAttribute('aria-expanded', 'false');
+  const nativeUngrouped = document.createElement('div');
+  nativeUngrouped.setAttribute('data-row-key', 'workspace:');
+  nativeUngrouped.setAttribute('aria-expanded', 'true');
+  nativeList.append(nativeWorkspace, nativeUngrouped);
+
+  await mount();
+  await tick();
+
+  assert.equal(find('.dts-row--group', 'One').getAttribute('aria-expanded'), 'false', 'the workspace follows the collapsed native row');
+  assert.equal(find('.dts-row--group', '未分组').getAttribute('aria-expanded'), 'true', 'the empty native key maps to the virtual bucket');
+  const saved = JSON.parse(window.localStorage.getItem('dsh-better-workspace:prefs:v1'));
+  assert.deepEqual(saved.collapsedWorkspaces, [WORKSPACE], 'the adopted state is persisted, replacing the opposite stored one');
+  assert.deepEqual(saved.collapsedTopics, [collapsedTopic], 'topic collapse is plugin-only and survives the adoption');
+
+  // Adoption is an activation step, not a two-way mirror: the plugin's own chevron owns the
+  // state from here, and the native row is left exactly as the host had it.
+  await act(async () => {
+    find('.dts-row--group', 'One').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  assert.equal(find('.dts-row--group', 'One').getAttribute('aria-expanded'), 'true', 'the plugin can still expand it');
+  assert.equal(nativeWorkspace.getAttribute('aria-expanded'), 'false', 'the covered native row is not rewritten');
+  assert.deepEqual(JSON.parse(window.localStorage.getItem('dsh-better-workspace:prefs:v1')).collapsedWorkspaces, [], 'and the plugin state follows its own chevron');
+});
+
 test('creating a group from the workspace menu expands, scrolls and highlights it', async () => {
   let created = false;
   responseOverrides[`${API}/state`] = () => {
@@ -3090,7 +3348,49 @@ test('the row menu offers the commands the panel can carry out itself', async ()
   assert.deepEqual(labels, ['置顶会话', '重命名', '分叉会话', '归档会话', '复制 Session ID', '移动到分组…', '永久删除'], labels.join('|'));
   const hints = [...menu.querySelectorAll('.dts-menu__hint')].map((node) => node.textContent.trim());
   assert.equal(hints.length, 3, 'rename / fork / archive carry the stock shortcut hints');
-  assert.equal(slotCalls.length, 0, 'the panel never renders another package\'s slots');
+});
+
+test('a session menu keeps its opening anchor when the hover-only trigger loses its box', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const row = find('.dts-row--session', '会话 0');
+  const trigger = row.querySelector('.dts-row__act');
+  await act(async () => {
+    row.dispatchEvent(new window.MouseEvent('mouseover', { bubbles: true, view: window }));
+  });
+  await tick(520);
+  assert.ok(document.querySelector('.dts-tip'), 'the row hover card is open first');
+  const box = { left: 200, top: 500, right: 228, bottom: 528, width: 28, height: 28, x: 200, y: 500, toJSON: () => ({}) };
+  trigger.getBoundingClientRect = () => box;
+  await act(async () => {
+    trigger.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const menu = document.querySelector('.dts-pop--menu');
+  assert.ok(menu, 'the popover opened');
+  assert.equal(document.querySelector('.dts-tip'), null, 'opening the menu dismisses the hover card like the stock browser');
+  await act(async () => {
+    find('.dts-row--session', '会话 1').dispatchEvent(new window.MouseEvent('mouseover', { bubbles: true, view: window }));
+  });
+  await tick(520);
+  assert.equal(document.querySelector('.dts-tip'), null, 'and a later hover cannot put a card back over the menu');
+  assert.equal(menu.style.top, '532px', 'it starts under the trigger');
+  assert.equal(menu.style.left, '200px', 'its left edge follows the trigger, like the native menu');
+  assert.equal(menu.classList.contains('dts-pop--auto'), true, 'it uses native max-content width');
+  assert.equal(getComputedStyle(menu).padding, '4px', 'the native menu surface padding');
+  const firstItem = menu.querySelector('.dts-menu__item');
+  assert.equal(getComputedStyle(firstItem).fontSize, '13px', 'native menu item type size');
+  assert.equal(getComputedStyle(firstItem).minHeight, '34px', 'native menu item height');
+
+  // The action strip is display:none unless its row is hovered or focus-within. Opening the
+  // menu moves focus into the popover, so moving the pointer away hides the trigger and its
+  // rect collapses to 0×0. A later publish must not drag the open menu to the viewport origin.
+  trigger.getBoundingClientRect = () => ({ left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, toJSON: () => ({}) });
+  sessionStatusSource.set(new Map([['ses_1', { running: true }]]));
+  await tick();
+
+  assert.equal(document.querySelector('.dts-pop--menu'), menu, 'the same popover stayed open');
+  assert.equal(menu.style.top, '532px', 'it keeps the anchor captured when it opened');
 });
 
 test('a permanent delete re-reads the host session list and leaves a deleted open session', async () => {
@@ -3661,6 +3961,28 @@ test('the batch result dialog names the sessions that are still running', async 
   assert.ok(dialog.textContent.includes('停止并归档'), 'the stop proposal is offered');
 });
 
+test('a row action cannot start a second batch while the first is still running', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  let archiveCalls = 0;
+  archiveImpl = async () => {
+    archiveCalls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  };
+  await mount();
+  const row = find('.dts-row--session', '会话 1');
+  const archiveButton = row.querySelectorAll('.dts-row__act')[1];
+  assert.equal(archiveButton.getAttribute('title'), '归档会话');
+  await act(async () => {
+    archiveButton.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  await act(async () => {
+    archiveButton.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick(80);
+  assert.equal(archiveCalls, 1, 'the second click is ignored while the first run is in flight');
+});
+
 /**
  * A hidden panel used to keep working: the two `return null`s sit after the hooks, so a
  * rail-collapsed overlay still held the session/status/schedule subscriptions, re-rendered on
@@ -3899,6 +4221,25 @@ test('a /state 404 retries instead of leaving the panel gone for the whole page'
   assert.equal(document.querySelector('[class*="regionArea"]').hasAttribute('inert'), true, 'and covers the region again');
 });
 
+test('a /state 5xx hands the native region back and retries', async () => {
+  let attempts = 0;
+  responseOverrides[`${API}/state`] = () => {
+    attempts += 1;
+    return attempts === 1
+      ? { ok: false, status: 500, error: 'storage boom', code: 'store-unreadable' }
+      : stateResult();
+  };
+  await mount();
+  assert.equal(find('.dts-overlay'), undefined, 'a 5xx must not cover the stock list with an empty panel');
+  assert.equal(document.querySelector('[class*="regionArea"]').hasAttribute('inert'), false, 'and the native region stays reachable');
+  assert.equal(attempts, 1, 'one attempt so far');
+
+  await tick(700);
+  assert.equal(attempts, 2, 'the bounded retry follows the transient 5xx');
+  assert.ok(find('.dts-overlay'), 'the panel recovers when the host answers');
+  assert.equal(document.querySelector('[class*="regionArea"]').hasAttribute('inert'), true);
+});
+
 test('activity promotion coalesces a burst into one commit instead of one per message', async () => {
   // Two sessions replying in parallel flip the "most recent leads" order on every message.
   // Committing each flip re-renders the whole tree and rewrites the prefs blob; the gate keeps
@@ -4021,6 +4362,35 @@ test('search commits once after a pause instead of on every keystroke', async ()
   } finally {
     storageProto.setItem = original;
   }
+});
+
+test('closing search before the debounce commits does not resurrect the query', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const searchButton = [...container.querySelectorAll('.dts-header .dts-iconbtn')]
+    .find((node) => node.getAttribute('aria-label') === '搜索会话');
+  await act(async () => {
+    searchButton.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  let input = document.querySelector('.dts-header__search input');
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+  await act(async () => {
+    setter.call(input, '会话 0');
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+  await act(async () => {
+    document.querySelector('.dts-header__search .dts-iconbtn').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  // The old timer would fire here and write the dismissed draft into prefs.
+  await tick(250);
+  await act(async () => {
+    searchButton.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  input = document.querySelector('.dts-header__search input');
+  assert.equal(input.value, '', 'the dismissed query is not restored');
+  assert.equal(container.querySelectorAll('.dts-row--session').length, 3, 'and the tree is not filtered by it');
 });
 
 test('the fork item is hidden when the peer may not call session/fork', async () => {

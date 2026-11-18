@@ -91,18 +91,27 @@ function summarize({ action, ok, failed, needsStop }) {
 export function mergeOutcomes(previous, next) {
   if (!previous) return next;
   const ok = [...new Set([...previous.ok, ...next.ok])];
+  const okSet = new Set(ok);
+  // A retry replaces the previous verdict for the ids it touched: stop-and-archive can turn a
+  // previous `failed` into `needsStop` (or the reverse). Applying the newer array last keeps the
+  // same id out of both lists — the result dialog renders them as separate rows and would
+  // otherwise show the same session twice and offer the same action again.
   const failedById = new Map();
-  for (const entry of [...previous.failed, ...next.failed]) {
-    if (!ok.includes(entry.id)) failedById.set(entry.id, entry);
-  }
-  const needsStop = [...new Set([...(previous.needsStop ?? []), ...(next.needsStop ?? [])])].filter((id) => !ok.includes(id));
+  for (const entry of previous.failed ?? []) if (!okSet.has(entry.id)) failedById.set(entry.id, entry);
+  for (const id of previous.needsStop ?? []) if (!okSet.has(id)) failedById.delete(id);
+  for (const entry of next.failed ?? []) if (!okSet.has(entry.id)) failedById.set(entry.id, entry);
+  for (const id of next.needsStop ?? []) if (!okSet.has(id)) failedById.delete(id);
+  const failed = [...failedById.values()];
+  const failedSet = new Set(failed.map((entry) => entry.id));
+  const needsStop = [...new Set([...(previous.needsStop ?? []), ...(next.needsStop ?? [])])]
+    .filter((id) => !okSet.has(id) && !failedSet.has(id));
   return {
     action: next.action ?? previous.action,
     ok,
-    failed: [...failedById.values()],
+    failed,
     needsStop,
     total: (previous.total ?? 0) + (next.total ?? 0),
     limited: Boolean(previous.limited || next.limited),
-    summary: summarize({ action: next.action ?? previous.action, ok, failed: [...failedById.values()], needsStop }),
+    summary: summarize({ action: next.action ?? previous.action, ok, failed, needsStop }),
   };
 }

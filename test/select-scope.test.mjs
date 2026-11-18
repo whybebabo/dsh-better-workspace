@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { REVEAL_LIMIT, selectableIds } from '../client/model.js';
+import { pruneSelectionForSection, REVEAL_LIMIT, selectableIds } from '../client/model.js';
 
 const rows = (n, blanks = []) => Array.from({ length: n }, (_, index) => ({
   id: `ses_${index}`,
@@ -53,6 +53,24 @@ test('the provisional New Session is never selectable', () => {
 test('an empty or missing section yields an empty scope', () => {
   assert.deepEqual(selectableIds({ rows: [] }), { visible: [], hidden: [] });
   assert.deepEqual(selectableIds(undefined), { visible: [], hidden: [] });
+});
+
+test('folding a revealed bucket drops selection entries it no longer renders', () => {
+  const section = { rows: rows(70) };
+  const selected = rows(70).map((row) => row.id);
+  assert.deepEqual(
+    pruneSelectionForSection(section, selected, { revealed: true }),
+    selected,
+    'expanded selection is untouched',
+  );
+  const folded = pruneSelectionForSection(section, selected, { revealed: false });
+  assert.equal(folded.length, REVEAL_LIMIT);
+  assert.deepEqual(folded, selected.slice(0, REVEAL_LIMIT), 'overflow ids are dropped');
+  assert.deepEqual(
+    pruneSelectionForSection(section, ['ses_outside', 'ses_69'], { revealed: false }),
+    ['ses_outside'],
+    'ids owned by other sections survive',
+  );
 });
 
 /**

@@ -84,6 +84,12 @@ export function createPanelStore(options = {}) {
     ready: false,
     loading: true,
     reachable: true,
+    /**
+     * The host row's own `enabled` switch, distinct from a transport failure. The panel uses it
+     * to re-arm activation-only work (adopting the native expansion) after the user disables and
+     * re-enables the plugin without a page reload.
+     */
+    hostEnabled: true,
     error: null,
     readOnly: false,
     warning: null,
@@ -235,6 +241,7 @@ export function createPanelStore(options = {}) {
           ready: false,
           loading: false,
           reachable: false,
+          hostEnabled: false,
           error: null,
           readOnly: false,
           warning: null,
@@ -249,6 +256,7 @@ export function createPanelStore(options = {}) {
         ready: true,
         loading: false,
         reachable: true,
+        hostEnabled: true,
         error: null,
         readOnly: Boolean(result.readOnly),
         warning: result.warning ?? null,
@@ -263,20 +271,20 @@ export function createPanelStore(options = {}) {
     } catch (error) {
       if (seq !== loadSeq || disposed || startedIn !== generation) return false;
       // A 404 (or an unparsable answer, e.g. the web server's SPA fallback) means the host half
-      // is not there. Keeping `ready` true would cover the stock list with an error banner and
-      // inert it, leaving the user no way back; release the region instead. An abort is our own
-      // timeout: treat it as "nothing answered" and enter the same bounded retry.
+      // is not there. A 5xx is also "the host cannot serve this document": covering the native
+      // list with an empty panel and an error banner would leave the user worse off than the
+      // stock UI. Both release the region and enter the same bounded retry; an abort is our own
+      // timeout and is treated as "nothing answered".
       const aborted = error?.name === 'AbortError';
       const missing = error instanceof ApiError && (error.status === 404 || error.code === 'bad-response');
-      const transport = missing || (error instanceof ApiError && error.code === 'network') || aborted;
+      const serverFailure = error instanceof ApiError && Number.isFinite(error.status) && error.status >= 500;
+      const transport = missing || serverFailure || (error instanceof ApiError && error.code === 'network') || aborted;
       patch({
-        ready: !missing,
+        ready: !missing && !serverFailure,
         loading: false,
         reachable: !transport,
         error: aborted ? t('state.unavailable') : error instanceof ApiError ? error.message : String(error),
       });
-      // Only the "nothing answered" cases are worth retrying: a 500 with a valid body still
-      // renders the panel (with its banner), so retrying it would only add requests.
       if (transport) scheduleRetry(startedIn);
       return false;
     } finally {
@@ -365,9 +373,9 @@ export function createPanelStore(options = {}) {
       patch({ busy: 'saving' });
       try {
         // Every write carries a timeout (see `api.request`). A timeout is *not* treated as a
-        // definite failure: the request may have landed, so the call rejects, the queue is
-        // released, and the banner asks the user to reload instead of silently claiming a
-        // result the panel cannot know.
+        // definite failure: the request may have landed, so the call rejects and the banner says
+        // the outcome is unknown. Re-read before the queue advances; if the write did land, the
+        // next queued mutation must carry its revision instead of being rejected as a conflict.
         const outcome = await invoker(state.revision, { timeoutMs: requestTimeoutMs });
         patch({ busy: null, revision: outcome.revision });
         await load();
@@ -378,9 +386,13 @@ export function createPanelStore(options = {}) {
         // 409 but means "the store is busy" — reporting it as a foreign edit sent users looking
         // for a window that did not exist.
         const conflict = error instanceof ApiError && error.code === 'revision-conflict';
-        // A read-only / storage failure is a *state* change, not just a message: reload so the
-        // banner reflects it. Conflicts reload too (another window moved the document on).
-        if (conflict || isStateFailure(error)) await load().catch(() => {});
+        // A timeout means the request may have landed even though the response did not. Re-read
+        // before releasing the queue: otherwise the next queued write carries the stale revision
+        // and is refused as a conflict, losing a user action that had nothing to do with another
+        // window. A read-only / storage failure is also a *state* change, not just a message, so
+        // reload for the banner too. Conflicts reload because another window moved the document.
+        const timedOut = error instanceof ApiError && error.code === 'timeout';
+        if (timedOut || conflict || isStateFailure(error)) await load().catch(() => {});
         patch({ error: conflict ? 'conflict' : describe(error) });
         if (conflict) throw Object.assign(error, { reloadHint: true });
         throw error;
