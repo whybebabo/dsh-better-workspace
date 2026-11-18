@@ -594,6 +594,23 @@ function buildPathIndex(byId) {
 }
 
 /**
+ * The text a query is matched against: exactly the labels the row and its group show.
+ *
+ * The session id is deliberately not part of it (a query would otherwise match every hex run of
+ * an id), and the group name is the *localized* one, so the English UI finds the default group by
+ * "Default" and not only by its stored Chinese name. Shared with `locateSessionPlan`, which has to
+ * answer "would the query in force hide this row?" without a second, drifting copy of the rule.
+ *
+ * @param {object} row - built row
+ * @param {{title?: string, path?: string}} [workspace] - the owning group
+ * @returns {string} lower-cased haystack
+ */
+function searchHaystack(row, workspace) {
+  const title = workspace?.title ?? row?.workspaceTitle ?? '';
+  return `${row?.title ?? ''} ${title} ${workspace?.path ?? ''} ${row?.topicName ?? ''}`.toLowerCase();
+}
+
+/**
  * @param {object} input
  * @param {Array} input.items - `useWorkspaces(s => s.items)`
  * @param {object} input.list - `useSessions(s => s)` snapshot
@@ -705,8 +722,7 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
       if (search) {
         // The visible labels are localized (`topicLabel`), so search matches what is on screen:
         // the English UI finds the default group by "Default", not only by its stored Chinese name.
-        const haystack = `${row.title} ${workspace.title} ${workspace.path} ${row.topicName ?? ''}`.toLowerCase();
-        if (!haystack.includes(search)) continue;
+        if (!searchHaystack(row, workspace).includes(search)) continue;
         if (matched >= SEARCH_RESULT_LIMIT) {
           truncated = true;
           break;
@@ -820,8 +836,8 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
           topicEmoji: '',
         });
         if (search) {
-          const haystack = `${row.title} ${row.workspaceTitle} ${defaultName}`.toLowerCase();
-          if (!haystack.includes(search)) continue;
+          // 未分组 has no path; its group label is the localized bucket name.
+          if (!searchHaystack(row, { title: t('group.ungrouped'), path: '' }).includes(search)) continue;
           if (matched >= SEARCH_RESULT_LIMIT) {
             truncated = true;
             break;
@@ -920,6 +936,149 @@ export function buildTree({ items, list, statuses, archivedIds, pinnedIds, topic
   pruneCache(rowCache, liveRowIds);
 
   return { groups, search, truncated, matched, currentSessionId: current, currentWorkspaceId: highlightedWorkspaceId };
+}
+
+/**
+ * The first row matching `id`, with everything a caller needs to point at it on screen.
+ *
+ * @param {Array} groups - tree groups
+ * @param {string} id - session id
+ * @returns {{group: object, section: object, row: object, rowIndex: number, workspaceId: string,
+ *   sectionKey: string}|null}
+ */
+function findSessionRow(groups, id) {
+  for (const group of groups ?? []) {
+    for (const section of group.sections ?? []) {
+      const rowIndex = section.rows.findIndex((row) => row.id === id);
+      if (rowIndex < 0) continue;
+      // Archived rows get their own section but are collapsed through the workspace-level list,
+      // which is exactly the composite key `sectionKey` (and the chevron) writes.
+      const sectionKey = section.kind === 'archived' ? `${group.workspaceId}:archived` : `${group.workspaceId}:${section.id}`;
+      return { group, section, row: section.rows[rowIndex], rowIndex, workspaceId: group.workspaceId, sectionKey };
+    }
+  }
+  return null;
+}
+
+/**
+ * Where the session the main view is showing lives in the tree, and what currently hides it.
+ *
+ * The panel could already land a freshly created *topic* in view, but nothing answered "where is
+ * the conversation open on the right?". The report behind this: the chat is open while its
+ * workspace — or its group — is folded on the left, so the row cannot be found without opening
+ * groups one by one. That fold is only one of the ways a row goes missing, so the plan names
+ * every one of them separately and lets the caller act on each.
+ *
+ * Membership is asked of the *unfiltered* projection: the rendered tree deliberately omits rows
+ * hidden by a query, by a workspace/topic filter or by the archived switch, which is what a
+ * "where is it?" question must see through. The plan is one extra `buildTree` with every display
+ * filter opened, compared against the preferences actually in force. That costs about one
+ * ordinary rebuild and runs only when the user asks for it; re-deriving membership, group and
+ * rank by hand here would be a second copy of `buildTree`'s rules to keep in sync forever.
+ *
+ * Two fields describe preferences rather than the screen: `collapsedWorkspace`/`collapsedSection`
+ * say what the preference document folds, and a search opens every bucket without touching them.
+ * `needsReveal` is about paging only. A session accounted by two workspaces renders twice; the
+ * plan reports the first row (the panel highlights every row with that id, the scroll picks the
+ * first).
+ *
+ * @param {object} input
+ * @param {object} input.tree - the projection the panel is rendering right now
+ * @param {Array} input.items - workspace records
+ * @param {object} input.list - session snapshot (`byId`, `current`)
+ * @param {object} input.prefs - preferences in force (`collapsedWorkspaces`, `collapsedTopics`, …)
+ * @param {string|null} [input.currentId] - session to locate; defaults to the tree's current one
+ * @returns {{found: boolean, reason?: 'no-current'|'unknown'|'subagent'|'absent',
+ *   sessionId: string|null, workspaceId?: string, sectionKey?: string, rowIndex?: number,
+ *   title?: string, archived?: boolean, collapsedWorkspace?: boolean, collapsedSection?: boolean,
+ *   needsReveal?: boolean, hiddenSearch?: boolean, hiddenFilter?: boolean,
+ *   hiddenArchived?: boolean, hiddenLimit?: boolean}}
+ */
+export function locateSessionPlan({ tree, items, list, statuses, archivedIds, pinnedIds, topicsOf, assignmentsOf, prefs, now, currentId = null }) {
+  const sessionId = currentId ?? tree?.currentSessionId ?? mainSessionId(list) ?? null;
+  if (!sessionId) return { found: false, reason: 'no-current', sessionId: null };
+  const session = list?.byId?.[sessionId];
+  if (!session) return { found: false, reason: 'unknown', sessionId };
+  // Subagent children are filtered out of every list on purpose (their parent leads to them);
+  // saying so is better than scrolling to nowhere.
+  if (session.origin === 'subagent') return { found: false, reason: 'subagent', sessionId };
+
+  const wide = buildTree({
+    items,
+    list,
+    statuses,
+    archivedIds,
+    pinnedIds,
+    topicsOf,
+    assignmentsOf,
+    now,
+    prefs: {
+      ...prefs,
+      workspaceFilter: null,
+      topicFilter: null,
+      topicFilterWorkspace: null,
+      showArchived: true,
+      collapsedWorkspaces: [],
+      collapsedTopics: [],
+    },
+    query: '',
+  });
+  const where = findSessionRow(wide.groups, sessionId);
+  if (!where) return { found: false, reason: 'absent', sessionId };
+
+  const live = findSessionRow(tree?.groups, sessionId);
+  const hidden = live === null;
+  const collapsedWorkspaces = toSet(prefs?.collapsedWorkspaces);
+  const collapsedTopics = toSet(prefs?.collapsedTopics);
+  const revealed = toSet(prefs?.revealedBuckets);
+  const query = String(tree?.search ?? '');
+  const workspaceFilter = prefs?.workspaceFilter ?? null;
+  const topicFilter = prefs?.topicFilter ?? null;
+  // Each reason is attributed on its own: clearing a filter that was not hiding the row (or
+  // switching 已归档 on for an unarchived one) would rewrite a choice the user did make.
+  const matchesQuery = Boolean(query) && searchHaystack(where.row, where.group).includes(query);
+  const hiddenSearch = hidden && Boolean(query) && !matchesQuery;
+  // The tree scopes a topic filter to exactly one workspace (`topicOwner ?? workspaceFilter`), so
+  // the attribution has to compare against that scope, not just the filter id: a document that
+  // carries `topicFilter` alone (written before the pairing existed) falls back to the first
+  // workspace that owns the id, and rows elsewhere are hidden by that scope.
+  const topicOwner = topicFilter
+    ? (prefs?.topicFilterWorkspace
+      ?? workspaceFilter
+      ?? (items ?? []).find((workspace) => (topicsOf?.(workspace?.workspaceId) ?? []).some((topic) => topic?.id === topicFilter))?.workspaceId
+      ?? null)
+    : null;
+  const scopeId = topicOwner ?? workspaceFilter;
+  const hiddenFilter = hidden && ((Boolean(scopeId) && where.workspaceId !== scopeId)
+    || (Boolean(topicFilter) && where.row.topicId !== topicFilter));
+  const hiddenArchived = hidden && where.row.archived === true && !prefs?.showArchived;
+  return {
+    found: true,
+    sessionId,
+    title: where.row.title ?? '',
+    workspaceId: where.workspaceId,
+    sectionKey: where.sectionKey,
+    rowIndex: where.rowIndex,
+    archived: where.row.archived === true,
+    collapsedWorkspace: collapsedWorkspaces.has(where.workspaceId),
+    collapsedSection: where.section.kind === 'archived'
+      ? collapsedWorkspaces.has(where.sectionKey)
+      : collapsedTopics.has(where.sectionKey),
+    // The rendered bucket pages from `REVEAL_LIMIT`, so the index that decides "is the row past
+    // the first page?" has to be the index in the tree that is actually shown. The unfiltered
+    // index is only the fallback for a hidden row: after the command clears what hides it, that
+    // projection is the one that renders. Using the unfiltered index for a row already on screen
+    // persisted a reveal the user never asked for.
+    needsReveal: (live ? live.rowIndex : where.rowIndex) >= REVEAL_LIMIT && !revealed.has(where.sectionKey),
+    hiddenSearch,
+    hiddenFilter,
+    hiddenArchived,
+    // A search that hit the result cap drops every match after the 100th, and the row's own
+    // haystack still matches the query — dropping the query is the only way to bring it back.
+    // Without this reason the command reported success and then did nothing at all.
+    hiddenLimit: hidden && tree?.truncated === true && matchesQuery
+      && !hiddenSearch && !hiddenFilter && !hiddenArchived,
+  };
 }
 
 /**

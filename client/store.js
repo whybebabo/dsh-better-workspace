@@ -38,6 +38,12 @@ const DEFAULT_PREFS = {
    */
   revealedBuckets: [],
   selectMode: false,
+  /**
+   * Bumped by a command that takes the view over (locate) so the header discards an uncommitted
+   * search draft instead of committing it 180 ms later. A counter, not a boolean: every bump must
+   * be a new value to re-run the effect that clears the draft.
+   */
+  searchResetAt: 0,
   // Manual drag order: ids the user placed, everything else keeps the host's order.
   workspaceOrder: [],
   sessionOrder: {},
@@ -53,6 +59,15 @@ function readPrefs() {
       ...parsed,
       // Selection is a transient mode, not a preference: a reload must never land in it.
       selectMode: false,
+      // Coerce each stored value to its expected shape: a hand-edited or older document can carry
+      // `"false"` (truthy) for a switch or a number where a query belongs, and spreading those
+      // made the panel filter by a string it could not render.
+      searchOpen: parsed?.searchOpen === true,
+      search: typeof parsed?.search === 'string' ? parsed.search : '',
+      showArchived: parsed?.showArchived === true,
+      workspaceFilter: typeof parsed?.workspaceFilter === 'string' ? parsed.workspaceFilter : null,
+      topicFilter: typeof parsed?.topicFilter === 'string' ? parsed.topicFilter : null,
+      searchResetAt: Number.isFinite(parsed?.searchResetAt) ? parsed.searchResetAt : 0,
       collapsedWorkspaces: Array.isArray(parsed?.collapsedWorkspaces) ? parsed.collapsedWorkspaces : [],
       collapsedTopics: Array.isArray(parsed?.collapsedTopics) ? parsed.collapsedTopics : [],
       revealedBuckets: Array.isArray(parsed?.revealedBuckets) ? parsed.revealedBuckets : [],

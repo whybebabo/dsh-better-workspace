@@ -434,7 +434,7 @@ function SectionHeader({ section, group, selectMode, selectedIds, onToggleCollap
   );
 }
 
-const Section = React.memo(function Section({ section, group, schedules, selectMode, selectedIds, query, revealed, highlighted, onToggleReveal, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleWorkspaceCollapse, onToggleTopicCollapse, onSelectMany, onFilter, onNewSessionInTopic, onDropSessions, onRename, onDropOnRow, reorder, focusing = false, collapseDelay = 0 }) {
+const Section = React.memo(function Section({ section, group, schedules, selectMode, selectedIds, query, revealed, highlighted, locatedId = null, onToggleReveal, onOpenSession, onToggleSelection, onMenu, onArchive, onPin, onRenameSession, onHint, onHintEnd, onToggleWorkspaceCollapse, onToggleTopicCollapse, onSelectMany, onFilter, onNewSessionInTopic, onDropSessions, onRename, onDropOnRow, reorder, focusing = false, collapseDelay = 0 }) {
   // Selecting is about existing records; hide the provisional New Session placeholder while
   // the batch toolbar is active instead of offering a checkbox that cannot do anything.
   const rows = selectMode ? section.rows.filter((row) => !row.blank) : section.rows;
@@ -477,6 +477,8 @@ const Section = React.memo(function Section({ section, group, schedules, selectM
           query={query}
           selectMode={selectMode}
           selected={selectedIds.has(row.id)}
+          // The ⋯ menu's "locate" mark: at most one row per build, so the memo still skips the rest.
+          located={row.id === locatedId}
           onOpen={onOpenSession}
           onToggleSelect={onToggleSelection}
           onDragStart={onRowDragStart}
@@ -539,6 +541,7 @@ export function TopicTree({
   tree,
   prefs,
   reveal,
+  located,
   selection,
   schedules,
   onOpenSession,
@@ -724,6 +727,7 @@ export function TopicTree({
                         selectedIds={selectedIds}
                         revealed={revealedBuckets.has(sectionKey(group, section))}
                         highlighted={highlighted}
+                        locatedId={located}
                         focusing={focusSection}
                         collapseDelay={sectionDelay}
                         onToggleReveal={onToggleReveal}

@@ -23,6 +23,7 @@ const DELETE_CODE_TEXT = {
   'root-unavailable': 'delete.code.rootUnavailable',
   running: 'delete.code.running',
   'not-verified': 'delete.code.notVerified',
+  'not-found': 'delete.code.notFound',
   subagent: 'delete.code.subagent',
   'orphan-subagent': 'delete.code.orphanSubagent',
   locked: 'delete.code.locked',
@@ -111,7 +112,7 @@ export function BatchResultDialog({ outcome, busy, progress, onClose, onRetryFai
  * Permanent delete: preview from the host, explicit acknowledgement, then per-item results.
  * The confirm button stays armed only while the preview reported something deletable.
  */
-export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
+export function DeleteSessionsDialog({ ids, titles, schedules = null, onClose, onDone }) {
   const [phase, setPhase] = React.useState('preview');
   const [preview, setPreview] = React.useState(null);
   const [error, setError] = React.useState(null);
@@ -142,6 +143,16 @@ export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
 
   const deletable = (preview?.items ?? []).filter((item) => !item.blockers.some((blocker) => blocker.severity === 'hard'));
   const blocked = (preview?.items ?? []).filter((item) => item.blockers.some((blocker) => blocker.severity === 'hard'));
+  // Permanently deleting a session removes its artifacts, but the host's scheduled tasks are a
+  // separate record: they are only stopped by archiving, so they keep firing at a session that
+  // no longer exists. Nothing on this side can cancel them, so the dialog says so before the
+  // acknowledgement instead of leaving the user to discover it on the next occurrence.
+  // The panel hands over `schedule.indexSchedules`' `Map`; tolerate an object too.
+  const taskCount = (id) => {
+    const entry = typeof schedules?.get === 'function' ? schedules.get(id) : schedules?.[id];
+    return Array.isArray(entry) ? entry.length : 0;
+  };
+  const scheduled = ids.reduce((sum, id) => sum + taskCount(id), 0);
 
   const execute = async (subset) => {
     setBusy(true);
@@ -246,6 +257,12 @@ export function DeleteSessionsDialog({ ids, titles, onClose, onDone }) {
             <Icon name="warning" />
             <span>{t('delete.warning')}</span>
           </p>
+          {scheduled > 0 ? (
+            <p className="dts-warning">
+              <Icon name="clock" />
+              <span>{t('delete.scheduleWarning', { n: scheduled })}</span>
+            </p>
+          ) : null}
           {blocked.length > 0 ? (
             <>
               <p className="dts-dialog__hint">{t('delete.blocked', { n: blocked.length })}</p>

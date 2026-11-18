@@ -23,6 +23,9 @@ const HOST_ICONS = {
   select: 'IconChecklistOutlineRegular',
   plus: 'IconPlusOutlineRegular',
   ellipsis: 'IconEllipsisOutlineRegular',
+  // No host glyph reads as "locate": the crosshair below is drawn at the same weight as the
+  // rest of the fallbacks instead of borrowing a magnifier the search button already uses.
+  locate: null,
   close: 'IconCloseOutlineRegular',
   check: 'IconCheckOutlineRegular',
   chevronDown: 'IconChevronDownOutlineRegular',
@@ -92,6 +95,7 @@ const FALLBACK_PATHS = {
   fork: ['M2.5 8h4.2c1 0 1.6-.3 2.2-.9L11.6 4.4', 'M2.5 8h4.2c1 0 1.6.3 2.2.9l2.7 2.7'],
   ellipsis: ['M3.2 8h.01', 'M8 8h.01', 'M12.8 8h.01'],
   caret: ['M5.5 3 11 8l-5.5 5Z'],
+  locate: ['M8 2.4a5.6 5.6 0 1 0 0 11.2A5.6 5.6 0 0 0 8 2.4Z', 'M8 1v2.4', 'M8 12.6V15', 'M1 8h2.4', 'M12.6 8H15'],
   clock: ['M8 1.8a6.2 6.2 0 1 0 0 12.4A6.2 6.2 0 0 0 8 1.8Z', 'M8 4.6V8l2.4 1.4'],
 };
 
@@ -104,6 +108,20 @@ export function useLanguage() {
 
 export function cx(...parts) {
   return parts.filter(Boolean).join(' ');
+}
+
+/**
+ * Focus fallback for a dialog opened from a surface that unmounts with it.
+ *
+ * A dialog opened from a `…` menu captures the menu item as the element to focus on close. That
+ * item is gone by the time the dialog closes, so `isConnected` is false and focus fell to
+ * `<body>` — a keyboard user's next Tab restarted from the top of the page. The panel supplies
+ * the durable anchor (the row/group the menu belonged to) through this scope.
+ */
+const FocusReturnContext = React.createContext(null);
+
+export function FocusReturnScope({ value, children }) {
+  return <FocusReturnContext.Provider value={value}>{children}</FocusReturnContext.Provider>;
 }
 
 export function useEscape(active, onEscape) {
@@ -291,7 +309,17 @@ export function Popover({ anchor, anchorEl, fallbackRect = null, onClose, childr
   const triggerRef = React.useRef(trigger);
   triggerRef.current = trigger;
   useOutsidePointer(true, [ref, triggerRef], onClose);
-  useEscape(true, onClose);
+  // Escape closes and hands focus back to the trigger, exactly like a native menu. The outside
+  // -pointer path deliberately keeps focus where the user clicked instead.
+  const closeByEscape = () => {
+    onClose?.();
+    // Focus the row the menu belonged to (its action strip is `display:none` until the row has
+    // focus-within, so focusing the hidden button itself is a no-op); otherwise the trigger.
+    const node = triggerRef.current;
+    const target = (node?.closest?.('[role="treeitem"]') ?? node);
+    if (target?.isConnected && typeof target.focus === 'function') target.focus({ preventScroll: true });
+  };
+  useEscape(true, closeByEscape);
   // A popover is rendered after the tree in DOM order. Without moving focus, Tab has to walk
   // through every row (and every row action) before reaching the first item. Focus the first
   // control once; do not restore on unmount — an outside click should keep focus where the user
@@ -361,6 +389,9 @@ export function MenuItem({ children, onSelect, danger = false, disabled = false,
 
 export function Dialog({ title, description, children, footer, onClose, width = 420, className }) {
   const ref = React.useRef(null);
+  // The durable anchor the panel supplies for a dialog that was opened from a menu (see
+  // `FocusReturnScope`). Read once: the dialog owns one open/close cycle.
+  const fallbackFocus = React.useContext(FocusReturnContext);
   useEscape(true, onClose);
   // Captured during the first render, i.e. before React's autoFocus moves focus into the
   // dialog. Reading it in a passive effect would capture the dialog's own input, so closing
@@ -373,8 +404,14 @@ export function Dialog({ title, description, children, footer, onClose, width = 
     const previous = restoreRef.current;
     return () => {
       if (timer) clearTimeout(timer);
-      if (previous && previous.isConnected && typeof previous.focus === 'function') {
-        previous.focus({ preventScroll: true });
+      // A row/group anchor survives the dialog; the captured element often does not (a menu item
+      // unmounts with its menu), and focusing a detached node is a no-op that leaves focus on
+      // `<body>`.
+      const target = previous && previous.isConnected
+        ? previous
+        : (fallbackFocus && fallbackFocus.isConnected ? fallbackFocus : null);
+      if (target && typeof target.focus === 'function') {
+        target.focus({ preventScroll: true });
       }
     };
   }, []);

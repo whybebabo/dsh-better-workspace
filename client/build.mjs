@@ -14,7 +14,13 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 const outDir = join(root, 'lib');
-const bundlePath = join(outDir, '.client.bundle.cjs');
+/**
+ * esbuild's intermediate file. It must stay outside `lib/`: `package.json` publishes that whole
+ * directory, so an interrupted build would otherwise ship the staging bundle (it is removed on
+ * success, but a killed build is not a success). `.tmp/` is gitignored and not published.
+ */
+const stagingDir = join(root, '.tmp');
+const bundlePath = join(stagingDir, '.client.bundle.cjs');
 const finalPath = join(outDir, 'client.js');
 
 /**
@@ -52,6 +58,7 @@ const external = [
   '@deepseek-ai/cordis',
 ];
 
+if (!existsSync(stagingDir)) mkdirSync(stagingDir, { recursive: true });
 await build({
   absWorkingDir: root,
   entryPoints: ['client/index.jsx'],

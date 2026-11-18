@@ -4,8 +4,8 @@ node_modules/
 .DS_Store
 Thumbs.db
 
-# build leftovers: client/build.mjs uses this as a staging file and removes it on success,
-# but a failed/interrupted build would otherwise leave it inside the published `lib/`
+# build leftovers: client/build.mjs stages inside .tmp/ now, but an older checkout may still
+# have the file here; a failed/interrupted build must never leave it inside the published `lib/`
 lib/.client.bundle.cjs
 
 # packaging / local state

@@ -140,15 +140,16 @@ export function Header({
   React.useEffect(() => {
     // Closing search clears the draft as well as the committed query. Without this, a timer
     // armed just before the close still writes the old text into `prefs.search`; reopening
-    // search then restores a query the user had already dismissed.
+    // search then restores a query the user had already dismissed. `searchResetAt` is bumped by
+    // commands that take the view over (locate) and discards a draft the user had not committed.
     setSearchDraft(prefs.searchOpen ? (prefs.search ?? '') : '');
-  }, [prefs.search, prefs.searchOpen]);
+  }, [prefs.search, prefs.searchOpen, prefs.searchResetAt]);
   React.useEffect(() => {
     const committed = prefs.search ?? '';
     if (!prefs.searchOpen || searchDraft === committed) return undefined;
     const timer = setTimeout(() => setPrefsRef.current({ search: searchDraft }), 180);
     return () => clearTimeout(timer);
-  }, [searchDraft, prefs.search, prefs.searchOpen]);
+  }, [searchDraft, prefs.search, prefs.searchOpen, prefs.searchResetAt]);
   const total = options.reduce((sum, option) => sum + (option.visibleCount ?? 0), 0);
   const filtered = Boolean(prefs.workspaceFilter) || Boolean(prefs.topicFilter);
 

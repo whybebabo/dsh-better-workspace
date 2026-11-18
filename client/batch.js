@@ -18,7 +18,10 @@ function looksActive(error) {
 }
 
 function describe(error) {
-  const message = String(error?.message ?? error ?? '未知错误');
+  // `??` keeps an empty message, which used to render a result row with no detail at all;
+  // trim first and fall back to a localized phrase.
+  const raw = error?.message ?? error;
+  const message = String(raw ?? '').trim() || t('error.unknown');
   return message.length > 220 ? `${message.slice(0, 220)}…` : message;
 }
 
@@ -43,7 +46,7 @@ export async function runSessionAction({ action, ids, actions, options, onProgre
     pin: (id) => actions.pinSession(id),
     unpin: (id) => actions.unpinSession(id),
   }[action];
-  if (!dispatch) throw new Error(`未知的批量动作: ${action}`);
+  if (!dispatch) throw new Error(t('error.unknownBatchAction', { action }));
 
   const ok = [];
   const failed = [];

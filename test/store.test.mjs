@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, writeFile, utimes, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { createTopicStore, StoreError, validateSessionIds, normalizeTopicName, normalizeTopicEmoji, pickTopicEmoji, TOPIC_EMOJIS, DEFAULT_TOPIC_ID } from '../lib/store.js';
+import { isAbsolute, join } from 'node:path';
+import { createTopicStore, resolveDshHome, StoreError, validateSessionIds, normalizeTopicName, normalizeTopicEmoji, pickTopicEmoji, TOPIC_EMOJIS, DEFAULT_TOPIC_ID } from '../lib/store.js';
 
 async function freshStore(options = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-topic-store-'));
@@ -734,4 +734,47 @@ test('a stale lock this process failed to unlink is reclaimed instead of blockin
 
   const written = await store.createTopic({ workspaceId: 'ws_a', name: 'A', expectedRevision: 0 });
   assert.equal(written.revision, 1);
+});
+
+test('a relative storageHome is refused instead of resolving under the process CWD', () => {
+  assert.equal(resolveDshHome('/absolute/home'), '/absolute/home');
+  const fallback = resolveDshHome('relative/path');
+  assert.equal(isAbsolute(fallback), true, 'a relative value falls back to an absolute default');
+  assert.notEqual(fallback, 'relative/path');
+});
+
+test('a staging file left by a crashed writer is collected on the next write', async () => {
+  const { store } = await freshStore();
+  await mkdir(store.dir, { recursive: true });
+  const stale = join(store.dir, 'topics.v1.json.999.abcdef.tmp');
+  await writeFile(stale, 'half a document', 'utf8');
+  const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  await utimes(stale, old, old);
+
+  await store.createTopic({ workspaceId: 'ws_a', name: 'Alpha', expectedRevision: 0 });
+  await assert.rejects(readFile(stale, 'utf8'), /ENOENT/, 'the leftover was removed');
+});
+
+test('the sweep leaves a staging file a live writer could still own', async () => {
+  const { store } = await freshStore();
+  await mkdir(store.dir, { recursive: true });
+  const fresh = join(store.dir, 'topics.v1.json.1.aabbcc.tmp');
+  await writeFile(fresh, 'in flight', 'utf8');
+
+  await store.createTopic({ workspaceId: 'ws_a', name: 'Alpha', expectedRevision: 0 });
+  assert.equal(await readFile(fresh, 'utf8'), 'in flight', 'a seconds-old file is never touched');
+});
+
+test('reordering refuses more ids than the workspace has topics', async () => {
+  const { store } = await freshStore();
+  const created = await store.createTopic({ workspaceId: 'ws_a', name: 'Alpha', expectedRevision: 0 });
+  const createdId = created.result.topic.id;
+  await assert.rejects(
+    () => store.reorderTopics({
+      workspaceId: 'ws_a',
+      topicIds: [DEFAULT_TOPIC_ID, createdId, 'tp_extra'],
+      expectedRevision: created.revision,
+    }),
+    (error) => error.code === 'bad-topic-ids',
+  );
 });

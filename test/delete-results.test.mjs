@@ -57,3 +57,33 @@ test('a cleanup warning survives a retry that no longer reports it', () => {
   const retry = { items: [item('ses_a', 'deleted')], summary: { deleted: 1, skipped: 0, failed: 0, partial: 0, subagents: 0 } };
   assert.deepEqual(mergeDeleteOutcomes(first, retry).assignmentCleanup, { failed: true, error: 'sidecar busy' });
 });
+test('a retried child the scan can no longer find resolves its partial parent', () => {
+  // The host reports `skipped` + `not-found` when the id has no artifact at all — the retry of a
+  // cascaded child after it is gone. Treating that as "still failed" kept the retry button alive
+  // and re-reported a child that no longer existed.
+  const first = {
+    items: [item('ses_parent', 'partial', { subagentsFailed: ['ses_child', 'ses_other'] })],
+    summary: { deleted: 0, skipped: 0, failed: 0, partial: 1, subagents: 0 },
+  };
+  const retry = {
+    items: [item('ses_child', 'skipped', { code: 'not-found' })],
+    summary: { deleted: 0, skipped: 1, failed: 0, partial: 0, subagents: 0 },
+  };
+  const merged = mergeDeleteOutcomes(first, retry);
+  const parent = merged.items.find((entry) => entry.sessionId === 'ses_parent');
+  assert.deepEqual(parent.subagentsFailed, ['ses_other'], 'only the child that is really still there remains');
+  assert.equal(parent.status, 'partial');
+});
+
+test('a child skipped because it is running is not treated as deleted', () => {
+  const first = {
+    items: [item('ses_parent', 'partial', { subagentsFailed: ['ses_child'] })],
+    summary: { deleted: 0, skipped: 0, failed: 0, partial: 1, subagents: 0 },
+  };
+  const retry = {
+    items: [item('ses_child', 'skipped', { code: 'running' })],
+    summary: { deleted: 0, skipped: 1, failed: 0, partial: 0, subagents: 0 },
+  };
+  const merged = mergeDeleteOutcomes(first, retry);
+  assert.deepEqual(merged.items.find((entry) => entry.sessionId === 'ses_parent').subagentsFailed, ['ses_child']);
+});

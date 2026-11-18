@@ -10,11 +10,11 @@ import * as React from 'react';
 import { createPortal } from 'react-dom';
 import { observeComposerSlot, resolveComposerWorkspace } from './composer.js';
 import { observeWorkspaceRegion, readNativeWorkspaceExpansion, setRegionCovered, setRegionInert, watchRegionModals } from './geometry.js';
-import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, mainSessionId, moveWithin, orderByManual, pendingStatusLabel, promoteSessionOrder, pruneSelectionForSection, samePath, selectableIds, topicLabel, topicOfSession, ungroupedSessionIds, UNGROUPED_WORKSPACE_ID, workspaceSessionIds } from './model.js';
+import { buildTree, buildWorkspaceOptions, DEFAULT_TOPIC_ID, locateSessionPlan, mainSessionId, moveWithin, orderByManual, pendingStatusLabel, promoteSessionOrder, pruneSelectionForSection, samePath, selectableIds, topicLabel, topicOfSession, ungroupedSessionIds, UNGROUPED_WORKSPACE_ID, workspaceSessionIds } from './model.js';
 import { createPanelStore } from './store.js';
 import { beginReorder, currentDrag, endDrag, readDragPayload, reorderVerdict, sessionReorderVerdict, writeReorderPayload } from './dnd.js';
 import { runSessionAction, mergeOutcomes, BATCH_LIMIT } from './batch.js';
-import { cx, Popover, MenuItem, Icon, StateMark, useLanguage, TopicMark } from './widgets.jsx';
+import { cx, Popover, MenuItem, Icon, StateMark, useLanguage, TopicMark, FocusReturnScope } from './widgets.jsx';
 import { Header } from './header.jsx';
 import { sectionKey, TopicTree } from './topic-tree.jsx';
 import { BatchBar } from './batch-bar.jsx';
@@ -30,6 +30,15 @@ import { shortcutHint } from './shortcut-hints.js';
  * stylesheet as `--dts-reveal-ms`, so the fade and the class removal share one clock.
  */
 const REVEAL_HIGHLIGHT_MS = 1600;
+
+/**
+ * How long a located session row keeps its tint.
+ *
+ * Longer than the topic landing aid on purpose: that one confirms a row the user just created,
+ * while this one has to be found — possibly after the list scrolled a long way — so the eye needs
+ * a moment after the scroll settles to catch it.
+ */
+const LOCATE_HIGHLIGHT_MS = 2400;
 
 /**
  * The tree projection is only rendered when the panel is on screen. A rail-collapsed panel
@@ -166,6 +175,14 @@ export function OverlayPanel({ actions, schedules }) {
     setHint(next);
   }, []);
   const [now, setNow] = React.useState(() => Date.now());
+  // A hover card that was up when a dialog opens would either float over the scrim or point at a
+  // row the dialog is about to change: drop it as soon as the dialog owns the screen.
+  React.useEffect(() => {
+    if (dialog) {
+      setHint(null);
+      setTipTop(null);
+    }
+  }, [dialog]);
   /**
    * Bumped whenever a topic is armed so the blank-session watcher evaluates immediately.
    * A host that reuses an already-current blank may publish no new session list, and the
@@ -179,6 +196,15 @@ export function OverlayPanel({ actions, schedules }) {
    * selection.
    */
   const [revealedTopic, setRevealedTopic] = React.useState(null);
+  /**
+   * The session the ⋯ menu just located, as `{ id }` — a fresh object per request, so asking
+   * again for the same row re-runs the scroll instead of being dropped as an unchanged state.
+   */
+  const [located, setLocated] = React.useState(null);
+  /** Frame/highlight timers for the locate landing aid. They must die with the overlay. */
+  const locateRef = React.useRef({ frame: null, timer: null });
+  /** The panel root. Scrolling resolves rows inside this instance, not the first one in the page. */
+  const overlayRef = React.useRef(null);
   /** Transient drag source while a workspace/topic is dragged; never persisted. */
   const [dragging, setDragging] = React.useState(null);
   const tipRef = React.useRef(null);
@@ -352,6 +378,11 @@ export function OverlayPanel({ actions, schedules }) {
   React.useEffect(() => () => {
     clearTimeout(timersRef.current.toast);
     clearTimeout(timersRef.current.arm);
+    clearTimeout(locateRef.current.timer);
+    if (locateRef.current.frame !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(locateRef.current.frame);
+    }
+    locateRef.current.frame = null;
   }, []);
 
   React.useEffect(() => {
@@ -753,7 +784,7 @@ export function OverlayPanel({ actions, schedules }) {
   React.useEffect(() => {
     if (!revealedTopic) return undefined;
     const rowOf = () => {
-      const scope = typeof document === 'undefined' ? null : document.querySelector('.dts-overlay');
+      const scope = overlayRef.current;
       if (!scope) return null;
       return [...scope.querySelectorAll('[data-dts-topic]')].find(
         (node) => node.dataset.dtsTopic === revealedTopic.topicId && node.dataset.dtsWorkspace === revealedTopic.workspaceId,
@@ -778,6 +809,48 @@ export function OverlayPanel({ actions, schedules }) {
       clearTimeout(timer);
     };
   }, [revealedTopic]);
+
+  /**
+   * Scrolls the row the ⋯ menu just located into view, and hands it keyboard focus.
+   *
+   * The row is already in the projection when this runs — the command rewrote the collapse
+   * preferences in the same click — but the *geometry* is not final: an opened group/topic grows
+   * over ~200ms (the CSS grid row), so a scroll computed on the first frame lands where the row
+   * used to be. Hence a few re-scrolls while the layout settles; `block: 'nearest'` is a no-op
+   * once the row is fully in view, so the retries never fight the user scrolling by hand.
+   * The first pass centres the row, because "where is my session?" is answered better by context
+   * around it than by a row clipped at the edge.
+   *
+   * The menu item that ran the command unmounts with the menu, so without this the focus falls
+   * to `<body>`: a keyboard user's next Tab would restart from the top of the page. The row is
+   * focused only when nothing else holds focus — an outside click or a field the user is typing
+   * in keeps it.
+   */
+  React.useEffect(() => {
+    if (!located) return undefined;
+    const scope = overlayRef.current;
+    if (!scope) return undefined;
+    const rowOf = () => {
+      for (const row of scope.querySelectorAll('[data-dts-motion="session"]')) {
+        if (row.dataset.dtsKey === located.id) return row;
+      }
+      return null;
+    };
+    const settle = (block) => {
+      const row = rowOf();
+      if (row && typeof row.scrollIntoView === 'function') row.scrollIntoView({ block });
+    };
+    // An invisible live region announces the landing; focus is what makes the next keystroke
+    // act on the row instead of the page.
+    const active = typeof document === 'undefined' ? null : document.activeElement;
+    const row = rowOf();
+    if (row && typeof row.focus === 'function' && (active === null || active === document.body)) {
+      row.focus({ preventScroll: true });
+    }
+    settle('center');
+    const timers = [140, 280, 460].map((delay) => setTimeout(() => settle('nearest'), delay));
+    return () => timers.forEach(clearTimeout);
+  }, [located]);
 
   /**
    * Expands a workspace/topic and arms the one-shot landing aid. Only collapsed entries are
@@ -821,6 +894,29 @@ export function OverlayPanel({ actions, schedules }) {
     clearTimeout(timersRef.current.toast);
     setToast({ message, tone });
     timersRef.current.toast = setTimeout(() => setToast(null), 3200);
+  };
+
+  /**
+   * Arms the locate landing aid: the tint, the scroll, and the timer that retires both.
+   *
+   * The mark is dropped for one frame first. That restarts the fade on a repeat request (a class
+   * that never leaves the DOM keeps its finished animation), and the fresh object is also what
+   * makes the scroll effect re-run for a row it already scrolled to.
+   */
+  const landOnSession = (sessionId, title) => {
+    clearTimeout(locateRef.current.timer);
+    if (locateRef.current.frame !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(locateRef.current.frame);
+    }
+    locateRef.current.frame = null;
+    const arm = () => {
+      locateRef.current.frame = null;
+      setLocated({ id: sessionId, title: title ?? '' });
+      locateRef.current.timer = setTimeout(() => setLocated(null), LOCATE_HIGHLIGHT_MS);
+    };
+    setLocated(null);
+    if (typeof requestAnimationFrame === 'function') locateRef.current.frame = requestAnimationFrame(arm);
+    else arm();
   };
 
   const setPrefs = (changes) => {
@@ -936,13 +1032,19 @@ export function OverlayPanel({ actions, schedules }) {
    */
   React.useEffect(() => {
     if (!dragging || dragging.level !== 'session') return undefined;
-    if (list.byId?.[dragging.id]) return undefined;
+    // The source row disappears in two ways: another window deletes the session (`byId` loses it),
+    // or an archive/filter drops it from the rendered tree while `byId` keeps it. Checking only
+    // `byId` left the focus fold and the promotion gate latched for the rest of the page whenever
+    // the row was merely filtered out.
+    const present = Boolean(list.byId?.[dragging.id])
+      && tree.groups.some((group) => group.sections.some((section) => section.rows.some((row) => row.id === dragging.id)));
+    if (present) return undefined;
     endDrag();
     setDropHint(null);
     setDragging(null);
     releasePromotion();
     return undefined;
-  }, [dragging, list, releasePromotion]);
+  }, [dragging, list, tree, releasePromotion]);
 
   /**
    * Bubble-phase backstop for a drag whose source never reports `dragend` (dropped outside the
@@ -1233,7 +1335,7 @@ export function OverlayPanel({ actions, schedules }) {
   // The landing highlight's clock lives in one place: the CSS animation reads this variable,
   // so the class-removal timer and the fade can never drift apart.
   const style = geom.rect
-    ? { left: geom.rect.left, top: geom.rect.top, width: geom.rect.width, height: geom.rect.height, '--dts-reveal-ms': `${REVEAL_HIGHLIGHT_MS}ms` }
+    ? { left: geom.rect.left, top: geom.rect.top, width: geom.rect.width, height: geom.rect.height, '--dts-reveal-ms': `${REVEAL_HIGHLIGHT_MS}ms`, '--dts-locate-ms': `${LOCATE_HIGHLIGHT_MS}ms` }
     : undefined;
   const pickWorkspace = (workspaceId) => setPrefs({ workspaceFilter: workspaceId, topicFilter: null, topicFilterWorkspace: null });
   /**
@@ -1708,7 +1810,81 @@ export function OverlayPanel({ actions, schedules }) {
     </MenuItem>,
   ];
 
+  /**
+   * "定位当前会话": expands whatever hides the open session, then scrolls its row into view.
+   *
+   * The row is located from the *unfiltered* projection (`model.locateSessionPlan`), so this also
+   * covers the other ways a row disappears: a query that does not match it, an active
+   * workspace/topic filter, an archived row while 已归档 is off, a search that hit the result cap,
+   * and a bucket past the reveal limit. Those rewrites are announced in a toast because they
+   * change a view choice the user made; expanding a fold is not announced, because that is exactly
+   * what the command promises.
+   */
+  const locateCurrentSession = () => {
+    setMenu(null);
+    const plan = locateSessionPlan({
+      tree,
+      items,
+      list,
+      statuses: sessionStatuses,
+      archivedIds,
+      pinnedIds,
+      topicsOf: store.topicsOf,
+      assignmentsOf: store.assignmentsOf,
+      prefs,
+      now: minuteNow,
+      currentId: currentSessionId,
+    });
+    if (!plan.found) {
+      // Nothing to point at: no conversation is open, or the open one is a subagent child (the
+      // tree shows parents only). Say so instead of closing the menu with no visible effect.
+      const empty = plan.reason === 'no-current';
+      flash(empty ? t('locate.noSession') : t('locate.missing'), empty ? 'info' : 'bad');
+      return;
+    }
+    const changes = {};
+    // Only the lists that actually hold the fold are rewritten: `setPrefs` persists and repaints,
+    // so an unchanged list would cost a write and a full tree rebuild for nothing. The archived
+    // bucket is collapsed through the workspace list too, which is why both are filtered here.
+    const collapsedWorkspaces = (prefs.collapsedWorkspaces ?? []).filter((key) => key !== plan.workspaceId && key !== plan.sectionKey);
+    const collapsedTopics = (prefs.collapsedTopics ?? []).filter((key) => key !== plan.sectionKey);
+    if (collapsedWorkspaces.length !== (prefs.collapsedWorkspaces ?? []).length) changes.collapsedWorkspaces = collapsedWorkspaces;
+    if (collapsedTopics.length !== (prefs.collapsedTopics ?? []).length) changes.collapsedTopics = collapsedTopics;
+    if (plan.needsReveal) changes.revealedBuckets = [...new Set([...(prefs.revealedBuckets ?? []), plan.sectionKey])];
+    // Name each released view choice instead of one generic sentence: flipping 已归档 and
+    // clearing a query are different edits, and the user should hear which one happened.
+    const cleared = [];
+    // A query that matched the row but fell past `SEARCH_RESULT_LIMIT` is still what hides it:
+    // the tree stops collecting matches at the cap, so dropping the query is the remedy.
+    if (plan.hiddenSearch || plan.hiddenLimit) {
+      changes.search = '';
+      cleared.push(t('locate.clearedSearch'));
+    }
+    if (plan.hiddenFilter) {
+      changes.workspaceFilter = null;
+      changes.topicFilter = null;
+      changes.topicFilterWorkspace = null;
+      cleared.push(t('locate.clearedFilter'));
+    }
+    if (plan.hiddenArchived) {
+      changes.showArchived = true;
+      cleared.push(t('locate.clearedArchived'));
+    }
+    if (Object.keys(changes).length > 0) {
+      // A search draft typed less than one debounce ago is not in `prefs.search` yet; without
+      // this the pending timer would commit it right after the landing and hide the row again.
+      changes.searchResetAt = Date.now();
+      setPrefs(changes);
+    }
+    if (cleared.length > 0) flash(t('locate.cleared', { what: cleared.join(t('locate.clearedJoin')) }));
+    landOnSession(plan.sessionId, plan.title);
+  };
+
   const headerMenu = [
+    <MenuItem key="locate" icon={<Icon name="locate" />} onSelect={locateCurrentSession}>
+      {t('menu.locate')}
+    </MenuItem>,
+    <div key="locate-sep" className="dts-menu__sep" role="separator" />,
     <MenuItem key="archived" icon={<Icon name="archive" />} onSelect={() => { setMenu(null); setPrefs({ showArchived: !prefs.showArchived }); }} hint={prefs.showArchived ? '✓' : ''}>
       {t('menu.showArchived')}
     </MenuItem>,
@@ -1937,8 +2113,39 @@ export function OverlayPanel({ actions, schedules }) {
    * them outside `.dts-overlay` keeps them on screen in either state; the toast is also the
    * only feedback a rail-side chip write has.
    */
+  /**
+   * The element a closing dialog hands focus back to.
+   *
+   * The menu item that opened the dialog is gone by then, so the dialog needs a durable anchor:
+   * the row, topic or workspace the menu belonged to. Found from the payload (the same keys the
+   * tree writes on its rows) while that row is still mounted.
+   */
+  const dialogAnchor = React.useMemo(() => {
+    if (!dialog || typeof document === 'undefined') return null;
+    const find = (selector, attribute, value) => {
+      for (const node of document.querySelectorAll(selector)) {
+        if (node.dataset[attribute] === value) return node;
+      }
+      return null;
+    };
+    const sessionId = dialog.row?.id ?? dialog.ids?.[0] ?? null;
+    if (sessionId) {
+      const node = find('[data-dts-motion="session"]', 'dtsKey', sessionId);
+      if (node) return node;
+    }
+    const topicId = dialog.topic?.id ?? null;
+    if (topicId) {
+      const node = find('[data-dts-topic]', 'dtsTopic', topicId);
+      if (node) return node;
+    }
+    const workspaceId = dialog.group?.workspaceId ?? dialog.workspaceId ?? null;
+    if (workspaceId) return find('[data-dts-motion="workspace"]', 'dtsKey', workspaceId);
+    return null;
+    // `tree` keeps the lookup fresh when a rebuild replaces the row elements.
+  }, [dialog, tree]);
+
   const floatingSurfaces = (
-    <>
+    <FocusReturnScope value={dialogAnchor}>
       {dialog?.type === 'create' ? (
         <CreateTopicDialog
           emojis={state.emojis}
@@ -2060,6 +2267,7 @@ export function OverlayPanel({ actions, schedules }) {
         <DeleteSessionsDialog
           ids={dialog.ids}
           titles={titles}
+          schedules={schedulesById}
           onClose={() => {
             setDialog(null);
             store.clearSelection();
@@ -2077,9 +2285,9 @@ export function OverlayPanel({ actions, schedules }) {
             // `partial` means the session's own artifact is already gone (only some children
             // survived), so the shell must be moved off it exactly like a clean delete.
             if ((result?.items ?? []).some((item) => (item.status === 'deleted' || item.status === 'partial') && item.sessionId === currentSessionId)) {
-              try {
-                actions.startSession();
-              } catch { /* the host may already have moved */ }
+              // The host command may return a rejected promise; a synchronous try/catch would
+              // leak an unhandled rejection and show no feedback (the other call sites await it).
+              Promise.resolve(actions.startSession()).catch(() => { /* the host may already have moved */ });
             }
           }}
         />
@@ -2100,8 +2308,14 @@ export function OverlayPanel({ actions, schedules }) {
         />
       ) : null}
 
+      {/* Persistent live region: it exists before the text changes, which is what makes screen
+          readers announce the landing. When only a fold opened, the toast (a cleared view) is
+          absent, and this is the only feedback a non-visual user gets. */}
+      <span className="dts-visually-hidden" role="status" aria-live="polite">
+        {located?.title ? t('locate.located', { name: located.title }) : ''}
+      </span>
       {toast ? <div className={cx('dts-toast', `is-${toast.tone}`)} role="status" aria-live={toast.tone === 'bad' ? 'assertive' : 'polite'}>{toast.message}</div> : null}
-    </>
+    </FocusReturnScope>
   );
 
   /**
@@ -2164,7 +2378,7 @@ export function OverlayPanel({ actions, schedules }) {
   });
 
   return (
-    <div className={cx('dts-overlay', menu || dialog ? 'has-floating' : null)} style={style} data-reason={geom.reason}>
+    <div ref={overlayRef} className={cx('dts-overlay', menu || dialog ? 'has-floating' : null)} style={style} data-reason={geom.reason}>
       <div className="dts-panel">
         {prefs.selectMode ? (
           <BatchBar
@@ -2241,6 +2455,7 @@ export function OverlayPanel({ actions, schedules }) {
             tree={tree}
             prefs={prefs}
             reveal={revealedTopic}
+            located={located?.id ?? null}
             selection={selectedIds}
             schedules={schedulesById}
             onOpenSession={treeHandlers.onOpenSession}

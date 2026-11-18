@@ -37,6 +37,7 @@ export const SessionRow = React.memo(function SessionRow({
   query = '',
   selectMode = false,
   selected = false,
+  located = false,
   now,
   onOpen,
   onToggleSelect,
@@ -159,6 +160,7 @@ export const SessionRow = React.memo(function SessionRow({
         row.archived && 'is-archived',
         row.running && 'is-running',
         selected && 'is-selected',
+        located && 'is-located',
         dropBefore && 'is-dropbefore',
         dropAfter && 'is-dropafter',
       )}

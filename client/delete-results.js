@@ -33,7 +33,11 @@ function resolvePartialParents(items) {
     if (!Array.isArray(item.subagentsFailed) || item.subagentsFailed.length === 0) return item;
     const remaining = item.subagentsFailed.filter((id) => {
       const child = byId.get(id);
-      return !(child && (child.status === 'deleted' || child.status === 'partial'));
+      // `not-found` is a host `skipped` verdict: the scan proved the child has no artifact any
+      // more, so it is not a failed child. A `skipped` for "running"/"locked" still is.
+      const gone = child && (child.status === 'deleted' || child.status === 'partial'
+        || (child.status === 'skipped' && child.code === 'not-found'));
+      return !gone;
     });
     if (remaining.length === item.subagentsFailed.length) return item;
     changed = true;

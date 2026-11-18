@@ -105,3 +105,18 @@ test('unknown actions and empty input fail loudly', async () => {
   const empty = await runSessionAction({ action: 'archive', ids: [], actions: host({}) });
   assert.equal(empty.total, 0);
 });
+
+test('a failure without a message still reports a localized reason', async () => {
+  // `error.message ?? fallback` kept an empty message, so a result row showed a blank detail.
+  const actions = host({ archive: async () => { throw Object.assign(new Error(''), { code: 'odd' }); } });
+  const outcome = await runSessionAction({ action: 'archive', ids: ['ses_x'], actions });
+  assert.equal(outcome.failed[0].error, '未知错误');
+  await assert.rejects(
+    () => runSessionAction({ action: 'nuke', ids: ['ses_x'], actions }),
+    (error) => {
+      assert.match(error.message, /未知的批量动作/);
+      assert.match(error.message, /nuke/);
+      return true;
+    },
+  );
+});

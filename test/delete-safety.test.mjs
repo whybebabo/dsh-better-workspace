@@ -7,7 +7,7 @@ import * as zlib from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import { previewDelete, executeDelete } from '../lib/delete.js';
-import { isSafeSessionId, encodeSegment, removeVerifiedDir, resolveSessionsRoot, readSessionHeader } from '../lib/session-files.js';
+import { isSafeSessionId, encodeSegment, foldPath, removeVerifiedDir, resolveSessionsRoot, readSessionHeader, sweepTrash } from '../lib/session-files.js';
 
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-topic-delete-'));
@@ -114,9 +114,9 @@ test('preview verifies identity through the artifact header', async () => {
   assert.ok(byId.ses_real.bytes > 0);
   assert.deepEqual(byId.ses_real.blockers, []);
   assert.equal(byId.ses_spoof.exists, false, 'header mismatch must not count as found');
-  assert.equal(byId.ses_spoof.blockers[0].code, 'not-verified');
-  assert.equal(byId.ses_noartifact_only.blockers[0].code, 'not-verified');
-  assert.equal(byId.ses_missing.blockers[0].code, 'not-verified');
+  assert.equal(byId.ses_spoof.blockers[0].code, 'not-found');
+  assert.equal(byId.ses_noartifact_only.blockers[0].code, 'not-found');
+  assert.equal(byId.ses_missing.blockers[0].code, 'not-found');
   assert.equal(preview.hardBlocked, true);
   assert.ok(real.endsWith(encodeSegment('ses_real')));
 });
@@ -478,7 +478,7 @@ test('path safety: links are refused and removal cannot escape the sessions root
   }
   const preview = await previewDelete({ home: fx.home, ctx: ctxWith(), sessionIds: ['ses_link'] });
   assert.equal(preview.items[0].exists, false, 'a linked directory never counts as a located session');
-  assert.equal(preview.items[0].blockers[0].code, 'not-verified');
+  assert.equal(preview.items[0].blockers[0].code, 'not-found');
   const outcome = await executeDelete({ home: fx.home, ctx: ctxWith(), sessionIds: ['ses_link'], confirm: true });
   assert.equal(outcome.summary.deleted, 0);
   assert.equal((await readFile(join(real, 'precious.txt'), 'utf8')), 'do not delete');
@@ -634,3 +634,69 @@ test('a symlinked sessions root is refused outright', async (t) => {
 async function exists(path) {
   return lstat(path).then(() => true, () => false);
 }
+
+test('a second directory holding the same session id is removed with it', async () => {
+  const fx = await fixture();
+  const primary = await makeSession(fx, 'ses_twin');
+  // A hand-copied artifact under another project key: the scan used to keep only the first copy,
+  // delete it, and report `deleted` while this one survived.
+  const copyDir = join(fx.root, '--C-Other--', encodeSegment('ses_twin'));
+  await mkdir(copyDir, { recursive: true });
+  const header = { type: 'session', version: 3, id: 'ses_twin', createdAt: 1_700_000_000_000, cwd: 'C:/Work/demo' };
+  const logPath = join(copyDir, 'session.v3.jsonl');
+  await writeFile(logPath, `${JSON.stringify(header)}\n`, 'utf8');
+  const stamp = new Date(Date.now() - 60_000);
+  await utimes(logPath, stamp, stamp);
+
+  const outcome = await executeDelete({ home: fx.home, ctx: ctxWith(), sessionIds: ['ses_twin'], confirm: true });
+  assert.equal(outcome.summary.deleted, 1);
+  assert.equal(await lstat(primary).then(() => true, () => false), false, 'the primary is gone');
+  assert.equal(await lstat(copyDir).then(() => true, () => false), false, 'and the duplicate is gone too');
+  assert.ok(outcome.items[0].notes.some((note) => note.includes('重复副本')), 'the copy is reported in the notes');
+});
+
+test('week-old quarantine leftovers are collected, a fresh one is kept', async () => {
+  const fx = await fixture();
+  const trash = join(fx.home, 'dsh-better-workspace', 'trash');
+  const old = join(trash, '.trash-1-aaaaaaaaaaaa');
+  const fresh = join(trash, '.trash-2-bbbbbbbbbbbb');
+  await mkdir(join(old, 'target'), { recursive: true });
+  await writeFile(join(old, 'target', 'session.v3.jsonl'), 'orphan', 'utf8');
+  await mkdir(join(fresh, 'target'), { recursive: true });
+  const past = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+  await utimes(old, past, past);
+  await makeSession(fx, 'ses_ok');
+
+  await executeDelete({ home: fx.home, ctx: ctxWith(), sessionIds: ['ses_ok'], confirm: true });
+  assert.equal(await lstat(old).then(() => true, () => false), false, 'the crashed quarantine is gone');
+  assert.equal(await lstat(fresh).then(() => true, () => false), true, "a running delete's own quarantine is untouched");
+});
+
+test('path folding respects the platform: POSIX keeps case and separators', () => {
+  assert.equal(foldPath('/work/Alpha', 'linux'), '/work/Alpha');
+  assert.notEqual(foldPath('/work/Alpha', 'linux'), foldPath('/work/alpha', 'linux'));
+  assert.equal(foldPath('/work/alpha/', 'linux'), '/work/alpha', 'only a trailing separator is insignificant');
+  assert.equal(foldPath('C:\\Work\\Demo\\', 'win32'), 'c:\\work\\demo');
+  assert.equal(foldPath('/work/alpha/', 'win32'), '\\work\\alpha');
+});
+
+test('the trash sweep never follows a symlinked directory', async () => {
+  const fx = await fixture();
+  const trash = join(fx.home, 'dsh-better-workspace', 'trash');
+  await mkdir(trash, { recursive: true });
+  const outside = await mkdtemp(join(tmpdir(), 'dsh-trash-outside-'));
+  await writeFile(join(outside, 'precious.txt'), 'keep', 'utf8');
+  const linked = join(trash, '.trash-3-cccccccccccc');
+  const linkable = await symlink(outside, linked, 'junction').then(() => true, () => false);
+  if (!linkable) {
+    await rm(outside, { recursive: true, force: true });
+    return;
+  }
+  const past = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+  await utimes(linked, past, past).catch(() => {});
+  const removed = await sweepTrash({ home: fx.home });
+  assert.equal(removed, 0, 'a symlink is not a quarantine directory');
+  assert.equal(await readFile(join(outside, 'precious.txt'), 'utf8'), 'keep');
+  await rm(linked, { force: true });
+  await rm(outside, { recursive: true, force: true });
+});

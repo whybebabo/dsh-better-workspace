@@ -3334,6 +3334,95 @@ test('creating a group from the workspace menu expands, scrolls and highlights i
   assert.equal(find('.dts-row--topic', '新建组').classList.contains('is-revealed'), false, 'the highlight retires on its own');
 });
 
+/** Opens the header ⋯ menu and picks one of its items by label. */
+async function pickHeaderMenuItem(label) {
+  const trigger = container.querySelector('.dts-header .dts-iconbtn[aria-label="更多操作"]');
+  await act(async () => {
+    trigger.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const menu = document.querySelector('.dts-pop--menu');
+  const labels = [...menu.querySelectorAll('.dts-menu__item')].map((node) => node.querySelector('.dts-menu__label').textContent.trim());
+  await act(async () => {
+    [...menu.querySelectorAll('.dts-menu__item')]
+      .find((node) => node.textContent.trim() === label)
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  return labels;
+}
+
+test('the header menu locates the open session inside a folded workspace', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  // The report this command answers: the chat is open on the right while its workspace is
+  // folded on the left, so the row cannot be found without opening groups one by one.
+  window.localStorage.setItem('dsh-better-workspace:prefs:v1', JSON.stringify({ collapsedWorkspaces: [WORKSPACE] }));
+  const scrolled = [];
+  window.Element.prototype.scrollIntoView = function scrollIntoView(options) {
+    scrolled.push({ id: this.getAttribute('data-dts-key'), options });
+  };
+  await mount();
+  assert.equal(find('.dts-row--group').getAttribute('aria-expanded'), 'false', 'the workspace starts folded');
+  assert.equal(container.querySelector('.dts-row--session'), null, 'so no session row is on screen at all');
+
+  const labels = await pickHeaderMenuItem('定位当前会话');
+  assert.deepEqual(labels, ['定位当前会话', '显示已归档', '折叠全部', '展开全部', '刷新'], 'the command leads the overflow menu');
+  await tick(60);
+
+  assert.equal(find('.dts-row--group').getAttribute('aria-expanded'), 'true', 'the folded workspace is expanded');
+  const row = container.querySelector('.dts-row--session[data-dts-key="ses_0"]');
+  assert.ok(row, 'the open session row is on screen');
+  assert.equal(row.classList.contains('is-located'), true, 'and carries the locate highlight');
+  assert.ok(scrolled.some((entry) => entry.id === 'ses_0'), 'and was scrolled into view');
+  assert.deepEqual(
+    JSON.parse(window.localStorage.getItem('dsh-better-workspace:prefs:v1')).collapsedWorkspaces,
+    [],
+    'the expansion is persisted like one made with the chevron',
+  );
+
+  await tick(2500);
+  assert.equal(
+    container.querySelector('.dts-row--session[data-dts-key="ses_0"]').classList.contains('is-located'),
+    false,
+    'the highlight retires on its own',
+  );
+});
+
+test('locating a session that a search hides clears the query and says so', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  window.localStorage.setItem('dsh-better-workspace:prefs:v1', JSON.stringify({ searchOpen: true, search: '会话 1' }));
+  await mount();
+  assert.equal(container.querySelector('.dts-row--session[data-dts-key="ses_0"]'), null, 'the query hides the open session');
+  assert.ok(container.querySelector('.dts-row--session[data-dts-key="ses_1"]'), 'while a matching row is shown');
+
+  await pickHeaderMenuItem('定位当前会话');
+  await tick(60);
+
+  const saved = JSON.parse(window.localStorage.getItem('dsh-better-workspace:prefs:v1'));
+  assert.equal(saved.search, '', 'the query is dropped instead of the command silently failing');
+  assert.equal(saved.searchOpen, true, 'the field itself stays open');
+  assert.equal(
+    container.querySelector('.dts-toast')?.textContent,
+    '清除了搜索,已定位到当前会话。',
+    'a rewritten view choice is announced',
+  );
+  const row = container.querySelector('.dts-row--session[data-dts-key="ses_0"]');
+  assert.ok(row, 'the open session is on screen');
+  assert.equal(row.classList.contains('is-located'), true);
+});
+
+test('locating with nothing open says so instead of pointing nowhere', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  const base = sessionSource.getSnapshot();
+  // The fixture's rows carry no `retainedBy`, so this leaves `mainSessionId` with nothing.
+  sessionSource.set({ ...base, current: null });
+  await mount();
+  await pickHeaderMenuItem('定位当前会话');
+  await tick(60);
+  assert.equal(container.querySelector('.dts-toast')?.textContent, '当前没有打开的会话');
+  assert.equal(container.querySelector('.dts-row--session.is-located'), null, 'nothing is marked');
+});
+
 test('the row menu offers the commands the panel can carry out itself', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   await mount();
@@ -4438,4 +4527,362 @@ test('the duplicate check compares the stored name, not the localized label', as
   assert.equal(create.disabled, false, 'the create button stays available');
   document.documentElement.lang = 'zh-CN';
   await tick(60);
+});
+
+const PREFS_KEY = 'dsh-better-workspace:prefs:v1';
+
+/** The preference document as this moment persisted it (empty when nothing was written). */
+function savedPrefs() {
+  return JSON.parse(window.localStorage.getItem(PREFS_KEY) ?? '{}');
+}
+
+/** One default bucket holding every fixture session, so paging/links are not split by topics. */
+function flatState() {
+  const state = stateResult();
+  state.result.workspaces[WORKSPACE] = {
+    topics: [{ id: 'tp_default', name: '默认分组', emoji: '', order: -1, createdAt: 0, system: true }],
+    assignments: {},
+  };
+  return state;
+}
+
+test('locating the open session inside a folded group opens that group only', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  window.localStorage.setItem(PREFS_KEY, JSON.stringify({ collapsedTopics: [`${WORKSPACE}:${TOPIC}`] }));
+  await mount();
+  assert.equal(find('.dts-row--topic', '设计').getAttribute('aria-expanded'), 'false', 'the group starts folded');
+  assert.equal(container.querySelector('.dts-row--session[data-dts-key="ses_0"]'), null, 'so the row is not mounted');
+
+  await pickHeaderMenuItem('定位当前会话');
+  await tick(80);
+
+  assert.equal(find('.dts-row--topic', '设计').getAttribute('aria-expanded'), 'true', 'the fold that hid the row is opened');
+  assert.ok(container.querySelector('.dts-row--session[data-dts-key="ses_0"]'), 'the open session is on screen');
+  const saved = savedPrefs();
+  assert.deepEqual(saved.collapsedTopics, [], 'and the fold is persisted open, like a chevron click');
+  assert.equal(saved.search ?? '', '', 'the query is untouched');
+  assert.equal(saved.showArchived ?? false, false, 'the archived switch is untouched');
+  assert.equal(saved.workspaceFilter ?? null, null, 'the workspace filter is untouched');
+  assert.equal(document.activeElement?.getAttribute('data-dts-key'), 'ses_0', 'keyboard focus lands on the located row');
+  assert.equal(
+    document.querySelector('.dts-visually-hidden[role="status"]')?.textContent.trim(),
+    '已定位到「会话 0」',
+    'and the landing is announced for a non-visual user',
+  );
+});
+
+test('locating a session past the reveal limit opens its bucket', async () => {
+  responseOverrides[`${API}/state`] = flatState;
+  const many = makeSessions(61);
+  sessionSource.set({ ...many, current: 'ses_60' });
+  const workspace = workspaceSource.getSnapshot();
+  workspaceSource.set({ ...workspace, items: [{ ...workspace.items[0], sessionIds: many.ids }] });
+  await mount();
+  assert.equal(container.querySelectorAll('.dts-row--session').length, 60, 'the bucket mounts one page');
+  assert.equal(container.querySelector('.dts-row--session[data-dts-key="ses_60"]'), null, 'the open session is on page two');
+
+  await pickHeaderMenuItem('定位当前会话');
+  await tick(80);
+
+  assert.ok(container.querySelector('.dts-row--session[data-dts-key="ses_60"]'), 'the bucket is expanded to reach it');
+  assert.deepEqual(savedPrefs().revealedBuckets, [`${WORKSPACE}:tp_default`], 'and the reveal is persisted');
+});
+
+test('locating a session that a workspace filter hides releases the filter', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  window.localStorage.setItem(PREFS_KEY, JSON.stringify({ workspaceFilter: 'ws_two' }));
+  const workspace = workspaceSource.getSnapshot();
+  workspaceSource.set({
+    ...workspace,
+    items: [...workspace.items, { workspaceId: 'ws_two', path: 'D:/work/two', title: 'Two', sessionIds: [], createdAt: 2, updatedAt: 2 }],
+  });
+  await mount();
+  assert.equal(container.querySelector('.dts-row--session[data-dts-key="ses_0"]'), null, 'the filter hides the open session');
+
+  await pickHeaderMenuItem('定位当前会话');
+  await tick(80);
+
+  const saved = savedPrefs();
+  assert.equal(saved.workspaceFilter ?? null, null, 'the view choice that hid it is released');
+  assert.ok(container.querySelector('.dts-row--session[data-dts-key="ses_0"]'), 'and the session is shown');
+  assert.equal(container.querySelector('.dts-toast')?.textContent, '清除了筛选,已定位到当前会话。', 'the rewrite is announced');
+});
+
+test('locating an archived session turns the archived bucket on', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  const workspace = workspaceSource.getSnapshot();
+  workspaceSource.set({ ...workspace, archivedSessionIds: ['ses_0'] });
+  await mount();
+  assert.equal(container.querySelector('.dts-row--session[data-dts-key="ses_0"]'), null, 'archived rows are hidden by default');
+
+  await pickHeaderMenuItem('定位当前会话');
+  await tick(80);
+
+  assert.equal(savedPrefs().showArchived, true, 'the switch that hid it is turned on');
+  assert.equal(
+    container.querySelector('.dts-toast')?.textContent,
+    '打开了已归档,已定位到当前会话。',
+    'the announcement names the switch that was flipped',
+  );
+  const row = container.querySelector('.dts-row--session[data-dts-key="ses_0"]');
+  assert.ok(row, 'the archived row is on screen');
+  assert.equal(row.classList.contains('is-located'), true, 'and marked');
+});
+
+test('locating a session that is already on screen writes no preference', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const before = window.localStorage.getItem(PREFS_KEY);
+
+  await pickHeaderMenuItem('定位当前会话');
+  await tick(80);
+
+  assert.equal(window.localStorage.getItem(PREFS_KEY), before, 'a visible row means no preference write at all');
+  assert.equal(
+    container.querySelector('.dts-row--session[data-dts-key="ses_0"]').classList.contains('is-located'),
+    true,
+    'the command still ran',
+  );
+});
+
+test('locating a session past the search result cap drops the query', async () => {
+  // `buildTree` stops at SEARCH_RESULT_LIMIT (100) matches; with 120 sessions matching the query
+  // the open one used to be dropped from the tree with no reason attributed, so the command
+  // closed the menu and did nothing.
+  responseOverrides[`${API}/state`] = flatState;
+  const many = makeSessions(120);
+  sessionSource.set({ ...many, current: 'ses_119' });
+  const workspace = workspaceSource.getSnapshot();
+  workspaceSource.set({ ...workspace, items: [{ ...workspace.items[0], sessionIds: many.ids }] });
+  window.localStorage.setItem(PREFS_KEY, JSON.stringify({ searchOpen: true, search: '会话' }));
+  await mount();
+  assert.equal(container.querySelectorAll('.dts-row--session').length, 60, 'the first page of matches');
+  assert.equal(container.querySelector('.dts-row--session[data-dts-key="ses_119"]'), null, 'the cap hides the open session');
+
+  await pickHeaderMenuItem('定位当前会话');
+  await tick(80);
+
+  assert.equal(savedPrefs().search, '', 'the query that hid it is dropped');
+  assert.ok(container.querySelector('.dts-row--session[data-dts-key="ses_119"]'), 'and the bucket is opened to reach the row');
+  assert.equal(container.querySelector('.dts-toast')?.textContent, '清除了搜索,已定位到当前会话。');
+});
+
+test('the marker picker is one tab stop and the arrows move through the grid', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  await openTopicCreateDialog();
+  const swatches = [...document.querySelectorAll('.dts-emojis__item')];
+  assert.equal(swatches.length, 5);
+  const tabStops = swatches.filter((node) => node.tabIndex === 0);
+  assert.equal(tabStops.length, 1, 'a radiogroup is a single tab stop, not one per glyph');
+  const checked = swatches.findIndex((node) => node.getAttribute('aria-checked') === 'true');
+  assert.equal(swatches[checked].tabIndex, 0, 'the checked option holds the tab stop');
+
+  await act(async () => {
+    swatches[checked].dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+  });
+  assert.equal(document.activeElement, swatches[checked + 1], 'the arrow moves focus');
+  assert.equal(swatches[checked + 1].tabIndex, 0, 'and the roving stop follows it');
+  assert.equal(swatches[checked].getAttribute('aria-checked'), 'true', 'arrows move, they do not select');
+});
+
+test('closing a dialog opened from the row menu returns focus to the row', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const row = find('.dts-row--session', '会话 0');
+  await act(async () => {
+    row.querySelector('.dts-row__act').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const menu = document.querySelector('.dts-pop--menu');
+  assert.ok(menu, 'the row menu opened');
+  const rename = [...menu.querySelectorAll('.dts-menu__item')].find((node) => node.textContent.trim().startsWith('重命名'));
+  assert.ok(rename, `the rename item is offered (${[...menu.querySelectorAll('.dts-menu__label')].map((node) => node.textContent.trim()).join('|')})`);
+  await act(async () => {
+    rename.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  assert.ok(document.querySelector('.dts-dialog'), 'the rename dialog opened from the menu');
+
+  await act(async () => {
+    document.querySelector('.dts-dialog').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+  await tick();
+  assert.equal(document.querySelector('.dts-dialog'), null, 'Escape closes it');
+  assert.notEqual(document.activeElement, document.body, 'focus does not fall to the body');
+  assert.equal(document.activeElement?.getAttribute('data-dts-key'), 'ses_0', 'it returns to the row the menu belonged to');
+});
+
+test('Escape on a row menu returns focus to the row', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const row = find('.dts-row--session', '会话 0');
+  await act(async () => {
+    row.querySelector('.dts-row__act').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  assert.ok(document.querySelector('.dts-pop--menu'), 'the menu opened');
+
+  await act(async () => {
+    document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+  await tick();
+  assert.equal(document.querySelector('.dts-pop--menu'), null, 'Escape closes it');
+  assert.equal(document.activeElement, row, 'focus goes to the row (its action strip reveals on focus-within)');
+});
+
+test('a group save in flight disables the delete action', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  let release = null;
+  responseOverrides[`${API}/topics/update`] = () => new Promise((resolve) => {
+    release = () => resolve({ ok: true, result: { revision: 5, result: { topic: { id: TOPIC, name: '新名字' } } } });
+  });
+  await mount();
+  await act(async () => {
+    find('.dts-row--topic', '设计').dispatchEvent(new window.Event('contextmenu', { bubbles: true, cancelable: true }));
+  });
+  await tick();
+  await act(async () => {
+    [...document.querySelectorAll('.dts-pop--menu .dts-menu__item')]
+      .find((node) => node.textContent.trim() === '重命名分组')
+      .dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const input = document.querySelector('.dts-dialog .dts-input');
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(input, '新名字');
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+  const buttons = () => [...document.querySelectorAll('.dts-dialog .dts-btn')];
+  const save = buttons().find((node) => node.textContent.trim() === '保存');
+  await act(async () => save.dispatchEvent(new window.Event('click', { bubbles: true })));
+  const remove = buttons().find((node) => node.textContent.trim() === '删除分组');
+  assert.ok(remove, 'the edit dialog offers delete');
+  assert.equal(remove.disabled, true, 'delete cannot open its confirmation under a pending save');
+
+  await act(async () => release());
+  await tick(20);
+  assert.equal(document.querySelector('.dts-dialog'), null, 'the save still closes the dialog it belongs to');
+});
+
+test('the delete dialog warns that scheduled tasks survive the deletion', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/delete/preview`] = () => ({
+    ok: true,
+    result: { items: [{ sessionId: 'ses_0', blockers: [] }], rootAvailable: true, hardBlocked: false, running: 0, subagents: 0, bytes: 1 },
+  });
+  scheduleCatalog = [{
+    id: 'sch_one',
+    target: { kind: 'session', sessionId: 'ses_0' },
+    status: 'active',
+    kind: 'daily',
+    title: '每天早上发送问候',
+    prompt: '问候',
+    time: '09:00:00.000',
+    timeZone: 'Asia/Shanghai',
+    scheduledAt: new Date(Date.now() + 3_600_000).toISOString(),
+  }];
+  await mount();
+  await tick();
+  const row = find('.dts-row--session', '会话 0');
+  await act(async () => {
+    row.querySelector('.dts-row__act').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const menu = document.querySelector('.dts-pop--menu');
+  const remove = [...menu.querySelectorAll('.dts-menu__item')].find((node) => node.textContent.trim().startsWith('永久删除'));
+  assert.ok(remove, 'the row menu offers permanent delete');
+  await act(async () => {
+    remove.dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const warnings = [...document.querySelectorAll('.dts-dialog .dts-warning')].map((node) => node.textContent.trim());
+  assert.ok(
+    warnings.some((text) => text.includes('自动化任务')),
+    `the surviving scheduled tasks are called out (${warnings.join(' | ')})`,
+  );
+});
+
+test('a remote-access service that throws does not take the panel down', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  // The fork item asks `canAccessSession` during render and the panel has no error boundary: a
+  // peer whose permission snapshot is not ready used to fail the whole render (blank sidebar).
+  remoteAccessImpl = { source: () => { throw new Error('permissions not ready'); } };
+  await mount();
+  assert.ok(container.querySelector('.dts-row--session'), 'the panel still rendered');
+  const row = find('.dts-row--session', '会话 0');
+  await act(async () => {
+    row.querySelector('.dts-row__act').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  const labels = [...document.querySelectorAll('.dts-pop--menu .dts-menu__label')].map((node) => node.textContent.trim());
+  assert.ok(labels.includes('分叉会话'), 'an unanswerable permission means "allowed", like a missing service');
+});
+
+test('a dragged session that an archive hides releases the fold too', async () => {
+  // The archived row leaves the rendered tree while the session list still knows the id, so a
+  // watchdog that only looked at `list.byId` kept the fold and the promotion gate latched.
+  responseOverrides[`${API}/state`] = stateResult;
+  await mount();
+  const source = find('.dts-row--session', '会话 1');
+  const other = find('.dts-row--topic', '设计');
+  await act(async () => {
+    const start = new window.Event('dragstart', { bubbles: true });
+    start.dataTransfer = makeDataTransfer(['ses_1']);
+    source.dispatchEvent(start);
+  });
+  await tick();
+  assert.equal(other.getAttribute('aria-expanded'), 'false', 'the drag folds the other group');
+
+  const workspace = workspaceSource.getSnapshot();
+  await act(async () => {
+    workspaceSource.set({ ...workspace, archivedSessionIds: ['ses_1'] });
+  });
+  await tick(80);
+
+  const design = find('.dts-row--topic', '设计');
+  assert.equal(design.getAttribute('aria-expanded'), 'true', 'the fold is released when an archive hides the row');
+});
+
+test('an uncommitted search draft is discarded when the locate command takes the view', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  window.localStorage.setItem(PREFS_KEY, JSON.stringify({ collapsedWorkspaces: [WORKSPACE], searchOpen: true }));
+  await mount();
+  const input = container.querySelector('.dts-header__search input');
+  assert.ok(input, 'the search field is open');
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(input, '会话 9');
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+
+  // Shorter than the 180 ms debounce: the command runs while the draft is still pending.
+  await pickHeaderMenuItem('定位当前会话');
+  await tick(260);
+
+  assert.equal(savedPrefs().search ?? '', '', 'the pending draft is dropped instead of committed after the landing');
+  assert.ok(container.querySelector('.dts-row--session[data-dts-key="ses_0"]'), 'the located row stays on screen');
+});
+
+test('a hand-edited preference document cannot fake a switch or a query', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  const workspace = workspaceSource.getSnapshot();
+  workspaceSource.set({ ...workspace, archivedSessionIds: ['ses_1'] });
+  // A document that went through an editor (or an older shape): 'false' is truthy, 7 is not a
+  // workspace id and 42 is not a query. Reading them verbatim used to hide the whole tree.
+  window.localStorage.setItem(PREFS_KEY, JSON.stringify({ showArchived: 'false', search: 42, workspaceFilter: 7 }));
+  await mount();
+
+  assert.ok(container.querySelector('.dts-row--session[data-dts-key="ses_0"]'), 'the tree still renders');
+  assert.equal(
+    container.querySelector('.dts-row--session[data-dts-key="ses_1"]'),
+    null,
+    "the string 'false' is not a truthy archived switch",
+  );
+  await act(async () => {
+    container.querySelector('.dts-header .dts-iconbtn[title="搜索会话"]').dispatchEvent(new window.Event('click', { bubbles: true }));
+  });
+  await tick();
+  assert.equal(container.querySelector('.dts-header__search input').value, '', 'the numeric search is coerced to an empty query');
 });

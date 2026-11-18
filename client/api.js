@@ -78,7 +78,12 @@ async function request(path, { method = 'GET', body, signal, timeoutMs = REQUEST
       controller.abort();
     }, timeoutMs);
   }
-  const timeoutError = () => new ApiError(t('state.writeTimeout'), { code: 'timeout' });
+  // The wait is the request's own budget, not a fixed 15 s: delete preview/execute ask for
+  // 30 s/120 s, and the old text told the user the wrong deadline.
+  const timeoutError = () => new ApiError(
+    t('state.writeTimeout', { seconds: Math.max(1, Math.round(timeoutMs / 1000)) }),
+    { code: 'timeout', timeoutMs },
+  );
   try {
     let response;
     try {

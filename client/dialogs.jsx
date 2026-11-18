@@ -55,28 +55,53 @@ function problemText(problem) {
 
 /** Marker picker: the host's glyphs (Zen's emoji set) plus a "no marker" option rendered as '-'. */
 export function EmojiPicker({ emojis, value, onChange, name }) {
+  // 1915 glyphs were 1915 tab stops: the picker is a radiogroup, so it gets the stock radio
+  // pattern instead — one tab stop (the checked option), arrows to move, Space/Enter to pick.
+  // Arrows move focus only; activation stays on the focused button so a keyboard user can look
+  // before choosing.
+  const nodes = React.useRef([]);
+  const options = React.useMemo(() => ['', ...emojis], [emojis]);
+  const checkedIndex = Math.max(0, options.indexOf(value));
+  // Roving index follows the value until the user arrows away from it.
+  const [activeIndex, setActiveIndex] = React.useState(checkedIndex);
+  React.useEffect(() => { setActiveIndex(checkedIndex); }, [checkedIndex]);
+  const columns = () => {
+    const list = nodes.current.filter(Boolean);
+    const first = list[0];
+    if (!first || typeof first.offsetTop !== 'number') return 10;
+    // Measure the first rendered row; without layout (tests/jsdom) every row is 0, so keep the
+    // usual 10-column grid as the arrow step instead of treating the whole grid as one row.
+    const perRow = list.filter((node) => node.offsetTop === first.offsetTop).length;
+    return perRow > 1 && perRow < 40 ? perRow : 10;
+  };
+  const onKeyDown = (event) => {
+    if (event.target?.getAttribute?.('role') !== 'radio') return;
+    const total = options.length;
+    const step = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -columns(), ArrowDown: columns() }[event.key];
+    let next = null;
+    if (step !== undefined) next = Math.max(0, Math.min(total - 1, activeIndex + step));
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = total - 1;
+    if (next === null || total === 0) return;
+    event.preventDefault();
+    setActiveIndex(next);
+    nodes.current[next]?.focus();
+  };
   return (
-    <div className="dts-emojis" role="radiogroup" aria-label={name}>
-      <button
-        type="button"
-        role="radio"
-        aria-checked={value === ''}
-        className={cx('dts-emojis__item', value === '' && 'is-active')}
-        title={t('topic.noIcon')}
-        onClick={() => onChange('')}
-      >
-        <span className="dts-dash" aria-hidden="true">-</span>
-      </button>
-      {emojis.map((glyph) => (
+    <div className="dts-emojis" role="radiogroup" aria-label={name} onKeyDown={onKeyDown}>
+      {options.map((glyph, index) => (
         <button
-          key={glyph}
+          key={glyph === '' ? ':none:' : glyph}
+          ref={(node) => { nodes.current[index] = node; }}
           type="button"
           role="radio"
           aria-checked={value === glyph}
+          tabIndex={activeIndex === index ? 0 : -1}
           className={cx('dts-emojis__item', value === glyph && 'is-active')}
-          onClick={() => onChange(glyph)}
+          title={glyph === '' ? t('topic.noIcon') : undefined}
+          onClick={() => { setActiveIndex(index); onChange(glyph); }}
         >
-          {glyph}
+          {glyph === '' ? <span className="dts-dash" aria-hidden="true">-</span> : glyph}
         </button>
       ))}
     </div>
@@ -279,6 +304,10 @@ export function EditTopicDialog({ topic, workspaceId, topicsFor, emojis, onSubmi
   const [error, setError] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
   const busyRef = React.useRef(false);
+  // A save can resolve after this dialog is gone; the late `onClose()` used to close whatever
+  // dialog replaced it (notably the delete confirmation opened from this one).
+  const aliveRef = React.useRef(true);
+  React.useEffect(() => () => { aliveRef.current = false; }, []);
   const close = () => {
     if (!busyRef.current) onClose();
   };
@@ -296,7 +325,7 @@ export function EditTopicDialog({ topic, workspaceId, topicsFor, emojis, onSubmi
     setBusy(true);
     try {
       await onSubmit({ name: name.trim(), emoji });
-      onClose();
+      if (aliveRef.current) onClose();
     } catch (caught) {
       busyRef.current = false;
       setBusy(false);
@@ -312,7 +341,7 @@ export function EditTopicDialog({ topic, workspaceId, topicsFor, emojis, onSubmi
       footer={
         <>
           {onDelete ? (
-            <Button variant="danger-ghost" onClick={() => onDelete(topic)}>
+            <Button variant="danger-ghost" disabled={busy} onClick={() => onDelete(topic)}>
               {t('topic.delete')}
             </Button>
           ) : null}

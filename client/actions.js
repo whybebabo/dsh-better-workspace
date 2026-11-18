@@ -33,7 +33,7 @@ export function createHostActions(ctx) {
   function call(target, name, ...args) {
     const method = target?.[name];
     if (typeof method !== 'function') {
-      throw Object.assign(new Error(`宿主缺少 ${name} 命令`), { code: 'host-command-missing' });
+      throw Object.assign(new Error(t('error.hostCommandMissing', { name })), { code: 'host-command-missing' });
     }
     return method.apply(target, args);
   }
@@ -86,11 +86,18 @@ export function createHostActions(ctx) {
      * the menu never disappears because a service is missing.
      */
     canAccessSession(sessionId, action) {
-      const access = service('remoteAccess');
-      if (typeof access?.source !== 'function') return true;
-      const source = access.source('session', sessionId, action);
-      if (!source || typeof source.getSnapshot !== 'function') return true;
-      return source.getSnapshot() !== false;
+      // This runs inside the panel's render (the fork item decides whether to show itself), and
+      // the panel has no error boundary: a service that throws would take the whole shell panel
+      // down. A missing answer means "allowed", exactly like a missing service.
+      try {
+        const access = service('remoteAccess');
+        if (typeof access?.source !== 'function') return true;
+        const source = access.source('session', sessionId, action);
+        if (!source || typeof source.getSnapshot !== 'function') return true;
+        return source.getSnapshot() !== false;
+      } catch {
+        return true;
+      }
     },
     /**
      * Rename a session the way the host's own rename dialog does.

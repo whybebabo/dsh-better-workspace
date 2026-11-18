@@ -122,7 +122,9 @@ test('every route is registered on both carriers', async () => {
     assert.equal(response.status, 200);
     const body = await response.json();
     assert.equal(body.ok, true);
-    assert.equal(body.result.storage, join(home, 'dsh-better-workspace', 'topics.v1.json'));
+    // The Desktop carrier is loopback-authenticated, but the absolute path is still not part of
+    // the contract the panel consumes; it lives in README's data section instead.
+    assert.equal('storage' in body.result, false, 'the payload carries no absolute storage path');
   });
 });
 
@@ -454,5 +456,45 @@ test('a workspace registered through a symlink still proves ownership', async (t
     }));
     assert.equal(crossed.status, 400, 'the canonical cwd proves the session belongs to the linked workspace');
     assert.equal(crossed.json.code, 'cross-workspace');
+  });
+});
+
+test('update, delete and reorder refuse a missing or stale revision', async () => {
+  await withHome(async (home) => {
+    const { find } = await boot({ home });
+    const created = await call(find(`${API}/topics/create`), fakeRequest({ body: { workspaceId: 'ws_a', name: 'A', expectedRevision: 0 } }));
+    assert.equal(created.status, 200);
+    const revision = created.json.result.revision;
+    const topicId = created.json.result.result.topic.id;
+    assert.equal(typeof revision, 'number');
+
+    // The revision does not move on a refused write, so the same value is the "live" one
+    // throughout this loop.
+    const cases = [
+      ['update', { workspaceId: 'ws_a', topicId, name: 'B' }],
+      ['reorder', { workspaceId: 'ws_a', topicIds: ['tp_default', topicId] }],
+      ['delete', { workspaceId: 'ws_a', topicId }],
+    ];
+    for (const [path, body] of cases) {
+      const missing = await call(find(`${API}/topics/${path}`), fakeRequest({ body }));
+      assert.equal(missing.status, 400, `${path}: a write without a revision is refused`);
+      assert.equal(missing.json.code, 'revision-required', path);
+      const stale = await call(find(`${API}/topics/${path}`), fakeRequest({ body: { ...body, expectedRevision: revision - 1 } }));
+      assert.equal(stale.status, 409, `${path}: a stale revision is refused`);
+      assert.equal(stale.json.code, 'revision-conflict', path);
+      assert.equal(stale.json.currentRevision, revision, `${path}: the live revision comes back`);
+    }
+
+    const applied = await call(find(`${API}/topics/update`), fakeRequest({ body: { workspaceId: 'ws_a', topicId, name: 'B', expectedRevision: revision } }));
+    assert.equal(applied.status, 200, 'the live revision still writes');
+  });
+});
+
+test('the state response does not hand out an absolute storage path', async () => {
+  await withHome(async (home) => {
+    const { find } = await boot({ home });
+    const state = await call(find(`${API}/state`), fakeRequest({ method: 'GET' }));
+    assert.equal(state.status, 200);
+    assert.equal('storage' in state.json.result, false, 'the panel never reads it; a loopback reply should not leak the home layout');
   });
 });

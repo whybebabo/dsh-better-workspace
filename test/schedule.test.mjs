@@ -178,3 +178,12 @@ test('a composition without the schedule plugin stays silent instead of throwing
   assert.equal(store.getSnapshot().bySession.size, 0);
   store.dispose();
 });
+
+test('a midnight time and a missing clock still render a label', () => {
+  // `clockLabel('00:00:00.000')` used to collapse to '00' (the trailing-':00' strip removed the
+  // hour), and a caller without a clock produced "NaN".
+  assert.match(formatFrequency({ kind: 'daily', time: '00:00', timeZone: 'Asia/Shanghai' }), /^每天 00:00/, 'a time without seconds keeps its hour');
+  assert.match(formatFrequency({ kind: 'daily', time: '00:00:00.000', timeZone: 'Asia/Shanghai' }), /^每天 00:00/);
+  assert.doesNotMatch(formatDistance(new Date(Date.now() + 60_000).toISOString(), undefined), /NaN/);
+  assert.doesNotMatch(formatDistance(new Date(Date.now() - 60_000).toISOString(), undefined), /NaN/);
+});

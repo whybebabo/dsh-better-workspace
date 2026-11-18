@@ -251,3 +251,34 @@ test('one repair pass is capped and reports how many headers it did not examine'
     assert.equal(result.failed.length, 0);
   });
 });
+
+test('a registry whose table throws is reported as unavailable, not as a 500', async () => {
+  await withDirs(async ({ alpha }) => {
+    // A registered-but-not-started registry throws from its own table. The repair is best-effort:
+    // the route must answer the panel, and the panel must show "nothing to adopt", not a 500.
+    const base = fakeRegistry([{ id: 'ws_a', path: alpha, sessionIds: [] }]);
+    const registry = {
+      ...base,
+      table: {
+        keys() { throw new Error('registry not started'); },
+        get() { throw new Error('registry not started'); },
+      },
+    };
+    const ctx = { get: (name) => ({ workspaceRegistry: registry, sessionPersistence: fakePersistence([]) })[name] };
+    const result = await adoptOrphanSessions({ ctx });
+    assert.equal(result.available, false);
+    assert.deepEqual(result.adopted, []);
+    assert.deepEqual(result.failed, []);
+  });
+});
+
+test('an archived-session read that throws is reported as unavailable', async () => {
+  await withDirs(async ({ alpha }) => {
+    const base = fakeRegistry([{ id: 'ws_a', path: alpha, sessionIds: [] }]);
+    const registry = { ...base };
+    Object.defineProperty(registry, 'archivedSessionIds', { get() { throw new Error('not ready'); } });
+    const ctx = { get: (name) => ({ workspaceRegistry: registry, sessionPersistence: fakePersistence([]) })[name] };
+    const result = await adoptOrphanSessions({ ctx });
+    assert.equal(result.available, false, 'membership cannot be proven without the archive set');
+  });
+});

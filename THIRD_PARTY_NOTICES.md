@@ -31,9 +31,12 @@ Unicode emoji 字符与原有顺序,不使用其搜索标签或代码。该数�
 
 - `react` —— 使用宿主已加载的实例(0.2.1 为 React 18.3.1),避免第二份 React;
 - `react-dom` —— 只使用 `createPortal`,让浮层/对话框渲染到覆盖层而不是被面板滚动区裁剪;
-- `@deepseek-ai/dsh-client-ui-primitives` —— 仅取用原生图标 `IconFolderOpenRegular`、
-  `IconFolderCloseRegular`、`IconTriangleRightFillRegular`,使分组行的文件夹开合与折叠三角
-  和官方列表完全一致。每个取值都带本地回退字形,导出被改名或删除时不会拖垮整个面板。
+- `@deepseek-ai/dsh-client-ui-primitives` —— 取用 29 个原生图标(例如 `IconFolderOpenRegular`、
+  `IconFolderCloseRegular`、`IconTriangleRightFillRegular`、`IconArchiveOutlineRegular`、
+  `IconPinOutlineRegular`、`IconTrashOutlineRegular`、`IconSearchOutlineRegular`;完整列表见
+  `client/widgets.jsx` 的 `HOST_ICONS`),使分组行、行内动作和菜单与官方列表完全一致。每个取值
+  都带本地回退字形,导出被改名或删除时不会拖垮整个面板;`locate` 没有对应宿主字形,直接用本地
+  路径绘制。
 
 宿主 API 名称(`shell.overlay` 槽、`ctx.uiWorkspace.archiveSession/unarchiveSession/pinSession`、
 `ctx.workspaces`、`ctx.sessions`、`ctx.connection.fetch`、`webServer.register`)均依据

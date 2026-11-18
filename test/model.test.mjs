@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTree, buildWorkspaceOptions, mainSessionId, basename, samePath, moveWithin, orderByManual, promoteSessionOrder, topicOfSession, ungroupedSessionIds, workspaceSessionIds, DEFAULT_TOPIC_ID, UNGROUPED_WORKSPACE_ID } from '../client/model.js';
+import { buildTree, buildWorkspaceOptions, locateSessionPlan, mainSessionId, basename, samePath, moveWithin, orderByManual, promoteSessionOrder, REVEAL_LIMIT, SEARCH_RESULT_LIMIT, topicOfSession, ungroupedSessionIds, workspaceSessionIds, DEFAULT_TOPIC_ID, UNGROUPED_WORKSPACE_ID } from '../client/model.js';
 import { setLanguage } from '../client/i18n.js';
 
 const WS_A = 'ws_a';
@@ -798,4 +798,222 @@ test('search matches the localized default group name', () => {
   } finally {
     setLanguage('zh');
   }
+});
+
+/** One workspace whose default bucket holds `count` sessions; the last one is the open session. */
+function crowded({ count, workspaceId = WS_A, path = 'D:/work/alpha' } = {}) {
+  const ids = [];
+  const byId = {};
+  for (let index = 0; index < count; index += 1) {
+    const id = `ses_${index}`;
+    ids.push(id);
+    byId[id] = { id, displayTitle: `会话 ${index}`, cwd: path, updatedAt: 1000 + index };
+  }
+  return {
+    items: [{ workspaceId, path, title: 'Alpha', sessionIds: ids, createdAt: 1, updatedAt: 10 }],
+    list: { ids, byId, current: ids[count - 1], phase: 'ready' },
+    archivedIds: [],
+    pinnedIds: [],
+    topicsOf: () => [],
+    assignmentsOf: () => ({}),
+  };
+}
+
+test('locateSessionPlan points at the open session and names the fold that hides it', () => {
+  const base = fixture();
+  const prefs = { collapsedWorkspaces: [WS_A] };
+  const tree = buildTree({ ...base, prefs, query: '' });
+  const plan = locateSessionPlan({ ...base, tree, prefs, currentId: 'ses_1' });
+
+  assert.equal(plan.found, true);
+  assert.equal(plan.sessionId, 'ses_1');
+  assert.equal(plan.workspaceId, WS_A);
+  assert.equal(plan.sectionKey, `${WS_A}:${DEFAULT_TOPIC_ID}`, 'the composite key the chevron and preference share');
+  assert.equal(plan.rowIndex, 1, 'the pinned row leads its bucket, so the open session is second');
+  assert.equal(plan.collapsedWorkspace, true);
+  assert.equal(plan.collapsedSection, false);
+  assert.equal(plan.needsReveal, false);
+  assert.equal(plan.hiddenSearch, false);
+  assert.equal(plan.hiddenFilter, false);
+  assert.equal(plan.hiddenArchived, false);
+});
+
+test('a plain view asks for no preference rewrite at all', () => {
+  // The menu item must not persist anything when the row is already on screen: every changed
+  // preference is a localStorage write plus a full tree rebuild.
+  const base = fixture();
+  const tree = buildTree({ ...base, prefs: {}, query: '' });
+  const plan = locateSessionPlan({ ...base, tree, prefs: {}, currentId: 'ses_1' });
+  assert.equal(plan.found, true);
+  assert.deepEqual(
+    [plan.collapsedWorkspace, plan.collapsedSection, plan.needsReveal, plan.hiddenSearch, plan.hiddenFilter, plan.hiddenArchived],
+    [false, false, false, false, false, false],
+  );
+});
+
+test('a query that does not match the open session is named as the reason it is missing', () => {
+  const base = fixture();
+  const hiding = { searchOpen: true, search: 'beta' };
+  const hiddenTree = buildTree({ ...base, prefs: hiding, query: 'beta' });
+  const hiddenPlan = locateSessionPlan({ ...base, tree: hiddenTree, prefs: hiding, currentId: 'ses_1' });
+  assert.equal(hiddenPlan.found, true, 'the session exists; only the view hides it');
+  assert.equal(hiddenPlan.hiddenSearch, true);
+  assert.equal(hiddenPlan.hiddenFilter, false, 'no filter is set, so none may be reported');
+
+  const matching = { searchOpen: true, search: '设计' };
+  const shownTree = buildTree({ ...base, prefs: matching, query: '设计' });
+  const shownPlan = locateSessionPlan({ ...base, tree: shownTree, prefs: matching, currentId: 'ses_1' });
+  assert.equal(shownPlan.hiddenSearch, false, 'a query that matched the row is left alone');
+});
+
+test('a workspace or topic filter is reported only when it really excludes the row', () => {
+  const base = fixture();
+  const elsewhere = { workspaceFilter: WS_B };
+  const otherWorkspace = locateSessionPlan({ ...base, tree: buildTree({ ...base, prefs: elsewhere, query: '' }), prefs: elsewhere, currentId: 'ses_1' });
+  assert.equal(otherWorkspace.hiddenFilter, true, 'the filter names another workspace');
+
+  const topics = { [WS_A]: [{ id: 'tp_1', name: '设计', order: 0 }, { id: 'tp_2', name: '排查', order: 1 }] };
+  const themed = fixture({ topics, assignments: { [WS_A]: { ses_1: 'tp_1', ses_2: 'tp_2' } } });
+  const ownGroup = { topicFilter: 'tp_1', topicFilterWorkspace: WS_A, workspaceFilter: WS_A };
+  const ownPlan = locateSessionPlan({ ...themed, tree: buildTree({ ...themed, prefs: ownGroup, query: '' }), prefs: ownGroup, currentId: 'ses_1' });
+  assert.equal(ownPlan.hiddenFilter, false, 'the filter names the group the session sits in');
+
+  const otherGroup = { topicFilter: 'tp_2', topicFilterWorkspace: WS_A, workspaceFilter: WS_A };
+  const otherPlan = locateSessionPlan({ ...themed, tree: buildTree({ ...themed, prefs: otherGroup, query: '' }), prefs: otherGroup, currentId: 'ses_1' });
+  assert.equal(otherPlan.hiddenFilter, true, 'another group of the same workspace excludes it');
+});
+
+test('an archived session reports the archived switch and its own bucket', () => {
+  const base = fixture();
+  const hidden = locateSessionPlan({ ...base, tree: buildTree({ ...base, prefs: {}, query: '' }), prefs: {}, currentId: 'ses_arch' });
+  assert.equal(hidden.found, true);
+  assert.equal(hidden.archived, true);
+  assert.equal(hidden.sectionKey, `${WS_A}:archived`);
+  assert.equal(hidden.hiddenArchived, true);
+  assert.equal(hidden.collapsedSection, false);
+
+  const shown = { showArchived: true, collapsedWorkspaces: [`${WS_A}:archived`] };
+  const shownPlan = locateSessionPlan({ ...base, tree: buildTree({ ...base, prefs: shown, query: '' }), prefs: shown, currentId: 'ses_arch' });
+  assert.equal(shownPlan.hiddenArchived, false);
+  // The archived bucket has no topic row of its own: its chevron writes the workspace-level list.
+  assert.equal(shownPlan.collapsedSection, true);
+});
+
+test('a row past the reveal limit asks for its bucket to be expanded', () => {
+  const base = crowded({ count: REVEAL_LIMIT + 1 });
+  const collapsed = {};
+  const plan = locateSessionPlan({ ...base, tree: buildTree({ ...base, prefs: collapsed, query: '' }), prefs: collapsed });
+  assert.equal(plan.sessionId, `ses_${REVEAL_LIMIT}`);
+  assert.equal(plan.rowIndex, REVEAL_LIMIT);
+  assert.equal(plan.needsReveal, true, 'the first page of the bucket stops before this row');
+
+  const expanded = { revealedBuckets: [`${WS_A}:${DEFAULT_TOPIC_ID}`] };
+  const expandedPlan = locateSessionPlan({ ...base, tree: buildTree({ ...base, prefs: expanded, query: '' }), prefs: expanded });
+  assert.equal(expandedPlan.needsReveal, false, 'a bucket the user already expanded needs no second expansion');
+});
+
+test('a session no workspace accounts for locates inside the virtual bucket', () => {
+  const base = fixture();
+  base.list.byId = { ...base.list.byId, ses_loose: { id: 'ses_loose', displayTitle: '游离会话', cwd: 'D:/elsewhere', updatedAt: 1 } };
+  base.list.ids = [...base.list.ids, 'ses_loose'];
+  const tree = buildTree({ ...base, prefs: {}, query: '' });
+  const plan = locateSessionPlan({ ...base, tree, prefs: {}, currentId: 'ses_loose' });
+  assert.equal(plan.workspaceId, UNGROUPED_WORKSPACE_ID);
+  assert.equal(plan.sectionKey, `${UNGROUPED_WORKSPACE_ID}:${DEFAULT_TOPIC_ID}`);
+  assert.equal(plan.collapsedWorkspace, false);
+});
+
+test('a session the list cannot show is reported instead of guessed at', () => {
+  const base = fixture();
+  const tree = buildTree({ ...base, prefs: {}, query: '' });
+  assert.deepEqual(
+    locateSessionPlan({ ...base, tree, prefs: {}, currentId: 'ses_sub' }),
+    { found: false, reason: 'subagent', sessionId: 'ses_sub' },
+    'subagent children never reach the tree',
+  );
+  assert.deepEqual(
+    locateSessionPlan({ ...base, tree, prefs: {}, currentId: 'ses_nope' }),
+    { found: false, reason: 'unknown', sessionId: 'ses_nope' },
+  );
+  assert.deepEqual(
+    locateSessionPlan({
+      ...base,
+      tree: { ...tree, currentSessionId: null },
+      // mainSessionId reads the retained main view before the list's current; both must go.
+      list: { ...base.list, current: null, byId: { ...base.list.byId, ses_1: { ...base.list.byId.ses_1, retainedBy: null } } },
+      prefs: {},
+      currentId: null,
+    }),
+    { found: false, reason: 'no-current', sessionId: null },
+    'nothing open means nothing to locate',
+  );
+});
+
+/** A workspace whose default bucket holds `count` sessions that all match the query "会话". */
+function searchable({ count }) {
+  const ids = [];
+  const byId = {};
+  for (let index = 0; index < count; index += 1) {
+    const id = `ses_${index}`;
+    ids.push(id);
+    byId[id] = { id, displayTitle: `会话 ${index}`, cwd: 'D:/alpha', updatedAt: 1000 + index };
+  }
+  return {
+    items: [{ workspaceId: WS_A, path: 'D:/alpha', title: 'Alpha', sessionIds: ids, createdAt: 1, updatedAt: 10 }],
+    list: { ids, byId, current: ids[count - 1], phase: 'ready' },
+    archivedIds: [],
+    pinnedIds: [],
+    topicsOf: () => [],
+    assignmentsOf: () => ({}),
+  };
+}
+
+test('a search hit past the result cap is named, not silently dropped', () => {
+  // `buildTree` stops collecting matches at `SEARCH_RESULT_LIMIT`; the row still matches the
+  // query, so the old attribution set could not name the cap and the command did nothing.
+  const base = searchable({ count: SEARCH_RESULT_LIMIT + 20 });
+  const prefs = { searchOpen: true, search: '会话' };
+  const tree = buildTree({ ...base, prefs, query: '会话' });
+  assert.equal(tree.truncated, true);
+  const plan = locateSessionPlan({ ...base, tree, prefs });
+  assert.equal(plan.found, true);
+  assert.equal(plan.hiddenSearch, false, 'the haystack matches, the query itself is not the miss');
+  assert.equal(plan.hiddenLimit, true, 'the result cap is what dropped the row');
+});
+
+test('a bucket narrowed by the query needs no reveal for a row on its first page', () => {
+  // The unfiltered rank is 119, but the rendered bucket holds the 11 matches and pages nothing:
+  // the reveal decision has to follow the tree that is on screen, not the hidden projection.
+  const base = searchable({ count: 120 });
+  const prefs = { searchOpen: true, search: '会话 11' };
+  const tree = buildTree({ ...base, prefs, query: '会话 11' });
+  const plan = locateSessionPlan({ ...base, tree, prefs });
+  assert.equal(plan.sessionId, 'ses_119');
+  assert.equal(plan.rowIndex, 119, 'the unfiltered rank is still reported for context');
+  assert.equal(plan.needsReveal, false, '11 mounted rows are not paged at 60');
+});
+
+test('a legacy topic filter without an owner still attributes the scope that hides the row', () => {
+  // A preference document written before the filter carried its workspace: `buildTree` resolves
+  // the owner by scanning workspaces, so a row in another workspace is hidden by that scope even
+  // though neither `workspaceFilter` nor its topic id differs.
+  const items = [
+    { workspaceId: WS_A, path: 'D:/a', title: 'A', sessionIds: ['ses_a'], createdAt: 1, updatedAt: 1 },
+    { workspaceId: WS_B, path: 'D:/b', title: 'B', sessionIds: ['ses_b'], createdAt: 2, updatedAt: 2 },
+  ];
+  const byId = {
+    ses_a: { id: 'ses_a', displayTitle: 'A', cwd: 'D:/a', updatedAt: 1 },
+    ses_b: { id: 'ses_b', displayTitle: 'B', cwd: 'D:/b', updatedAt: 2 },
+  };
+  const topicsOf = (workspaceId) => (workspaceId === WS_A
+    ? [{ id: DEFAULT_TOPIC_ID, name: '默认分组', emoji: '', order: -1, system: true }]
+    : []);
+  const base = { items, list: { ids: ['ses_a', 'ses_b'], byId, current: 'ses_b', phase: 'ready' }, archivedIds: [], pinnedIds: [], topicsOf, assignmentsOf: () => ({}) };
+  const prefs = { topicFilter: DEFAULT_TOPIC_ID };
+  const tree = buildTree({ ...base, prefs, query: '' });
+  assert.deepEqual(tree.groups.map((group) => group.workspaceId), [WS_A], 'the filter scopes the tree to the owning workspace');
+
+  const plan = locateSessionPlan({ ...base, tree, prefs });
+  assert.equal(plan.found, true);
+  assert.equal(plan.hiddenFilter, true, 'the scope, not the topic id, is what hides the row');
 });

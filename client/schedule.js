@@ -309,7 +309,10 @@ export function schedulesOf(snapshot, sessionId) {
 
 /** `09:00:00.000` → `09:00`, the host's clock label. */
 function clockLabel(time) {
-  return String(time ?? '').replace(/\.\d+$/, '').replace(/:00$/, '');
+  // '09:00:00.000' → '09:00'; the seconds are dropped only when there is still a clock left.
+  // Stripping ':00' unconditionally turned '00:00' into '00' (midnight rendered as an empty hour).
+  const trimmed = String(time ?? '').replace(/\.\d+$/, '');
+  return trimmed.includes(':') ? trimmed.replace(/(\d{2}:\d{2}):00$/, '$1') : trimmed;
 }
 
 function unitLabel(unit, value) {
@@ -422,7 +425,9 @@ export function formatTarget(scheduledAt) {
 export function formatDistance(scheduledAt, now) {
   const at = Date.parse(scheduledAt);
   if (Number.isNaN(at)) return '';
-  const difference = at - now;
+  // A caller that forgets the clock used to produce `NaN` seconds and a `NaN` label.
+  const reference = Number.isFinite(now) ? now : Date.now();
+  const difference = at - reference;
   if (difference === 0) return `(${t('schedule.relative.now')})`;
   const seconds = Math.abs(difference) / 1000;
   const selected = UNITS.find((candidate) => seconds >= candidate.seconds) ?? SECOND;
