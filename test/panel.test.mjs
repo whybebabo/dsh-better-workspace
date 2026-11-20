@@ -50,6 +50,15 @@ let startSessionArgs = [];
 let forkSessionImpl;
 let forkSessionCalls = [];
 let forkSessionOptions;
+/**
+ * The panel observes the host's own fork command (`client/fork-hook.js`), because DSH 0.2.1-rc.3
+ * stopped stamping a fork with its source. `hostSessions` is the service instance the panel
+ * resolved, so a test can invoke the wrapped `fork` exactly as the stock shortcut or the chat
+ * branch would; `forkHostCalls` records what reached it.
+ */
+let hostSessions;
+let forkHostCalls = [];
+let forkHostChildId = 'ses_stock_fork';
 let openSessionCalls = 0;
 let toggleSidebarCalls = 0;
 let workspaceRenameCalls = [];
@@ -262,6 +271,41 @@ function loadBundle() {
 /** Runs the plugin's `apply(ctx)` against a fake slot host and returns the mounted component. */
 function applyPlugin(mod) {
   const registered = [];
+  /**
+   * One instance, like a Cordis service: `ctx.get('sessions')` must answer the same object every
+   * time, or a test's fork would reach an unwrapped copy and never be observed.
+   */
+  const sessionsService = {
+    list: sessionSource,
+    refresh() { sessionRefreshCalls += 1; },
+    /**
+     * The host's own rename path (`ui-workspace/src/client/index.ts`):
+     * `sessions.using(id, {source:'workspaceOperation'}, ref => ref.binding.session.rename(title))`.
+     * `uiWorkspace.renameSession` deliberately does not exist on this fake, exactly like 0.2.1.
+     */
+    async using(sessionId, options, run) {
+      sessionRenameCalls.push([sessionId, options?.source]);
+      return run({
+        binding: {
+          session: {
+            async rename(title) {
+              sessionRenameTitles.push(title);
+              return { ok: true, value: { title } };
+            },
+          },
+        },
+      });
+    },
+    /**
+     * The one funnel every fork surface uses in 0.2.2 (`uiWorkspace.forkSession` → navigation →
+     * `sessions.fork`; the stock shortcut and the chat branch call it directly). The panel wraps
+     * this method to learn the source/child pair, so a test can play the host by calling it.
+     */
+    fork(options) {
+      forkHostCalls.push(options);
+      return Promise.resolve(forkHostChildId);
+    },
+  };
   const ctx = {
     effect: (run) => {
       const dispose = run();
@@ -269,30 +313,7 @@ function applyPlugin(mod) {
       return { dispose: () => {} };
     },
     get: (name) => {
-      if (name === 'sessions') {
-        return {
-          list: sessionSource,
-          refresh() { sessionRefreshCalls += 1; },
-          /**
-           * The host's own rename path (`ui-workspace/src/client/index.ts`):
-           * `sessions.using(id, {source:'workspaceOperation'}, ref => ref.binding.session.rename(title))`.
-           * `uiWorkspace.renameSession` deliberately does not exist on this fake, exactly like 0.2.1.
-           */
-          async using(sessionId, options, run) {
-            sessionRenameCalls.push([sessionId, options?.source]);
-            return run({
-              binding: {
-                session: {
-                  async rename(title) {
-                    sessionRenameTitles.push(title);
-                    return { ok: true, value: { title } };
-                  },
-                },
-              },
-            });
-          },
-        };
-      }
+      if (name === 'sessions') return sessionsService;
       if (name === 'uiSession') return { sessionStatus: sessionStatusSource };
       if (name === 'workspaces') {
         return {
@@ -370,12 +391,13 @@ function applyPlugin(mod) {
   assert.equal(registered.length, 1, 'exactly one slot entry was registered');
   const [entry] = registered;
   assert.equal(entry.options.name, 'shell.overlay');
-  return { Component: entry.component, props: entry.options.inject() };
+  return { Component: entry.component, props: entry.options.inject(), sessions: sessionsService };
 }
 
 async function mount() {
   const mod = loadBundle();
-  const { Component, props } = applyPlugin(mod);
+  const { Component, props, sessions } = applyPlugin(mod);
+  hostSessions = sessions;
   const ReactDOMClient = await import('react-dom/client');
   await act(async () => {
     root = ReactDOMClient.createRoot(container);
@@ -397,6 +419,9 @@ beforeEach(async () => {
   forkSessionImpl = null;
   forkSessionCalls = [];
   forkSessionOptions = undefined;
+  hostSessions = undefined;
+  forkHostCalls = [];
+  forkHostChildId = 'ses_stock_fork';
   openSessionCalls = 0;
   toggleSidebarCalls = 0;
   workspaceRenameCalls = [];
@@ -894,9 +919,98 @@ test('a fork of a default-group session needs no assignment write', async () => 
   assert.equal(openSessionCalls, 1, 'the child still opens');
 });
 
-test('a fork created outside the row menu follows its source group', async () => {
+test('a fork created outside the row menu is filed into its source group', async () => {
   // The stock fork shortcut and the chat view's branch command create the child without going
-  // through this panel's menu; its `parentId` and the source's assignment are the only signal.
+  // through this panel's menu. DSH 0.2.1-rc.3 stopped recording the source on the child, so the
+  // summary below carries no `parentId` at all: the observed host `fork` call is the only signal.
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
+  forkHostChildId = 'ses_stock_child';
+  await mount();
+  const before = sessionSource.getSnapshot();
+  const child = { id: 'ses_stock_child', displayTitle: '会话 0 的分叉', cwd: 'D:/work/one', updatedAt: Date.now(), blank: false };
+  await act(async () => {
+    sessionSource.set({ ...before, ids: [child.id, ...before.ids], byId: { ...before.byId, [child.id]: child } });
+    // The shortcut path: `navigation.forkSession` → `sessions.fork` with no callbacks.
+    await hostSessions.fork({ sessionId: 'ses_0', increaseTitle: true });
+  });
+  await tick();
+
+  assert.deepEqual(forkHostCalls, [{ sessionId: 'ses_0', increaseTitle: true }], 'the panel wraps the host fork without changing its arguments');
+  const assign = calls.find((call) => call.url.endsWith('/assign'));
+  assert.ok(assign, 'a lineage-less fork is still filed');
+  assert.equal(assign.body.workspaceId, WORKSPACE);
+  assert.deepEqual(assign.body.sessionIds, ['ses_stock_child']);
+  assert.equal(assign.body.topicId, TOPIC);
+});
+
+test('a fork is filed before the child reaches the session list', async () => {
+  // The host resolves the fork and publishes the child in either order; filing must not depend on
+  // seeing the child row, or the chat view's branch command would sometimes leave it unfiled.
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
+  forkHostChildId = 'ses_early_child';
+  await mount();
+  await act(async () => {
+    await hostSessions.fork({ sessionId: 'ses_0', atSeq: 7, increaseTitle: true });
+  });
+  await tick();
+
+  const assign = calls.find((call) => call.url.endsWith('/assign'));
+  assert.ok(assign, 'the unknown child id is written from the observed pair');
+  assert.deepEqual(assign.body.sessionIds, ['ses_early_child']);
+  assert.equal(assign.body.topicId, TOPIC);
+});
+
+test('a branch made from a message of a default-group session needs no write', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
+  forkHostChildId = 'ses_branch_default';
+  await mount();
+  await act(async () => {
+    await hostSessions.fork({ sessionId: 'ses_1', atSeq: 3, increaseTitle: true });
+  });
+  await tick();
+
+  assert.equal(calls.some((call) => call.url.endsWith('/assign')), false, 'an unfiled child already renders in the default group');
+});
+
+test('a fork of a subagent is never filed', async () => {
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
+  await mount();
+  const before = sessionSource.getSnapshot();
+  const subagent = { id: 'ses_sub_source', displayTitle: '子智能体', cwd: 'D:/work/one', updatedAt: Date.now(), blank: false, origin: 'subagent' };
+  await act(async () => {
+    sessionSource.set({ ...before, ids: [subagent.id, ...before.ids], byId: { ...before.byId, [subagent.id]: subagent } });
+    await hostSessions.fork({ sessionId: subagent.id, increaseTitle: true });
+  });
+  await tick();
+
+  assert.equal(calls.some((call) => call.url.endsWith('/assign')), false, 'subagents are filtered out of the tree');
+});
+
+test('the row menu fork is filed once, even though the host fork is observed too', async () => {
+  // A real host funnels `uiWorkspace.forkSession` through `sessions.fork`, so both the observed
+  // pair and the menu's own call see the same child. The in-flight guard keeps it one write.
+  responseOverrides[`${API}/state`] = stateResult;
+  responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
+  forkHostChildId = 'ses_menu_child';
+  forkSessionImpl = async (sessionId) => {
+    await hostSessions.fork({ sessionId, increaseTitle: true });
+    return forkHostChildId;
+  };
+  await mount();
+  await runRowCommand('会话 0', '分叉会话');
+  await tick();
+
+  const assigns = calls.filter((call) => call.url.endsWith('/assign'));
+  assert.equal(assigns.length, 1, 'one child, one assignment write');
+  assert.deepEqual(assigns[0].body.sessionIds, ['ses_menu_child']);
+});
+
+test('a fork from an older host (carrying parentId) still follows its source group', async () => {
+  // Artifacts written before DSH 0.2.1-rc.3 keep their lineage; the panel keeps placing them.
   responseOverrides[`${API}/state`] = stateResult;
   responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
   await mount();
@@ -916,8 +1030,8 @@ test('a fork created outside the row menu follows its source group', async () =>
 
 test('a fork renders inside its source group without a default-group flash', async () => {
   // The mocked `/state` never reports the child's assignment, so the placement below can only
-  // come from the tree deriving the group from `parentId` — the same path the first paint uses
-  // before the panel's assignment write has landed.
+  // come from the tree deriving the group from the retained lineage — the path a legacy artifact
+  // (and the first paint after an observed fork's write) uses.
   responseOverrides[`${API}/state`] = stateResult;
   responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
   await mount();
@@ -950,7 +1064,7 @@ test('a fork renders inside its source group without a default-group flash', asy
   assert.equal(counts.find((entry) => entry.name === '默认分组')?.count, '2', 'and the default group does not');
 });
 
-test('the fork watcher leaves default-group parents and subagent children alone', async () => {
+test('the legacy lineage watcher leaves default-group parents and subagent children alone', async () => {
   responseOverrides[`${API}/state`] = stateResult;
   responseOverrides[`${API}/assign`] = () => ({ ok: true, result: { revision: 6, result: { changed: 1 } } });
   await mount();

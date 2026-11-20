@@ -6,6 +6,7 @@
  * released by the store's own state (`enabled:false`, or `/state` missing/unreachable), not
  * by counting command failures.
  */
+import { watchSessionForks } from './fork-hook.js';
 import { t } from './i18n.js';
 
 export function createHostActions(ctx) {
@@ -78,6 +79,20 @@ export function createHostActions(ctx) {
      */
     forkSession(sessionId) {
       return call(uiWorkspace(), 'forkSession', sessionId, undefined, { allowMigration: false });
+    },
+    /**
+     * Observe the source/child pair of every fork, including the ones this panel did not start.
+     *
+     * DSH 0.2.1-rc.3 stopped recording a fork's source on the child (`parentSession` /
+     * `parentSessionId` are gone), so the session list alone can no longer say which group a
+     * fork belongs to. `sessions.fork` is the funnel every surface uses — the stock shortcut,
+     * the chat view's branch command, this panel's row menu — and it hands back the child id.
+     *
+     * Returns an unsubscribe, or null when the host exposes no fork command (an older or
+     * differently-composed build keeps the lineage-based fallback).
+     */
+    watchForks(listener) {
+      return watchSessionForks(sessions(), listener);
     },
     /**
      * Whether the current peer may run `action` on a session (the stock fork item hides itself

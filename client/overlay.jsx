@@ -41,6 +41,15 @@ const REVEAL_HIGHLIGHT_MS = 1600;
 const LOCATE_HIGHLIGHT_MS = 2400;
 
 /**
+ * Upper bound for fork pairs waiting for a snapshot that can place their source.
+ *
+ * A fork returns before the workspace snapshot necessarily accounts for the source id, so the
+ * pair is queued and retried on the next publish. Counting sessions that can never be placed (a
+ * source the panel does not list) would otherwise retain every fork of the page.
+ */
+const FORK_QUEUE_MAX = 64;
+
+/**
  * The tree projection is only rendered when the panel is on screen. A rail-collapsed panel
  * still keeps the composer chip mounted, and that chip only needs the open session — building
  * the full 1500-row tree for one id on every session-list publish was pure main-thread cost.
@@ -211,6 +220,16 @@ export function OverlayPanel({ actions, schedules }) {
   const pendingRef = React.useRef(null);
   /** Blank-session watcher: the first ready snapshot primes the set, so reloads never re-file. */
   const autoFileRef = React.useRef({ primed: false, seen: new Set(), busy: new Set() });
+  /**
+   * Forks whose source is not placeable yet, as `{ sourceId, childId }`.
+   *
+   * A fork returns as soon as the host resolved the child id, which can be a publish before the
+   * workspace snapshot accounts for the source. Keeping the pair (instead of dropping it) is what
+   * makes the filing eventual: the next snapshot drains the queue.
+   */
+  const forkQueueRef = React.useRef([]);
+  /** Bumped whenever a fork pair is queued, so the drain effect runs without a list publish. */
+  const [forkEpoch, setForkEpoch] = React.useState(0);
   /** Panel-owned timers. All must die with the overlay, or they outlive it and keep firing. */
   const timersRef = React.useRef({ toast: null, arm: null });
 
@@ -603,14 +622,18 @@ export function OverlayPanel({ actions, schedules }) {
    * no write — an unfiled session already lives there — and the virtual 未分组 bucket has no
    * sidecar document. A child that already carries an assignment (the row menu or another
    * window filed it first) keeps that group.
+   *
+   * `busy` is the one-write guard: the row menu files the child it asked for and the queued
+   * fork pairs below file the same child, and whichever runs first wins.
    */
   function fileForkedSession(childId, workspaceId, topicId) {
     if (!childId || !workspaceId || workspaceId === UNGROUPED_WORKSPACE_ID) return;
     if (!topicId || topicId === DEFAULT_TOPIC_ID) return;
+    const auto = autoFileRef.current;
+    if (auto.busy.has(childId)) return;
     if ((store.assignmentsOf(workspaceId) ?? {})[childId]) return;
     const topic = (store.topicsOf(workspaceId) ?? []).find((entry) => entry.id === topicId);
     if (!topic) return;
-    const auto = autoFileRef.current;
     // The watcher below sees the same child in the list; `busy` keeps it from writing a second
     // time while this request is in flight.
     auto.busy.add(childId);
@@ -621,6 +644,60 @@ export function OverlayPanel({ actions, schedules }) {
   }
 
   /**
+   * Registers the fork observer, which is the only way to tell which source a child came from.
+   *
+   * DSH 0.2.1-rc.3 stopped stamping a fork with its source (the upstream "independent forks"
+   * change removed `parentSession` from the child header and `parentSessionId` from the list
+   * summary), so the list alone can no longer place a fork. Every fork surface funnels through
+   * `sessions.fork`, which resolves to the child id — the pair is observed there and queued.
+   *
+   * Re-subscribed on every list phase change: the service can mount after this panel does, and
+   * a missed registration would silently drop the feature for the rest of the page.
+   */
+  React.useEffect(() => {
+    const unsubscribe = actions.watchForks?.((fork) => {
+      const queue = forkQueueRef.current;
+      if (queue.some((entry) => entry.childId === fork.childId)) return;
+      // Bounded: a host stuck without workspace snapshots must not grow this forever.
+      if (queue.length >= FORK_QUEUE_MAX) queue.shift();
+      queue.push(fork);
+      setForkEpoch((value) => value + 1);
+    });
+    return () => unsubscribe?.();
+  }, [actions, sessionSnapshot?.phase]);
+
+  /**
+   * Drains the queued fork pairs into their source's group, once the snapshots can place them.
+   *
+   * A pair whose source cannot be resolved yet is kept rather than dropped: the fork resolves
+   * before the workspace snapshot necessarily accounts for the source, and the next publish
+   * retries. Subagent children are filtered out of the tree, and a source in the default group
+   * needs no write, exactly like the row menu's own path.
+   */
+  React.useEffect(() => {
+    const queue = forkQueueRef.current;
+    if (queue.length === 0) return;
+    const byId = list.byId ?? {};
+    const keep = [];
+    for (const entry of queue) {
+      const workspace = options.find((option) => option.sessionIds.includes(entry.sourceId))
+        ?? options.find((option) => samePath(option.path, byId[entry.sourceId]?.cwd));
+      if (!workspace) {
+        keep.push(entry);
+        continue;
+      }
+      if (byId[entry.sourceId]?.origin === 'subagent') continue;
+      const assignments = store.assignmentsOf(workspace.workspaceId) ?? {};
+      const known = new Set((store.topicsOf(workspace.workspaceId) ?? []).map((topic) => topic.id));
+      // The same derivation the tree and the composer chip use, so a legacy fork that follows
+      // its own source's chain hands its child the group it is actually rendered in.
+      const topicId = topicOfSession({ id: entry.sourceId, byId, assignments, topicIds: known });
+      fileForkedSession(entry.childId, workspace.workspaceId, topicId);
+    }
+    forkQueueRef.current = keep;
+  }, [forkEpoch, list, options, state.workspaces, store]);
+
+  /**
    * New-session filing. Two paths share one watcher so a blank is claimed exactly once:
    *
    * - an explicit "new session in this topic" arms `pendingRef`, and that topic wins;
@@ -628,8 +705,14 @@ export function OverlayPanel({ actions, schedules }) {
    *   filtered to a topic, in which case it joins the topic being looked at.
    *
    * A forked child is the one non-blank arrival with a rule of its own: it joins the group its
-   * source is showing in. The row menu files its own fork immediately; the watcher below covers
-   * the stock fork shortcut, a branch made from the chat view, and a fork another window made.
+   * source is showing in. The row menu files its own fork immediately, and the observed fork
+   * command above covers the stock shortcut, a branch made from the chat view and a fork another
+   * window made — whatever the child's own summary carries.
+   *
+   * The `parentId` loop below is the **legacy** path: DSH 0.2.1-rc.3 stopped recording a fork's
+   * source, so it can only fire for artifacts written by an older host (or an older build of this
+   * panel that still read the lineage). It stays because those children render under an inherited
+   * group in the tree, and deleting the loop would make the retained lineage read-only.
    *
    * This used to file every implicit blank into the workspace's most recently *created* topic:
    * clicking 新会话 dropped the row into a group the user was not looking at (and, before new
@@ -655,11 +738,9 @@ export function OverlayPanel({ actions, schedules }) {
     }
 
     const fresh = ids.filter((id) => !auto.seen.has(id));
-    // A user fork carries `parentId` (the host stamps the source onto the child) but is not a
-    // subagent, and the host attached it to the source's workspace. It arrives with no topic
-    // assignment, so without this it lands in the default group while its source sits in a
-    // topic. Checked before the armed-topic branch so an arm waiting for a blank cannot delay
-    // a fork's filing.
+    // Legacy lineage only (see the block comment): a host that still stamps the source onto the
+    // child, so the child arrives with no topic assignment of its own. Checked before the
+    // armed-topic branch so an arm waiting for a blank cannot delay a fork's filing.
     for (const id of fresh) {
       const child = byId[id];
       if (!child?.parentId || child.origin === 'subagent' || auto.busy.has(id)) continue;
@@ -1649,8 +1730,10 @@ export function OverlayPanel({ actions, schedules }) {
             try {
               const childId = await actions.forkSession(row.id);
               if (!childId) return;
-              // The host attaches the child to the source's workspace but knows nothing about
-              // the topic sidecar; copy the group the source row is showing in.
+              // The observed fork command usually filed the child already (`fileForkedSession`
+              // then sees it busy or assigned and returns). This call is the fallback for a host
+              // whose `sessions.fork` could not be observed, and it files the group the source
+              // row is showing in either way.
               fileForkedSession(childId, row.workspaceId, row.topicId);
               actions.openSession(childId);
             } catch (error) {

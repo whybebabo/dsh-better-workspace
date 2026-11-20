@@ -317,6 +317,11 @@ function aggregateMembers(ids, { byId, archived, current, statuses }) {
  * default bucket between the host publishing it and the panel's own assignment landing. Only
  * user forks reach a row (subagents are filtered out), and the chain is walked with a guard.
  *
+ * The chain reads `parentId`, which DSH 0.2.1-rc.3 no longer sets on an ordinary fork (upstream
+ * made forks independent of their source). It therefore only speaks for legacy artifacts and
+ * older hosts; a current fork is placed by the panel's own observed fork command
+ * (`client/fork-hook.js`), which writes the assignment before the row renders.
+ *
  * Exported because the panel must derive "which group is this session in" the same way in every
  * surface: the tree, the composer chip, the group counts and the attach picker. They used to
  * read the raw assignment map, which made a child render under its source while the chip named
